@@ -1,9 +1,9 @@
 {
-  "name": "@rljson/template-project",
+  "name": "@rljson/mongo-agent",
   "version": "0.0.18",
-  "description": "Rljson template-project description",
-  "homepage": "https://github.com/rljson/template-project",
-  "bugs": "https://github.com/rljson/template-project/issues",
+  "description": "Rljson mongo-agent description",
+  "homepage": "https://github.com/rljson/mongo-agent",
+  "bugs": "https://github.com/rljson/mongo-agent/issues",
   "private": false,
   "license": "MIT",
   "engines": {
@@ -11,9 +11,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rljson/template-project.git"
+    "url": "git+https://github.com/rljson/mongo-agent.git"
   },
-  "main": "dist/template-project.js",
+  "main": "dist/mongo-agent.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"
@@ -24,7 +24,7 @@
     "test": "pnpx vitest run --coverage && pnpm run lint",
     "prebuild": "npm run test",
     "prepublishOnly": "npm run build",
-    "lint": "pnpx eslint",
+    "lint": "pnpm exec eslint",
     "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
   },
   "devDependencies": {
