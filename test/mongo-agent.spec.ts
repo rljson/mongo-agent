@@ -6,12 +6,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { TemplateProject } from '../src/template-project';
+import { MongoAgent } from '../src/mongo-agent';
 
 
-describe('TemplateProject', () => {
+describe('MongoAgent', () => {
   it('should validate a template', () => {
-    const templateProject = TemplateProject.example;
-    expect(templateProject).toBeDefined();
+    const mongoAgent = MongoAgent.example;
+    expect(mongoAgent).toBeDefined();
   });
 });
