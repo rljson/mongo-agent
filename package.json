@@ -25,9 +25,16 @@
     "prebuild": "npm run test",
     "prepublishOnly": "npm run build",
     "lint": "pnpm exec eslint",
-    "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
+    "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test",
+    "start:agent": "tsx src/agent-server.ts",
+    "start:hub": "tsx src/hub/index.ts",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
   },
   "devDependencies": {
+    "@types/mongodb": "^4.0.7",
     "@types/node": "^24.10.0",
     "@typescript-eslint/eslint-plugin": "^8.46.3",
     "@typescript-eslint/parser": "^8.46.3",
@@ -39,6 +46,7 @@
     "globals": "^16.5.0",
     "jsdoc": "^4.0.5",
     "read-pkg": "^9.0.1",
+    "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.3",
     "vite": "^7.1.12",
@@ -51,7 +59,10 @@
   "dependencies": {
     "@rljson/hash": "^0.0.17",
     "@rljson/json": "^0.0.22",
-    "@rljson/rljson": "^0.0.66"
+    "@rljson/rljson": "^0.0.66",
+    "bson": "^7.2.0",
+    "fastify": "^5.8.2",
+    "mongodb": "^7.1.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

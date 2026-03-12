@@ -8,6 +8,21 @@ found in the LICENSE file in the root of this package.
 
 # @rljson/mongo-agent
 
+Distributed MongoDB synchronization with integrity verification and tamper detection.
+
+## Quick Start
+
+**For Contributors:**
+
+1. 📥 [Setup your environment](doc/prepare.md) - Install tools, Docker alternatives, clone repo
+2. 🚀 Start development environment: `npm run docker:up`
+3. ✅ Run tests: `npm run test`
+4. 📖 Read the [Development Workflow](doc/develop.md)
+
+**For Architecture & Design:**
+
+- [Architecture Guide](README.architecture.md) - System design, components, data model
+
 ## Users
 
 | File                                 | Purpose                     |
