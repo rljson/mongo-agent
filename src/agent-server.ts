@@ -13,12 +13,18 @@
  * - HTTP API for sync operations
  */
 
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { FastifyInstance } from 'fastify';
 import { MongoClient } from 'mongodb';
-import { syncOriginFromHub } from './sync/pull-from-hub.ts';
-import { createSuppressor, startDbChangeStream } from './watch-changes.ts';
+
 import { performStartupRecovery } from './startup-recovery.ts';
 import { getState } from './sync-state-store.ts';
+import { syncOriginFromHub } from './sync/pull-from-hub.ts';
+import { syncRljsonTreeFromHub } from './sync/rljson-hub-sync.ts';
+import {
+  applyRljsonTree, extractRljsonTree, getRljsonSyncState, RljsonTreePayload
+} from './sync/rljson-sync.ts';
+import { createSuppressor, startDbChangeStream } from './watch-changes.ts';
+
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const NODE_ID = process.env.NODE_ID || 'nodeA';
@@ -29,10 +35,9 @@ const PEERS = (process.env.PEERS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-const SYNC_INTERVAL_MS = parseInt(
-  process.env.SYNC_INTERVAL_MS || '2000',
-  10
-);
+const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS || '2000', 10);
+// Enable RLJSON mode: sync using hashes and tree structures instead of raw JSON operations
+const USE_RLJSON_SYNC = process.env.USE_RLJSON_SYNC === 'true';
 
 /**
  * Options for creating an agent app.
@@ -50,6 +55,8 @@ interface AgentAppOptions {
   hubUrl?: string;
   /** List of peer node IDs */
   peers: string[];
+  /** Use RLJSON sync mode (hash-based) instead of operation-based sync */
+  useRljsonSync?: boolean;
 }
 
 /**
@@ -58,7 +65,15 @@ interface AgentAppOptions {
  * @returns Configured Fastify instance
  */
 export function createAgentApp(options: AgentAppOptions): FastifyInstance {
-  const { logger = true, mongo, dbName, nodeId, hubUrl, peers } = options;
+  const {
+    logger = true,
+    mongo,
+    dbName,
+    nodeId,
+    hubUrl,
+    peers,
+    useRljsonSync = false,
+  } = options;
 
   const app = Fastify({ logger });
 
@@ -118,7 +133,7 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
         .toArray();
 
       return { ops };
-    }
+    },
   );
 
   /**
@@ -140,7 +155,121 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
         lastSeqApplied: state.lastSeqApplied,
         lastHashApplied: state.lastHashApplied,
       };
+    },
+  );
+
+  // =========================================================================
+  // RLJSON Sync Endpoints (Hash-based synchronization)
+  // =========================================================================
+
+  /**
+   * Get current RLJSON tree representation of this node's database.
+   * Returns tree structure with hashes instead of raw JSON data.
+   *
+   * GET /rljson/tree
+   */
+  app.get('/rljson/tree', async () => {
+    const db = mongo.db(dbName);
+
+    try {
+      const payload = await extractRljsonTree({
+        mongoDb: db,
+        nodeId,
+      });
+
+      app.log.info(
+        {
+          rootHash: payload.rootHash,
+          totalNodes: payload.totalNodes,
+          totalBlobs: payload.blobs.length,
+        },
+        'RLJSON tree extracted',
+      );
+
+      return {
+        ok: true,
+        payload,
+      };
+    } catch (error) {
+      app.log.error({ error }, 'Failed to extract RLJSON tree');
+      throw error;
     }
+  });
+
+  /**
+   * Accept and apply RLJSON tree from a peer.
+   * This replaces raw JSON sync with hash-based tree sync.
+   *
+   * POST /rljson/sync
+   */
+  app.post<{ Body: RljsonTreePayload }>('/rljson/sync', async (req, reply) => {
+    const payload = req.body;
+
+    if (!payload || !payload.rootHash) {
+      return reply.code(400).send({ error: 'Invalid payload' });
+    }
+
+    const db = mongo.db(dbName);
+
+    try {
+      const result = await applyRljsonTree({
+        mongoDb: db,
+        payload,
+      });
+
+      app.log.info(
+        {
+          origin: payload.origin,
+          rootHash: result.rootHash,
+          nodesApplied: result.nodesApplied,
+          blobsReceived: result.blobsReceived,
+        },
+        'RLJSON tree applied',
+      );
+
+      return {
+        ok: true,
+        result,
+      };
+    } catch (error) {
+      app.log.error({ error }, 'Failed to apply RLJSON tree');
+      return reply.code(500).send({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  /**
+   * Get RLJSON sync state for a specific origin.
+   * Shows last synced root hash and statistics.
+   *
+   * GET /rljson/state/:origin
+   */
+  app.get<{ Params: { origin: string } }>(
+    '/rljson/state/:origin',
+    async (req) => {
+      const db = mongo.db(dbName);
+      const state = await getRljsonSyncState(db, req.params.origin);
+
+      if (!state) {
+        return {
+          ok: true,
+          origin: req.params.origin,
+          synced: false,
+        };
+      }
+
+      return {
+        ok: true,
+        origin: req.params.origin,
+        synced: true,
+        lastRootHash: state.lastRootHash,
+        lastSyncedAt: state.lastSyncedAt,
+        totalNodes: state.totalNodes,
+        totalBlobs: state.totalBlobs,
+      };
+    },
   );
 
   /**
@@ -165,7 +294,7 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
 
     if (!resp.ok) {
       throw new Error(
-        `hub register failed: ${resp.status} ${await resp.text()}`
+        `hub register failed: ${resp.status} ${await resp.text()}`,
       );
     }
 
@@ -173,7 +302,8 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
   }
 
   /**
-   * Poll all peer nodes for new operations.
+   * Poll all peer nodes for new data.
+   * Uses either RLJSON mode (hash-based tree sync) or legacy mode (operation-based sync).
    */
   async function pollPeers(): Promise<void> {
     if (!hubUrl) {
@@ -185,22 +315,44 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
       if (peer === nodeId) continue;
 
       try {
-        await syncOriginFromHub({
-          fastify: app,
-          mongo,
-          dbName,
-          localNodeId: nodeId,
-          hubUrl,
-          peerClientId: peer,
-          origin: peer,
-        });
+        if (useRljsonSync) {
+          // RLJSON mode: Sync using hash-based tree structures
+          app.log.info(
+            { peer, mode: 'RLJSON' },
+            'Syncing from peer (RLJSON mode)',
+          );
+
+          await syncRljsonTreeFromHub({
+            fastify: app,
+            hubUrl,
+            peerClientId: peer,
+            localNodeId: nodeId,
+          });
+        } else {
+          // Legacy mode: Sync using individual operations
+          app.log.info(
+            { peer, mode: 'LEGACY' },
+            'Syncing from peer (legacy mode)',
+          );
+
+          await syncOriginFromHub({
+            fastify: app,
+            mongo,
+            dbName,
+            localNodeId: nodeId,
+            hubUrl,
+            peerClientId: peer,
+            origin: peer,
+          });
+        }
       } catch (err) {
         app.log.warn(
           {
             peer,
+            mode: useRljsonSync ? 'RLJSON' : 'LEGACY',
             message: err instanceof Error ? err.message : String(err),
           },
-          'sync poll failed'
+          'sync poll failed',
         );
       }
     }
@@ -236,14 +388,16 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
       pollPeers().catch((err) => {
         app.log.warn(
           { message: err instanceof Error ? err.message : String(err) },
-          'pollPeers interval failed'
+          'pollPeers interval failed',
         );
       });
     }, SYNC_INTERVAL_MS);
   }
 
   // Attach background tasks starter to the app
-  (app as FastifyInstance & { startBackgroundTasks?: () => Promise<void> }).startBackgroundTasks = startBackgroundTasks;
+  (
+    app as FastifyInstance & { startBackgroundTasks?: () => Promise<void> }
+  ).startBackgroundTasks = startBackgroundTasks;
 
   return app;
 }
@@ -266,13 +420,28 @@ async function main(): Promise<void> {
     nodeId: NODE_ID,
     hubUrl: HUB_URL,
     peers: PEERS,
+    useRljsonSync: USE_RLJSON_SYNC,
   });
 
   await app.listen({ host: '0.0.0.0', port: PORT });
-  app.log.info({ port: PORT, nodeId: NODE_ID }, 'agent started');
+
+  const mode = USE_RLJSON_SYNC
+    ? 'RLJSON (hash-based)'
+    : 'LEGACY (operation-based)';
+  app.log.info(
+    {
+      port: PORT,
+      nodeId: NODE_ID,
+      syncMode: mode,
+      rljsonEnabled: USE_RLJSON_SYNC,
+    },
+    'agent started',
+  );
 
   // Start background tasks
-  const startTasks = (app as FastifyInstance & { startBackgroundTasks?: () => Promise<void> }).startBackgroundTasks;
+  const startTasks = (
+    app as FastifyInstance & { startBackgroundTasks?: () => Promise<void> }
+  ).startBackgroundTasks;
   if (startTasks) {
     await startTasks();
   }

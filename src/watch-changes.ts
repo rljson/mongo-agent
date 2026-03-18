@@ -237,6 +237,9 @@ async function appendOp(
       throw e;
     }
   }
+
+  // If we exhausted all retries without returning, throw an error
+  throw new Error(`Failed to append operation after ${MAX_RETRIES} retries`);
 }
 
 /**

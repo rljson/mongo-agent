@@ -12,6 +12,16 @@ This directory contains integration and end-to-end tests that have external depe
 
 ## 📋 Test Categories
 
+### 🎯 RLJSON Integration Tests
+
+- `test-rljson-integration.sh` / `test-rljson-integration.ts` - **Complete RLJSON workflow test**
+  - Writes test data to MongoDB
+  - Scans and converts to RLJSON tree structure
+  - Verifies blob storage for document content
+  - Validates hash integrity
+  - Tests integration with @rljson/db layer
+  - Displays converted data and hashes
+
 ### 🔄 Sync Tests
 
 - `test-sync.sh` / `test-sync.js` - Basic bidirectional sync verification
@@ -55,6 +65,23 @@ docker compose ps
 ```
 
 ### Running Individual Tests
+
+**RLJSON Integration Test (recommended starting point):**
+
+```bash
+cd test/e2e
+./test-rljson-integration.sh
+# OR run directly with tsx:
+npx tsx test/e2e/test-rljson-integration.ts
+```
+
+This test demonstrates the complete RLJSON integration and outputs:
+
+- Tree structure with hashes
+- Blob storage verification
+- Sample converted data
+- Hash integrity checks
+- @rljson/db integration
 
 **Shell-based tests (from e2e directory):**
 
