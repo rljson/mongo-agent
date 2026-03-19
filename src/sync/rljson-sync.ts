@@ -200,6 +200,9 @@ export async function applyRljsonTree(
       throw new Error(`Root node not found: ${payload.rootHash}`);
     }
 
+    // Track which documents should exist (for deletion detection)
+    const expectedDocsByCollection = new Map<string, Set<any>>();
+
     // Apply tree structure by reconstructing documents
     let nodesApplied = 0;
     const documentsCreated = await applyTreeNode(
@@ -207,8 +210,30 @@ export async function applyRljsonTree(
       rootNode,
       treeMap,
       bs,
+      expectedDocsByCollection,
     );
     nodesApplied++;
+
+    // Delete documents that don't exist in the payload (were deleted in source)
+    let deletedCount = 0;
+    for (const [collectionName, expectedIds] of expectedDocsByCollection) {
+      const existingDocs = await mongoDb
+        .collection(collectionName)
+        .find({}, { projection: { _id: 1 } })
+        .toArray();
+
+      for (const doc of existingDocs) {
+        if (!expectedIds.has(String(doc._id))) {
+          await mongoDb.collection(collectionName).deleteOne({ _id: doc._id });
+          deletedCount++;
+        }
+      }
+    }
+
+    if (deletedCount > 0) {
+      // Optionally log deletions
+      // console.log(`Deleted ${deletedCount} documents that were removed from source`);
+    }
 
     // Save sync state
     await mongoDb.collection('rljson_sync_state').updateOne(
@@ -250,12 +275,14 @@ export async function applyRljsonTree(
  * @param node - Tree node to apply
  * @param treeMap - Map of all tree nodes
  * @param bs - Blob storage instance
+ * @param expectedDocsByCollection - Tracks which documents should exist (for deletion detection)
  */
 async function applyTreeNode(
   mongoDb: MongoDb,
   node: Tree,
   treeMap: Map<string, Tree>,
   bs: Bs,
+  expectedDocsByCollection?: Map<string, Set<any>>,
 ): Promise<number> {
   const meta = node.meta as any;
   let count = 0;
@@ -271,6 +298,14 @@ async function applyTreeNode(
     const docContent = blob.content.toString('utf-8');
     const doc = JSON.parse(docContent);
 
+    // Track expected document ID
+    if (expectedDocsByCollection) {
+      if (!expectedDocsByCollection.has(collection)) {
+        expectedDocsByCollection.set(collection, new Set());
+      }
+      expectedDocsByCollection.get(collection)!.add(String(doc._id));
+    }
+
     // Upsert document
     await mongoDb
       .collection(collection)
@@ -281,7 +316,13 @@ async function applyTreeNode(
     for (const childHash of node.children) {
       const childNode = treeMap.get(childHash);
       if (childNode) {
-        count += await applyTreeNode(mongoDb, childNode, treeMap, bs);
+        count += await applyTreeNode(
+          mongoDb,
+          childNode,
+          treeMap,
+          bs,
+          expectedDocsByCollection,
+        );
       }
     }
   } else if (meta.type === 'database' && node.children) {
@@ -289,7 +330,13 @@ async function applyTreeNode(
     for (const childHash of node.children) {
       const childNode = treeMap.get(childHash);
       if (childNode) {
-        count += await applyTreeNode(mongoDb, childNode, treeMap, bs);
+        count += await applyTreeNode(
+          mongoDb,
+          childNode,
+          treeMap,
+          bs,
+          expectedDocsByCollection,
+        );
       }
     }
   }

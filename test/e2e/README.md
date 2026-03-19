@@ -14,13 +14,36 @@ This directory contains integration and end-to-end tests that have external depe
 
 ### 🎯 RLJSON Integration Tests
 
-- `test-rljson-integration.sh` / `test-rljson-integration.ts` - **Complete RLJSON workflow test**
+- `test-rljson-integration.sh` / `test-rljson-integration.ts` - **Basic RLJSON workflow test**
   - Writes test data to MongoDB
   - Scans and converts to RLJSON tree structure
   - Verifies blob storage for document content
   - Validates hash integrity
   - Tests integration with @rljson/db layer
   - Displays converted data and hashes
+
+- `test-complete-rljson-workflow.sh` / `test-complete-rljson-workflow.ts` - **Complete end-to-end RLJSON workflow**
+  - Phase 1: Write data to MongoDB (Agent A)
+  - Phase 2: Extract with RLJSON hash chains and blob storage
+  - Phase 3: Prepare RLJSON sync payload
+  - Phase 4: Sync to Agent B using RLJSON protocol
+  - Phase 5: Verify data integrity on Agent B
+  - Phase 6: Verify hash chain consistency
+  - Proves complete RLJSON implementation works end-to-end
+
+- `test-rljson-changestream.sh` / `test-rljson-changestream.ts` - **Real-time sync with change streams**
+  - Uses real MongoDB change streams to detect changes
+  - Automatic RLJSON extraction on change detection
+  - Real-time sync to second agent
+  - Tests insert, update, and delete operations
+  - Verifies changes propagate correctly
+  - Proves real-time RLJSON sync works
+  - **Requires MongoDB replica set mode**
+
+- `test-rljson-agent-sync.sh` / `test-rljson-agent-sync.ts` - **Agent-to-agent sync test**
+  - Demonstrates hash-based synchronization between two agents
+  - Shows payload reduction vs traditional sync
+  - Verifies data integrity after sync
 
 ### 🔄 Sync Tests
 
@@ -66,13 +89,62 @@ docker compose ps
 
 ### Running Individual Tests
 
-**RLJSON Integration Test (recommended starting point):**
+**RLJSON Integration Test (basic workflow):**
 
 ```bash
 cd test/e2e
 ./test-rljson-integration.sh
 # OR run directly with tsx:
 npx tsx test/e2e/test-rljson-integration.ts
+```
+
+This test demonstrates the basic RLJSON integration and outputs:
+
+- Tree structure with hashes
+- Blob storage verification
+- Sample converted data
+- Hash integrity checks
+- @rljson/db integration
+
+**Complete RLJSON Workflow Test (comprehensive end-to-end):**
+
+```bash
+cd test/e2e
+./test-complete-rljson-workflow.sh
+# OR:
+npx tsx test/e2e/test-complete-rljson-workflow.ts
+```
+
+This test proves the entire RLJSON implementation works:
+
+- 6 phases of complete workflow
+- Agent A → Agent B synchronization
+- Hash chain validation at every step
+- Performance metrics
+- Data integrity verification
+
+**Real-Time Sync with Change Streams (production-like):**
+
+```bash
+cd test/e2e
+./test-rljson-changestream.sh
+# OR:
+npx tsx test/e2e/test-rljson-changestream.ts
+```
+
+This test demonstrates real-time synchronization:
+
+- MongoDB change streams detect changes
+- Automatic RLJSON extraction on every change
+- Real-time propagation to Agent B
+- Tests inserts, updates, and deletes
+- **Requires MongoDB replica set mode** (Docker setup includes this)
+
+**Agent-to-Agent Sync Test:**
+
+```bash
+cd test/e2e
+./test-rljson-agent-sync.sh
 ```
 
 This test demonstrates the complete RLJSON integration and outputs:
