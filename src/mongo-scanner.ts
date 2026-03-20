@@ -9,7 +9,6 @@ import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Ref } from '@rljson/rljson';
 
-
 import type { Db, Document } from 'mongodb';
 
 // Tree structure definition - simplified to match RLJSON expectations
