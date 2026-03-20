@@ -8,7 +8,9 @@
  */
 
 import { BsMem } from '@rljson/bs';
+
 import { MongoClient } from 'mongodb';
+
 import { MongoScanner } from '../../src/index.js';
 
 const MONGO_A_URI =
@@ -37,7 +39,8 @@ function formatNumber(n: number): string {
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)}KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
@@ -60,9 +63,11 @@ async function benchmark(): Promise<void> {
     // Get articles collection stats
     const count = await db.collection('articles').countDocuments({});
     const stats = await db.command({ collStats: 'articles' });
-    
+
     console.log('─'.repeat(70));
-    console.log(`${colors.cyan}${colors.bold}Collection: articles${colors.reset}`);
+    console.log(
+      `${colors.cyan}${colors.bold}Collection: articles${colors.reset}`,
+    );
     console.log('─'.repeat(70));
     console.log(`  Documents: ${formatNumber(count)}`);
     console.log(`  Size: ${formatBytes(stats.size)}`);
@@ -88,7 +93,7 @@ async function benchmark(): Promise<void> {
     }, 1000);
 
     const tree = await scanner.scan();
-    
+
     clearInterval(progressInterval);
     const extractTime = Date.now() - startTime;
 
@@ -101,7 +106,7 @@ async function benchmark(): Promise<void> {
     console.log('─'.repeat(70));
     console.log(`${colors.cyan}${colors.bold}Results${colors.reset}`);
     console.log('─'.repeat(70));
-    
+
     console.log(`  Root Hash: ${tree.rootHash}`);
     console.log(`  Total Tree Nodes: ${formatNumber(tree.trees.size)}`);
     console.log('');
@@ -170,12 +175,17 @@ async function benchmark(): Promise<void> {
     console.log(`${colors.bold}${colors.green}Summary${colors.reset}`);
     console.log('═'.repeat(70));
     console.log(`  ✓ Extracted ${formatNumber(count)} documents`);
-    console.log(`  ✓ Stored ${formatNumber(blobCount)} blobs (${formatBytes(totalBlobSize)})`);
-    console.log(`  ✓ Created ${formatNumber(tree.trees.size)} hash-chained nodes`);
-    console.log(`  ✓ Throughput: ${formatNumber(Math.round(docsPerSec))} docs/sec`);
+    console.log(
+      `  ✓ Stored ${formatNumber(blobCount)} blobs (${formatBytes(totalBlobSize)})`,
+    );
+    console.log(
+      `  ✓ Created ${formatNumber(tree.trees.size)} hash-chained nodes`,
+    );
+    console.log(
+      `  ✓ Throughput: ${formatNumber(Math.round(docsPerSec))} docs/sec`,
+    );
     console.log(`  ✓ Time: ${formatTime(extractTime)}`);
     console.log('═'.repeat(70) + '\n');
-
   } catch (err) {
     console.error(`${colors.reset}\n✗ Error:`, err);
     process.exit(1);

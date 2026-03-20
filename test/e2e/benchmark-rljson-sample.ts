@@ -8,12 +8,13 @@
  */
 
 import { BsMem } from '@rljson/bs';
+
 import { MongoClient } from 'mongodb';
+
 import { MongoScanner } from '../../src/index.js';
 
 const MONGO_A_URI =
-  process.env.MONGO_A_URI ||
-  'mongodb://localhost:27017/?directConnection=true';
+  process.env.MONGO_A_URI || 'mongodb://localhost:27017/?directConnection=true';
 
 const SAMPLE_SIZE = parseInt(process.env.SAMPLE_SIZE || '10000');
 const TEST_DB = 'syncdb_sample';
@@ -40,7 +41,8 @@ function formatNumber(n: number): string {
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)}KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
@@ -65,18 +67,23 @@ async function benchmark(): Promise<void> {
     console.log('─'.repeat(70));
     console.log(`${colors.cyan}${colors.bold}Preparing Sample${colors.reset}`);
     console.log('─'.repeat(70));
-    console.log(`${colors.blue}ℹ${colors.reset} Creating sample of ${formatNumber(SAMPLE_SIZE)} documents...`);
-    
+    console.log(
+      `${colors.blue}ℹ${colors.reset} Creating sample of ${formatNumber(SAMPLE_SIZE)} documents...`,
+    );
+
     await testDb.dropDatabase();
-    
-    const sampleResult = await sourceDb.collection('articles').aggregate([
-      { $sample: { size: SAMPLE_SIZE } },
-      { $out: { db: TEST_DB, coll: 'articles' } }
-    ]).toArray();
-    
+
+    const sampleResult = await sourceDb
+      .collection('articles')
+      .aggregate([
+        { $sample: { size: SAMPLE_SIZE } },
+        { $out: { db: TEST_DB, coll: 'articles' } },
+      ])
+      .toArray();
+
     const count = await testDb.collection('articles').countDocuments({});
     const stats = await testDb.command({ collStats: 'articles' });
-    
+
     console.log(`${colors.green}✓${colors.reset} Sample created`);
     console.log(`  Documents: ${formatNumber(count)}`);
     console.log(`  Size: ${formatBytes(stats.size)}`);
@@ -102,7 +109,7 @@ async function benchmark(): Promise<void> {
     }, 500);
 
     const tree = await scanner.scan();
-    
+
     clearInterval(progressInterval);
     const extractTime = Date.now() - startTime;
 
@@ -115,7 +122,7 @@ async function benchmark(): Promise<void> {
     console.log('─'.repeat(70));
     console.log(`${colors.cyan}${colors.bold}Results${colors.reset}`);
     console.log('─'.repeat(70));
-    
+
     console.log(`  Root Hash: ${tree.rootHash}`);
     console.log(`  Total Tree Nodes: ${formatNumber(tree.trees.size)}`);
     console.log('');
@@ -187,33 +194,44 @@ async function benchmark(): Promise<void> {
     const fullCount = 552321;
     const estimatedTime = (extractTime / count) * fullCount;
     const estimatedSize = (totalBlobSize / count) * fullCount;
-    
+
     console.log('─'.repeat(70));
-    console.log(`${colors.cyan}${colors.bold}Extrapolation to Full Dataset (552k docs)${colors.reset}`);
+    console.log(
+      `${colors.cyan}${colors.bold}Extrapolation to Full Dataset (552k docs)${colors.reset}`,
+    );
     console.log('─'.repeat(70));
     console.log(`  Estimated time: ${formatTime(estimatedTime)}`);
     console.log(`  Estimated blob storage: ${formatBytes(estimatedSize)}`);
-    console.log(`  Estimated tree nodes: ${formatNumber(fullCount + 2)} (approx)`);
+    console.log(
+      `  Estimated tree nodes: ${formatNumber(fullCount + 2)} (approx)`,
+    );
     console.log('');
 
     // Summary
     console.log('═'.repeat(70));
     console.log(`${colors.bold}${colors.green}Summary${colors.reset}`);
     console.log('═'.repeat(70));
-    console.log(`  ✓ Extracted ${formatNumber(count)} documents in ${formatTime(extractTime)}`);
-    console.log(`  ✓ Throughput: ${formatNumber(Math.round(docsPerSec))} docs/sec`);
+    console.log(
+      `  ✓ Extracted ${formatNumber(count)} documents in ${formatTime(extractTime)}`,
+    );
+    console.log(
+      `  ✓ Throughput: ${formatNumber(Math.round(docsPerSec))} docs/sec`,
+    );
     console.log(`  ✓ ${timePerDoc.toFixed(3)}ms per document`);
     console.log(`  ✓ Blob storage: ${formatBytes(totalBlobSize)}`);
     console.log('');
-    console.log(`  ${colors.yellow}Note:${colors.reset} Full 552k collection would take ~${formatTime(estimatedTime)}`);
-    console.log(`  ${colors.yellow}Note:${colors.reset} And require ~${formatBytes(estimatedSize)} blob storage`);
+    console.log(
+      `  ${colors.yellow}Note:${colors.reset} Full 552k collection would take ~${formatTime(estimatedTime)}`,
+    );
+    console.log(
+      `  ${colors.yellow}Note:${colors.reset} And require ~${formatBytes(estimatedSize)} blob storage`,
+    );
     console.log('═'.repeat(70) + '\n');
 
     // Cleanup
     console.log(`${colors.blue}ℹ${colors.reset} Cleaning up test database...`);
     await testDb.dropDatabase();
     console.log(`${colors.green}✓${colors.reset} Cleanup complete\n`);
-
   } catch (err) {
     console.error(`${colors.reset}\n✗ Error:`, err);
     process.exit(1);

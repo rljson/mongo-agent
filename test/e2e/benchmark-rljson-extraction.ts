@@ -8,12 +8,14 @@
  * - Converting to RLJSON tree structure
  * - Storing documents in blob storage
  * - Creating hash chains for integrity
- * 
+ *
  * Testing with 552k+ documents from cd_articles collection
  */
 
 import { BsMem } from '@rljson/bs';
+
 import { MongoClient } from 'mongodb';
+
 import { MongoAgent } from '../../src/index.js';
 
 const MONGO_A_URI =
@@ -44,7 +46,8 @@ function formatNumber(n: number): string {
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)}KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
@@ -58,15 +61,11 @@ async function benchmark(): Promise<void> {
     );
     console.log('═'.repeat(70) + '\n');
 
-    console.log(
-      `${colors.blue}ℹ${colors.reset} Connecting to MongoDB...`,
-    );
+    console.log(`${colors.blue}ℹ${colors.reset} Connecting to MongoDB...`);
     client = new MongoClient(MONGO_A_URI);
     await client.connect();
     const db = client.db('syncdb');
-    console.log(
-      `${colors.green}✓${colors.reset} Connected to MongoDB\n`,
-    );
+    console.log(`${colors.green}✓${colors.reset} Connected to MongoDB\n`);
 
     // Get collection stats
     console.log('─'.repeat(70));
@@ -115,18 +114,14 @@ async function benchmark(): Promise<void> {
     console.log(
       `${colors.blue}ℹ${colors.reset} Creating MongoAgent with blob storage...`,
     );
-    
+
     const bs = new BsMem();
     const agent = new MongoAgent(db, bs);
     console.log(`${colors.green}✓${colors.reset} MongoAgent created\n`);
 
     // Benchmark extraction
-    console.log(
-      `${colors.blue}ℹ${colors.reset} Starting RLJSON extraction...`,
-    );
-    console.log(
-      `${colors.blue}ℹ${colors.reset} This will:`,
-    );
+    console.log(`${colors.blue}ℹ${colors.reset} Starting RLJSON extraction...`);
+    console.log(`${colors.blue}ℹ${colors.reset} This will:`);
     console.log(`  - Scan all documents from MongoDB`);
     console.log(`  - Build RLJSON tree structure with hash chains`);
     console.log(`  - Store document content in blob storage`);
@@ -141,7 +136,7 @@ async function benchmark(): Promise<void> {
     }, 1000);
 
     const tree = await agent.extract();
-    
+
     clearInterval(progressInterval);
     const extractTime = Date.now() - startExtract;
 
@@ -156,7 +151,7 @@ async function benchmark(): Promise<void> {
       `${colors.cyan}${colors.bold}Extraction Results${colors.reset}`,
     );
     console.log('─'.repeat(70));
-    
+
     console.log(`  Root Hash: ${tree.rootHash}`);
     console.log(`  Total Tree Nodes: ${formatNumber(tree.trees.size)}`);
     console.log('');
@@ -237,7 +232,7 @@ async function benchmark(): Promise<void> {
         const blob = await bs.getBlob(meta.blobId);
         const content = blob.content.toString('utf-8');
         const doc = JSON.parse(content);
-        
+
         console.log(`  ${sampleCount + 1}. Document ID: ${meta.docId}`);
         console.log(`     Collection: ${meta.collection}`);
         console.log(`     Hash: ${hash.substring(0, 16)}...`);
@@ -251,17 +246,22 @@ async function benchmark(): Promise<void> {
 
     // Summary
     console.log('═'.repeat(70));
-    console.log(
-      `${colors.bold}${colors.green}Summary${colors.reset}`,
-    );
+    console.log(`${colors.bold}${colors.green}Summary${colors.reset}`);
     console.log('═'.repeat(70));
-    console.log(`  ✓ Successfully extracted ${formatNumber(totalDocs)} documents`);
-    console.log(`  ✓ Stored ${formatNumber(blobCount)} blobs (${formatBytes(totalBlobSize)})`);
-    console.log(`  ✓ Created ${formatNumber(tree.trees.size)} hash-chained nodes`);
-    console.log(`  ✓ Throughput: ${formatNumber(Math.round(docsPerSec))} docs/sec`);
+    console.log(
+      `  ✓ Successfully extracted ${formatNumber(totalDocs)} documents`,
+    );
+    console.log(
+      `  ✓ Stored ${formatNumber(blobCount)} blobs (${formatBytes(totalBlobSize)})`,
+    );
+    console.log(
+      `  ✓ Created ${formatNumber(tree.trees.size)} hash-chained nodes`,
+    );
+    console.log(
+      `  ✓ Throughput: ${formatNumber(Math.round(docsPerSec))} docs/sec`,
+    );
     console.log(`  ✓ Performance: ${formatTime(extractTime)} total time`);
     console.log('═'.repeat(70) + '\n');
-
   } catch (err) {
     console.error(`${colors.red}✗ Error:${colors.reset}`, err);
     process.exit(1);
