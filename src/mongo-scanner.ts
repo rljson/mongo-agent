@@ -310,7 +310,7 @@ export class MongoScanner {
       type: 'document',
       database: this._db.databaseName,
       collection: collectionName,
-      docId: doc._id,
+      docId: String(doc._id),
       blobId,
       mtime: Date.now(),
     };
