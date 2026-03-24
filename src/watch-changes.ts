@@ -4,17 +4,13 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import type {
-  ChangeStream,
-  ChangeStreamDocument,
-  Db,
-} from 'mongodb';
-import { hip, hsh } from '@rljson/hash';
-import type { ComponentsTable, TableCfg } from '@rljson/rljson';
 import { Bs, BsMem } from '@rljson/bs';
+import { hip, hsh } from '@rljson/hash';
+import type { ChangeStream, ChangeStreamDocument, Db } from 'mongodb';
+
 import { computeOpHash, sha256Hex } from './hashing/integrity-hash.ts';
 
-
+import type { ComponentsTable, TableCfg } from '@rljson/rljson';
 /**
  * Logger interface compatible with Fastify/Pino
  */
@@ -121,15 +117,60 @@ export const SYNC_OPS_TABLE_CFG = hip<TableCfg>({
   columns: [
     { key: '_hash', type: 'string', titleShort: 'Hash', titleLong: 'Hash' },
     { key: '_id', type: 'string', titleShort: 'ID', titleLong: 'ID' },
-    { key: 'origin', type: 'string', titleShort: 'Origin', titleLong: 'Origin Node' },
-    { key: 'seq', type: 'number', titleShort: 'Seq', titleLong: 'Sequence Number' },
-    { key: 'operationType', type: 'string', titleShort: 'OpType', titleLong: 'Operation Type' },
-    { key: 'prevHash', type: 'string', titleShort: 'PrevHash', titleLong: 'Previous Hash' },
-    { key: 'opHash', type: 'string', titleShort: 'OpHash', titleLong: 'Operation Hash' },
-    { key: 'chainHash', type: 'string', titleShort: 'ChainHash', titleLong: 'Chain Hash' },
-    { key: 'ns', type: 'json' as any, titleShort: 'NS', titleLong: 'Namespace' },
-    { key: 'docId', type: 'string', titleShort: 'DocID', titleLong: 'Document ID' },
-    { key: 'payload', type: 'json' as any, titleShort: 'Payload', titleLong: 'Payload' },
+    {
+      key: 'origin',
+      type: 'string',
+      titleShort: 'Origin',
+      titleLong: 'Origin Node',
+    },
+    {
+      key: 'seq',
+      type: 'number',
+      titleShort: 'Seq',
+      titleLong: 'Sequence Number',
+    },
+    {
+      key: 'operationType',
+      type: 'string',
+      titleShort: 'OpType',
+      titleLong: 'Operation Type',
+    },
+    {
+      key: 'prevHash',
+      type: 'string',
+      titleShort: 'PrevHash',
+      titleLong: 'Previous Hash',
+    },
+    {
+      key: 'opHash',
+      type: 'string',
+      titleShort: 'OpHash',
+      titleLong: 'Operation Hash',
+    },
+    {
+      key: 'chainHash',
+      type: 'string',
+      titleShort: 'ChainHash',
+      titleLong: 'Chain Hash',
+    },
+    {
+      key: 'ns',
+      type: 'json' as any,
+      titleShort: 'NS',
+      titleLong: 'Namespace',
+    },
+    {
+      key: 'docId',
+      type: 'string',
+      titleShort: 'DocID',
+      titleLong: 'Document ID',
+    },
+    {
+      key: 'payload',
+      type: 'json' as any,
+      titleShort: 'Payload',
+      titleLong: 'Payload',
+    },
     { key: 'ts', type: 'string', titleShort: 'TS', titleLong: 'Timestamp' },
   ],
   isHead: false,
@@ -159,12 +200,14 @@ async function loadSyncOpsTable(
 
   const blobId = (meta as any).componentsBlobId;
   const blob = await bs.getBlob(blobId);
-  
+
   if (!blob) {
     return null;
   }
 
-  const table = JSON.parse(blob.content.toString('utf-8')) as ComponentsTable<any>;
+  const table = JSON.parse(
+    blob.content.toString('utf-8'),
+  ) as ComponentsTable<any>;
   return table;
 }
 
@@ -299,7 +342,7 @@ async function appendOp(
     try {
       // Load existing ComponentsTable or create new one
       let table = await loadSyncOpsTable(db, bs);
-      
+
       if (!table) {
         // Create new ComponentsTable
         table = hip<ComponentsTable<any>>({
@@ -366,10 +409,10 @@ export async function startDbChangeStream(
   options: StartChangeStreamOptions,
 ): Promise<ChangeStream> {
   const { db, nodeId, logger, suppressor, bs } = options;
-  
+
   // Create BlobStorage if not provided
   const blobStorage = bs || new BsMem();
-  
+
   const q = createSerialQueue();
 
   // Load resume token

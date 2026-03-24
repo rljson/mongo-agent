@@ -20,6 +20,7 @@
 ```
 
 **MongoDB Characteristics:**
+
 - 💾 Format: BSON (Binary JSON)
 - 🔧 Types: MongoDB-specific (ObjectId, nested objects)
 - 📁 Storage: MongoDB collection
@@ -101,6 +102,7 @@ Blob Storage:
 ```
 
 **RLJSON Characteristics:**
+
 - 💾 Format: Standard JSON
 - 🔧 Types: Universal (string, number, boolean, json, jsonArray)
 - 📁 Storage: Content-addressable blob storage
@@ -142,22 +144,23 @@ Blob Storage:
 
 ## 🎯 Key Differences
 
-| Aspect | MongoDB | RLJSON |
-|--------|---------|--------|
-| **Format** | BSON | JSON |
-| **Types** | MongoDB-specific | Universal |
-| **Schema** | Implicit (dynamic) | Explicit (TableCfg) |
-| **Storage** | Collection | Content-addressable blobs |
-| **Hashing** | _id only | Every row + nested objects |
-| **Portability** | MongoDB-dependent | Database-independent |
-| **Integrity** | Basic | Hash-based verification |
-| **Versioning** | Not built-in | Schema hash tracking |
+| Aspect          | MongoDB            | RLJSON                     |
+| --------------- | ------------------ | -------------------------- |
+| **Format**      | BSON               | JSON                       |
+| **Types**       | MongoDB-specific   | Universal                  |
+| **Schema**      | Implicit (dynamic) | Explicit (TableCfg)        |
+| **Storage**     | Collection         | Content-addressable blobs  |
+| **Hashing**     | \_id only          | Every row + nested objects |
+| **Portability** | MongoDB-dependent  | Database-independent       |
+| **Integrity**   | Basic              | Hash-based verification    |
+| **Versioning**  | Not built-in       | Schema hash tracking       |
 
 ---
 
 ## ✨ What RLJSON Adds
 
 ### 1. Database Independence
+
 ```javascript
 // Same RLJSON format works for any database
 MongoDB → ComponentsTable → PostgreSQL
@@ -165,13 +168,15 @@ MySQL  → ComponentsTable → SQLite
 ```
 
 ### 2. Schema Tracking
+
 ```javascript
 // Know when structure changes
-v1: TableCfg._hash = "abc123..."
-v2: TableCfg._hash = "xyz789..."  // ← New column added
+v1: TableCfg._hash = 'abc123...';
+v2: TableCfg._hash = 'xyz789...'; // ← New column added
 ```
 
 ### 3. Content Integrity
+
 ```javascript
 // Every row is hashed
 row._hash = hash(row data)
@@ -179,6 +184,7 @@ row._hash = hash(row data)
 ```
 
 ### 4. Self-Describing
+
 ```javascript
 // Data + Schema = Complete picture
 blobId → ComponentsTable (data)
@@ -186,6 +192,7 @@ blobId → ComponentsTable (data)
 ```
 
 ### 5. Sync Protocol
+
 ```javascript
 // Designed for replication
 sync_ops → ComponentsTable
@@ -210,12 +217,12 @@ const tableCfgsTable = await bs.getBlob(tableCfgsTableBlobId);
 
 // Step 3: Find matching TableCfg by hash
 const tableCfg = tableCfgsTable._data.find(
-  cfg => cfg._hash === componentsTable._tableCfg
+  (cfg) => cfg._hash === componentsTable._tableCfg,
 );
 
 // Step 4: Now you have both data and schema!
-console.log(tableCfg.columns);  // Know the structure
-console.log(componentsTable._data);  // Access the data
+console.log(tableCfg.columns); // Know the structure
+console.log(componentsTable._data); // Access the data
 
 // No MongoDB needed! Just blobs + JSON parsing.
 ```
@@ -224,30 +231,33 @@ console.log(componentsTable._data);  // Access the data
 
 ## 🚀 Benefits Summary
 
-✅ **Portability** - Move data between different databases  
-✅ **Immutability** - Content-addressed blobs never change  
-✅ **Integrity** - Hash-based verification of data  
-✅ **Versioning** - Track schema evolution via hashes  
-✅ **Independence** - No MongoDB required to read data  
-✅ **Sync-friendly** - Built for distributed replication  
-✅ **Self-describing** - Schema always travels with data  
+✅ **Portability** - Move data between different databases
+✅ **Immutability** - Content-addressed blobs never change
+✅ **Integrity** - Hash-based verification of data
+✅ **Versioning** - Track schema evolution via hashes
+✅ **Independence** - No MongoDB required to read data
+✅ **Sync-friendly** - Built for distributed replication
+✅ **Self-describing** - Schema always travels with data
 
 ---
 
 ## 🔍 Real-World Use Cases
 
 ### Use Case 1: Cross-Database Sync
+
 ```
 MongoDB (Source) → RLJSON → PostgreSQL (Target)
 ```
 
 ### Use Case 2: Data Archiving
+
 ```
 Live MongoDB → RLJSON blobs → S3 archive
 (Can restore without MongoDB)
 ```
 
 ### Use Case 3: Schema Evolution
+
 ```
 v1: books (4 columns) → hash: "abc123"
 v2: books (6 columns) → hash: "xyz789"
@@ -255,6 +265,7 @@ Track changes, maintain compatibility
 ```
 
 ### Use Case 4: Data Integrity
+
 ```
 Original: row._hash = "abc123"
 Received: row._hash = "xyz789"
@@ -266,6 +277,7 @@ Received: row._hash = "xyz789"
 ## 🎬 Conclusion
 
 RLJSON transforms MongoDB documents into a universal, portable format that:
+
 - Works with any database
 - Includes explicit schema information
 - Provides content-based integrity checking

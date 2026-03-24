@@ -8,12 +8,13 @@ import { Bs, BsMem } from '@rljson/bs';
 import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Ref } from '@rljson/rljson';
-import type { ComponentsTable, TableCfg, TablesCfgTable } from '@rljson/rljson';
-
-import type { Db } from 'mongodb';
 
 import { MongoToRljsonConverter } from './mongo-to-rljson-converter.ts';
 import { SYNC_OPS_TABLE_CFG } from './watch-changes.ts';
+
+import type { ComponentsTable, TableCfg, TablesCfgTable } from '@rljson/rljson';
+
+import type { Db } from 'mongodb';
 
 // Tree structure definition - simplified to match RLJSON expectations
 export interface Tree extends Json {
@@ -127,7 +128,7 @@ export class MongoScanner {
     this._options = options;
     this._bs = options.bs || new BsMem();
     this._converter = new MongoToRljsonConverter();
-    
+
     // Register system table configs (like sync_ops)
     this._tableConfigs.set('sync_ops', SYNC_OPS_TABLE_CFG);
   }
@@ -359,7 +360,7 @@ export class MongoScanner {
    */
   createTablesCfgTable(): TablesCfgTable {
     const tableCfgs = Array.from(this._tableConfigs.values());
-    
+
     return {
       _data: tableCfgs,
     } as TablesCfgTable;

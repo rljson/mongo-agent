@@ -1,6 +1,7 @@
 # RLJSON Structure Comparison: Our Implementation vs Reference Example
 
 ## Reference File
+
 `/Users/hermanmertke/dev/db/src/example-static/example-static.ts`
 
 ---
@@ -10,6 +11,7 @@
 ### 1. TableCfg Creation Pattern ✅
 
 **Reference:**
+
 ```typescript
 const carGeneralTableCfg = hip<TableCfg>({
   key: 'carGeneral',
@@ -28,6 +30,7 @@ const carGeneralTableCfg = hip<TableCfg>({
 ```
 
 **Our Implementation:**
+
 ```typescript
 // src/mongo-to-rljson-converter.ts
 const tableCfg = hip<TableCfg>({
@@ -48,6 +51,7 @@ const tableCfg = hip<TableCfg>({
 ### 2. ComponentsTable Creation Pattern ✅
 
 **Reference:**
+
 ```typescript
 const carGeneral = hip<ComponentsTable<CarGeneral>>({
   _tableCfg: carGeneralTableCfg._hash as string,
@@ -62,6 +66,7 @@ const carGeneral = hip<ComponentsTable<CarGeneral>>({
 ```
 
 **Our Implementation:**
+
 ```typescript
 // src/mongo-to-rljson-converter.ts
 const componentsTable = hip<ComponentsTable<any>>({
@@ -72,13 +77,14 @@ const componentsTable = hip<ComponentsTable<any>>({
 });
 ```
 
-✅ **MATCH:** Same structure, _tableCfg references the hashed TableCfg!
+✅ **MATCH:** Same structure, \_tableCfg references the hashed TableCfg!
 
 ---
 
 ### 3. Row Hashing Pattern ✅
 
 **Reference:**
+
 ```typescript
 // Each row in _data has _hash: ''
 {
@@ -90,6 +96,7 @@ const componentsTable = hip<ComponentsTable<any>>({
 ```
 
 **Our Implementation:**
+
 ```typescript
 // src/mongo-to-rljson-converter.ts
 convertDocument(doc: Document, tableCfg: TableCfg): any {
@@ -106,6 +113,7 @@ convertDocument(doc: Document, tableCfg: TableCfg): any {
 ### 4. Nested Object Hashing ✅
 
 **Reference:**
+
 ```typescript
 {
   brand: 'Volkswagen',
@@ -122,6 +130,7 @@ convertDocument(doc: Document, tableCfg: TableCfg): any {
 ```
 
 **Our Implementation:**
+
 ```typescript
 // src/mongo-to-rljson-converter.ts
 private _convertValue(value: any, columnType: string): any {
@@ -140,6 +149,7 @@ private _convertValue(value: any, columnType: string): any {
 ### 5. Column Type Mapping ✅
 
 **Reference Types:**
+
 - `string`
 - `number`
 - `boolean`
@@ -148,6 +158,7 @@ private _convertValue(value: any, columnType: string): any {
 - `jsonValue` (for mixed types)
 
 **Our Implementation:**
+
 ```typescript
 // src/mongo-to-rljson-converter.ts
 private _inferColumnType(types: Set<string>): string {
@@ -166,17 +177,19 @@ private _inferColumnType(types: Set<string>): string {
 ### 6. titleLong and titleShort ✅
 
 **Reference:**
+
 ```typescript
 { key: 'energyConsumption', type: 'number', titleLong: 'Energy Consumption', titleShort: 'Energy' }
 ```
 
 **Our Implementation:**
+
 ```typescript
 // src/mongo-to-rljson-converter.ts
 columns.push({
   key,
   type: columnType as any,
-  titleLong: this._formatTitle(key),      // "Energy Consumption"
+  titleLong: this._formatTitle(key), // "Energy Consumption"
   titleShort: this._formatTitleShort(key), // "Energy"
 });
 ```
@@ -188,6 +201,7 @@ columns.push({
 ### 7. Sync Operations as ComponentsTable ✅
 
 **Reference Pattern (for sync_ops):**
+
 ```typescript
 const syncOpsTableCfg = hip<TableCfg>({
   key: 'sync_ops',
@@ -203,12 +217,13 @@ const syncOpsTableCfg = hip<TableCfg>({
 const syncOpsTable = hip<ComponentsTable<SyncOpDoc>>({
   _tableCfg: syncOpsTableCfg._hash as string,
   _type: 'components',
-  _data: syncOps.map(op => hsh(op)),
+  _data: syncOps.map((op) => hsh(op)),
   _hash: '',
 });
 ```
 
 **Our Implementation:**
+
 ```typescript
 // src/watch-changes.ts
 const SYNC_OPS_TABLE_CFG = hip<TableCfg>({
@@ -216,7 +231,12 @@ const SYNC_OPS_TABLE_CFG = hip<TableCfg>({
   type: 'components',
   columns: [
     { key: '_hash', type: 'string', titleShort: 'Hash', titleLong: 'Hash' },
-    { key: 'seq', type: 'number', titleShort: 'Seq', titleLong: 'Sequence Number' },
+    {
+      key: 'seq',
+      type: 'number',
+      titleShort: 'Seq',
+      titleLong: 'Sequence Number',
+    },
     // ...
   ],
   isHead: false,
@@ -241,10 +261,11 @@ table = hip<ComponentsTable<any>>({
 ### 8. Hash Clearing Before Rehashing ✅
 
 **Our Implementation:**
+
 ```typescript
 // src/watch-changes.ts
 table._data.push(hashedDoc);
-table._hash = '';  // <-- Clear hash before rehashing
+table._hash = ''; // <-- Clear hash before rehashing
 table = hip(table); // <-- Rehash
 ```
 
@@ -257,6 +278,7 @@ table = hip(table); // <-- Rehash
 ### 1. Layers Structure
 
 **Reference:**
+
 ```typescript
 const carGeneralLayerData: Array<Layer> = [
   {
@@ -269,14 +291,16 @@ const carGeneralLayerData: Array<Layer> = [
     sliceIdsTableRow: carSliceId._data[0]._hash as string,
     componentsTable: 'carGeneral',
     _hash: '',
-  }
+  },
 ];
 ```
 
 **Our Implementation:**
+
 - ❌ We don't use Layers
 
 **Why:** Layers are for advanced scenarios like:
+
 - Versioning (base/delta changes)
 - Selective slicing of data
 - Complex data partitioning
@@ -288,6 +312,7 @@ For basic MongoDB sync, we don't need this. Collections map directly to Componen
 ### 2. Cakes Structure
 
 **Reference:**
+
 ```typescript
 const carCake = hip<CakesTable>({
   _tableCfg: carCakeTableCfg._hash as string,
@@ -307,9 +332,11 @@ const carCake = hip<CakesTable>({
 ```
 
 **Our Implementation:**
+
 - ❌ We don't use Cakes
 
 **Why:** Cakes are collections of Layers, used for:
+
 - Grouping related layers
 - Complex versioning scenarios
 - Multi-dimensional data structures
@@ -321,12 +348,13 @@ For MongoDB sync, we have a simpler model: direct collection → ComponentsTable
 ### 3. SliceIds Structure
 
 **Reference:**
+
 ```typescript
 const carSliceIdData: Array<SliceIds> = [
   {
     add: ['VIN1', 'VIN2', 'VIN3', 'VIN4'],
     _hash: '',
-  }
+  },
 ];
 
 const carSliceId = hip<SliceIdsTable>({
@@ -338,9 +366,11 @@ const carSliceId = hip<SliceIdsTable>({
 ```
 
 **Our Implementation:**
+
 - ❌ We don't use SliceIds
 
 **Why:** SliceIds are for:
+
 - Identity management across versions
 - Slice-based data access patterns
 - Complex data partitioning
@@ -352,6 +382,7 @@ For MongoDB sync, document `_id` is already our identity system.
 ### 4. Blockchain Chaining in Layers
 
 **Reference:**
+
 ```typescript
 const chainLayers = (layers: Layer[]): Layer[] => {
   const chainedLayers: Layer[] = [];
@@ -367,6 +398,7 @@ const chainLayers = (layers: Layer[]): Layer[] => {
 ```
 
 **Our Implementation:**
+
 - ✅ We DO blockchain chaining in sync_ops!
 
 ```typescript
@@ -390,61 +422,66 @@ const doc: SyncOpDoc = {
 
 ## 📊 Structural Comparison Summary
 
-| Feature | Reference Example | Our Implementation | Status |
-|---------|------------------|-------------------|--------|
-| **Core RLJSON** | | | |
-| TableCfg with hip() | ✅ | ✅ | ✅ MATCH |
-| ComponentsTable with hip() | ✅ | ✅ | ✅ MATCH |
-| Row hashing with hsh() | ✅ | ✅ | ✅ MATCH |
-| Nested object hashing | ✅ | ✅ | ✅ MATCH |
-| _tableCfg reference | ✅ | ✅ | ✅ MATCH |
-| _type: 'components' | ✅ | ✅ | ✅ MATCH |
-| titleLong + titleShort | ✅ | ✅ | ✅ MATCH |
-| isHead/isRoot/isShared | ✅ | ✅ | ✅ MATCH |
-| Type mapping (string/number/json) | ✅ | ✅ | ✅ MATCH |
-| **Advanced Features** | | | |
-| Layers structure | ✅ | ❌ | ⚠️ Not needed |
-| Cakes structure | ✅ | ❌ | ⚠️ Not needed |
-| SliceIds structure | ✅ | ❌ | ⚠️ Not needed |
-| Layer chaining | ✅ | ❌ | ⚠️ Not needed |
-| **Sync Specific** | | | |
-| Blockchain chaining | ✅ | ✅ | ✅ MATCH (different level) |
-| Sync ops as ComponentsTable | ✅ | ✅ | ✅ MATCH |
+| Feature                           | Reference Example | Our Implementation | Status                     |
+| --------------------------------- | ----------------- | ------------------ | -------------------------- |
+| **Core RLJSON**                   |                   |                    |                            |
+| TableCfg with hip()               | ✅                | ✅                 | ✅ MATCH                   |
+| ComponentsTable with hip()        | ✅                | ✅                 | ✅ MATCH                   |
+| Row hashing with hsh()            | ✅                | ✅                 | ✅ MATCH                   |
+| Nested object hashing             | ✅                | ✅                 | ✅ MATCH                   |
+| \_tableCfg reference              | ✅                | ✅                 | ✅ MATCH                   |
+| \_type: 'components'              | ✅                | ✅                 | ✅ MATCH                   |
+| titleLong + titleShort            | ✅                | ✅                 | ✅ MATCH                   |
+| isHead/isRoot/isShared            | ✅                | ✅                 | ✅ MATCH                   |
+| Type mapping (string/number/json) | ✅                | ✅                 | ✅ MATCH                   |
+| **Advanced Features**             |                   |                    |                            |
+| Layers structure                  | ✅                | ❌                 | ⚠️ Not needed              |
+| Cakes structure                   | ✅                | ❌                 | ⚠️ Not needed              |
+| SliceIds structure                | ✅                | ❌                 | ⚠️ Not needed              |
+| Layer chaining                    | ✅                | ❌                 | ⚠️ Not needed              |
+| **Sync Specific**                 |                   |                    |                            |
+| Blockchain chaining               | ✅                | ✅                 | ✅ MATCH (different level) |
+| Sync ops as ComponentsTable       | ✅                | ✅                 | ✅ MATCH                   |
 
 ---
 
-## ✅ Conclusion: We Have the CORRECT Structure!
+## ✅ Conclusion: We Have the CORRECT Structure
 
-### What We Match:
+### What We Match
+
 1. ✅ **TableCfg creation** - Identical pattern
 2. ✅ **ComponentsTable creation** - Identical pattern
-3. ✅ **Row hashing** - Each row has _hash, properly hashed with hsh()
+3. ✅ **Row hashing** - Each row has \_hash, properly hashed with hsh()
 4. ✅ **Nested object hashing** - Objects/arrays are hashed
 5. ✅ **Column schema** - Proper titleLong/titleShort, correct types
-6. ✅ **_tableCfg reference** - ComponentsTable references TableCfg hash
+6. ✅ **\_tableCfg reference** - ComponentsTable references TableCfg hash
 7. ✅ **Blockchain chaining** - In sync_ops (prevHash → chainHash)
 8. ✅ **Type system** - string, number, boolean, json, jsonArray
 
-### What We Don't Use (and Don't Need):
+### What We Don't Use (and Don't Need)
+
 - ⚠️ **Layers** - Advanced versioning feature
 - ⚠️ **Cakes** - Layer grouping feature
 - ⚠️ **SliceIds** - Advanced identity management
 
 These are advanced RLJSON features for complex scenarios like:
+
 - Multi-version data management
 - Selective data slicing
 - Complex partitioning strategies
 
 For MongoDB sync, our simpler model is appropriate:
+
 - MongoDB Collection → RLJSON ComponentsTable (direct mapping)
 - Sync operations → ComponentsTable with blockchain chaining
-- Document _id → Row identity
+- Document \_id → Row identity
 
 ---
 
 ## 🎯 Architecture Alignment
 
 **Reference Pattern:**
+
 ```
 SliceIds → Layers → Cakes → ComponentsTables
    ↓         ↓        ↓           ↓
@@ -452,6 +489,7 @@ Identity  Versioning  Grouping   Data
 ```
 
 **Our Pattern:**
+
 ```
 MongoDB Collection → ComponentsTable
          ↓                 ↓
@@ -493,6 +531,7 @@ Sync Operations → ComponentsTable (with blockchain)
 **YES, we have the same structure for types and architecture!**
 
 Our implementation correctly follows RLJSON patterns for:
+
 - ✅ TableCfg structure and creation
 - ✅ ComponentsTable structure and creation
 - ✅ Row-level hashing

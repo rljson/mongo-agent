@@ -4,10 +4,10 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MongoClient, ObjectId } from 'mongodb';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
 import { MongoToRljsonConverter } from '../src/mongo-to-rljson-converter';
-import type { ComponentsTable, TableCfg } from '@rljson/rljson';
 
 describe('MongoToRljsonConverter', () => {
   let client: MongoClient;
@@ -15,7 +15,8 @@ describe('MongoToRljsonConverter', () => {
 
   beforeAll(async () => {
     const mongoUri =
-      process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
+      process.env.MONGO_URI ||
+      'mongodb://localhost:27017/?directConnection=true';
     client = new MongoClient(mongoUri);
     await client.connect();
     converter = new MongoToRljsonConverter();

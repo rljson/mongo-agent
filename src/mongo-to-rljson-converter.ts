@@ -4,9 +4,10 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import type { Collection, Document } from 'mongodb';
 import { hip, hsh } from '@rljson/hash';
-import type { ComponentsTable, TableCfg, ColumnCfg } from '@rljson/rljson';
+import type { Collection, Document } from 'mongodb';
+
+import type { ColumnCfg, ComponentsTable, TableCfg } from '@rljson/rljson';
 
 /**
  * MongoDB to RLJSON Component Converter
@@ -199,9 +200,7 @@ export class MongoToRljsonConverter {
    */
   private _inferColumnType(types: Set<string>): string {
     // Remove null from consideration
-    const nonNullTypes = new Set(
-      Array.from(types).filter((t) => t !== 'null'),
-    );
+    const nonNullTypes = new Set(Array.from(types).filter((t) => t !== 'null'));
 
     if (nonNullTypes.size === 0) return 'string'; // All null, default to string
     if (nonNullTypes.size === 1) {
