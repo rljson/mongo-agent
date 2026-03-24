@@ -79,7 +79,7 @@ describe('MongoScanner', () => {
       const tree = await scanner.scan();
       
       expect(tree.rootHash).toBeDefined();
-      expect(tree.trees.size).toBeGreaterThanOrEqual(3); // database + collection + document
+      expect(tree.trees.size).toBe(2); // database + collection (no per-document nodes)
       
       // Verify root node
       const rootNode = tree.trees.get(tree.rootHash);
@@ -101,7 +101,7 @@ describe('MongoScanner', () => {
       const scanner = new MongoScanner(mongoDb, { bs });
       const tree = await scanner.scan();
       
-      expect(tree.trees.size).toBeGreaterThanOrEqual(7); // db + 2 collections + 4 documents
+      expect(tree.trees.size).toBe(3); // db + 2 collections (no per-document nodes)
     });
 
     it('should ignore specified collections', async () => {
@@ -154,29 +154,36 @@ describe('MongoScanner', () => {
       expect(likesNode).toBeUndefined();
     });
 
-    it('should store documents as blobs', async () => {
+    it('should store documents as ComponentsTable blobs', async () => {
       await mongoDb.collection('users').insertOne({ _id: 'user1', name: 'Alice', email: 'alice@example.com' });
       
       const scanner = new MongoScanner(mongoDb, { bs });
       const tree = await scanner.scan();
       
-      // Find document node
+      // Find collection node (not document node - documents are in ComponentsTable)
       const nodes = Array.from(tree.trees.values());
-      const docNode = nodes.find(n => (n.meta as any)?.type === 'document');
+      const collNode = nodes.find(n => (n.meta as any)?.type === 'collection');
       
-      expect(docNode).toBeDefined();
-      expect((docNode?.meta as any).blobId).toBeDefined();
+      expect(collNode).toBeDefined();
+      expect((collNode?.meta as any).componentsBlobId).toBeDefined();
+      expect((collNode?.meta as any).tableCfgHash).toBeDefined();
       
-      // Verify blob exists in scanner's blob storage
-      const blobId = (docNode?.meta as any).blobId;
-      const blob = await scanner.bs.getBlob(blobId);
-      expect(blob).toBeDefined();
+      // Verify ComponentsTable blob exists
+      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
+      const componentsTable = await scanner.getComponentsTable(componentsBlobId);
+      expect(componentsTable).toBeDefined();
       
-      // Verify blob content
-      const content = blob.content.toString('utf-8');
-      const doc = JSON.parse(content);
-      expect(doc._id).toBe('user1');
-      expect(doc.name).toBe('Alice');
+      // Verify ComponentsTable structure
+      expect(componentsTable._type).toBe('components');
+      expect(componentsTable._tableCfg).toBe((collNode?.meta as any).tableCfgHash);
+      expect(componentsTable._data.length).toBe(1);
+      
+      // Verify document data in ComponentsTable
+      const row = componentsTable._data[0];
+      expect(row._id).toBe('user1');
+      expect(row.name).toBe('Alice');
+      expect(row.email).toBe('alice@example.com');
+      expect(row._hash).toBeDefined();
     });
 
     it('should generate unique hashes for each node', async () => {
@@ -208,17 +215,17 @@ describe('MongoScanner', () => {
       expect((dbNode?.meta as any).database).toBe(TEST_DB_NAME);
       expect((dbNode?.meta as any).mtime).toBeGreaterThan(0);
       
-      // Collection node
+      // Collection node with ComponentsTable metadata
       const collNode = nodes.find(n => (n.meta as any)?.type === 'collection');
       expect(collNode?.meta).toBeDefined();
       expect((collNode?.meta as any).collection).toBe('users');
       expect((collNode?.meta as any).docCount).toBe(1);
+      expect((collNode?.meta as any).componentsBlobId).toBeDefined();
+      expect((collNode?.meta as any).tableCfgHash).toBeDefined();
       
-      // Document node
+      // No document nodes in new structure - documents are in ComponentsTable
       const docNode = nodes.find(n => (n.meta as any)?.type === 'document');
-      expect(docNode?.meta).toBeDefined();
-      expect((docNode?.meta as any).docId).toBe('user1');
-      expect((docNode?.meta as any).blobId).toBeDefined();
+      expect(docNode).toBeUndefined();
     });
 
     it('should handle large collections', async () => {
@@ -231,10 +238,17 @@ describe('MongoScanner', () => {
       const scanner = new MongoScanner(mongoDb, { bs });
       const tree = await scanner.scan();
       
+      // No per-document nodes - all documents in one ComponentsTable
       const nodes = Array.from(tree.trees.values());
-      const docNodes = nodes.filter(n => (n.meta as any)?.type === 'document');
+      const collNode = nodes.find(n => (n.meta as any)?.type === 'collection');
       
-      expect(docNodes.length).toBe(50);
+      expect(collNode).toBeDefined();
+      expect((collNode?.meta as any).docCount).toBe(50);
+      
+      // Verify ComponentsTable has all 50 documents
+      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
+      const componentsTable = await scanner.getComponentsTable(componentsBlobId);
+      expect(componentsTable._data.length).toBe(50);
     });
 
     it('should create parent-child relationships', async () => {
@@ -252,15 +266,15 @@ describe('MongoScanner', () => {
       expect(dbNode?.children).toBeDefined();
       expect(dbNode!.children!.length).toBeGreaterThan(0);
       
-      // Collection node should be parent
+      // Collection node is now a leaf (isParent=false, no children)
       const collNode = Array.from(tree.trees.values()).find(n => (n.meta as any)?.type === 'collection');
-      expect(collNode?.isParent).toBe(true);
-      expect(collNode?.children).toBeDefined();
-      expect(collNode!.children!.length).toBe(2);
+      expect(collNode?.isParent).toBe(false);
+      expect(collNode?.children).toBeUndefined();
       
-      // Document node should not be parent
-      const docNode = Array.from(tree.trees.values()).find(n => (n.meta as any)?.type === 'document');
-      expect(docNode?.isParent).toBe(false);
+      // Verify documents are in ComponentsTable, not as individual nodes
+      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
+      const componentsTable = await scanner.getComponentsTable(componentsBlobId);
+      expect(componentsTable._data.length).toBe(2);
     });
   });
 
@@ -280,18 +294,21 @@ describe('MongoScanner', () => {
       const scanner = new MongoScanner(mongoDb, { bs });
       const tree = await scanner.scan();
       
-      const docNode = Array.from(tree.trees.values()).find(n => (n.meta as any)?.docId === 'user1');
-      expect(docNode).toBeDefined();
+      const collNode = Array.from(tree.trees.values()).find(n => (n.meta as any)?.type === 'collection');
+      expect(collNode).toBeDefined();
       
-      const blobId = (docNode?.meta as any).blobId;
-      const blob = await scanner.bs.getBlob(blobId);
-      const doc = JSON.parse(blob.content.toString('utf-8'));
+      // Get document from ComponentsTable
+      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
+      const componentsTable = await scanner.getComponentsTable(componentsBlobId);
+      const doc = componentsTable._data[0];
       
-      expect(doc.address).toEqual({
+      // Nested objects are hashed by RLJSON, so they have _hash field
+      expect(doc.address).toMatchObject({
         street: '123 Main St',
         city: 'NYC',
         country: 'USA',
       });
+      expect(doc.address._hash).toBeDefined();
       expect(doc.tags).toEqual(['admin', 'verified']);
     });
 
@@ -305,17 +322,17 @@ describe('MongoScanner', () => {
       const scanner = new MongoScanner(mongoDb, { bs });
       const tree = await scanner.scan();
       
-      const docNode = Array.from(tree.trees.values()).find(n => (n.meta as any)?.docId === 'user1');
-      const blobId = (docNode?.meta as any).blobId;
-      const blob = await scanner.bs.getBlob(blobId);
-      const doc = JSON.parse(blob.content.toString('utf-8'));
+      const collNode = Array.from(tree.trees.values()).find(n => (n.meta as any)?.type === 'collection');
+      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
+      const componentsTable = await scanner.getComponentsTable(componentsBlobId);
+      const doc = componentsTable._data[0];
       
       expect(doc.name).toBe('Alice "The Pro" O\'Brien');
       expect(doc.bio).toBe('Loves 日本語 and emojis 🎉');
     });
 
     it('should handle empty collections', async () => {
-      await mongoDb.createCollection('empty_collection');
+      await mongoDb.createCollection('empty_collection'); 
       
       const scanner = new MongoScanner(mongoDb, { bs });
       const tree = await scanner.scan();
@@ -326,7 +343,8 @@ describe('MongoScanner', () => {
       
       expect(collNode).toBeDefined();
       expect((collNode?.meta as any).docCount).toBe(0);
-      expect(collNode?.children).toEqual([]);
+      expect(collNode?.isParent).toBe(false);
+      expect(collNode?.children).toBeUndefined();
     });
   });
 });

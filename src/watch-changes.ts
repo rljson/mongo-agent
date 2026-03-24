@@ -8,9 +8,10 @@ import type {
   ChangeStream,
   ChangeStreamDocument,
   Db,
-  Document,
-  OptionalId,
 } from 'mongodb';
+import { hip, hsh } from '@rljson/hash';
+import type { ComponentsTable, TableCfg } from '@rljson/rljson';
+import { Bs, BsMem } from '@rljson/bs';
 import { computeOpHash, sha256Hex } from './hashing/integrity-hash.ts';
 
 
@@ -73,6 +74,7 @@ export interface StartChangeStreamOptions {
   nodeId: string;
   logger?: Logger;
   suppressor?: Suppressor;
+  bs?: Bs;
 }
 
 /**
@@ -108,6 +110,92 @@ export function createSuppressor(ttlMs = 30000): Suppressor {
       return m.has(keyOf(ns, id));
     },
   };
+}
+
+/**
+ * TableCfg for sync_ops ComponentsTable
+ */
+export const SYNC_OPS_TABLE_CFG = hip<TableCfg>({
+  key: 'sync_ops',
+  type: 'components',
+  columns: [
+    { key: '_hash', type: 'string', titleShort: 'Hash', titleLong: 'Hash' },
+    { key: '_id', type: 'string', titleShort: 'ID', titleLong: 'ID' },
+    { key: 'origin', type: 'string', titleShort: 'Origin', titleLong: 'Origin Node' },
+    { key: 'seq', type: 'number', titleShort: 'Seq', titleLong: 'Sequence Number' },
+    { key: 'operationType', type: 'string', titleShort: 'OpType', titleLong: 'Operation Type' },
+    { key: 'prevHash', type: 'string', titleShort: 'PrevHash', titleLong: 'Previous Hash' },
+    { key: 'opHash', type: 'string', titleShort: 'OpHash', titleLong: 'Operation Hash' },
+    { key: 'chainHash', type: 'string', titleShort: 'ChainHash', titleLong: 'Chain Hash' },
+    { key: 'ns', type: 'json' as any, titleShort: 'NS', titleLong: 'Namespace' },
+    { key: 'docId', type: 'string', titleShort: 'DocID', titleLong: 'Document ID' },
+    { key: 'payload', type: 'json' as any, titleShort: 'Payload', titleLong: 'Payload' },
+    { key: 'ts', type: 'string', titleShort: 'TS', titleLong: 'Timestamp' },
+  ],
+  isHead: false,
+  isRoot: false,
+  isShared: true,
+  _hash: '',
+});
+
+/**
+ * Loads the sync_ops ComponentsTable from blob storage
+ * @param db - Database instance
+ * @param bs - BlobStorage instance
+ * @returns ComponentsTable or null if not exists
+ */
+async function loadSyncOpsTable(
+  db: Db,
+  bs: Bs,
+): Promise<ComponentsTable<any> | null> {
+  // Load metadata from sync_state collection
+  const meta = await db
+    .collection('sync_state')
+    .findOne({ _id: 'sync_ops_meta' } as Record<string, unknown>);
+
+  if (!meta || !(meta as any).componentsBlobId) {
+    return null;
+  }
+
+  const blobId = (meta as any).componentsBlobId;
+  const blob = await bs.getBlob(blobId);
+  
+  if (!blob) {
+    return null;
+  }
+
+  const table = JSON.parse(blob.content.toString('utf-8')) as ComponentsTable<any>;
+  return table;
+}
+
+/**
+ * Saves the sync_ops ComponentsTable to blob storage
+ * @param db - Database instance
+ * @param bs - BlobStorage instance
+ * @param table - ComponentsTable to save
+ */
+async function saveSyncOpsTable(
+  db: Db,
+  bs: Bs,
+  table: ComponentsTable<any>,
+): Promise<void> {
+  // Store table as blob
+  const content = JSON.stringify(table);
+  const blobProps = await bs.setBlob(Buffer.from(content, 'utf-8'));
+
+  // Update metadata
+  await db.collection('sync_state').updateOne(
+    { _id: 'sync_ops_meta' } as Record<string, unknown>,
+    {
+      $set: {
+        componentsBlobId: blobProps.blobId,
+        tableCfgHash: SYNC_OPS_TABLE_CFG._hash,
+        rowCount: table._data.length,
+        updatedAt: new Date().toISOString(),
+      },
+    },
+    { upsert: true },
+  );
 }
 
 // Internal collections that should not be watched
@@ -164,8 +252,9 @@ function createSerialQueue(): SerialQueue {
 }
 
 /**
- * Appends an operation to sync_ops collection with retry logic
+ * Appends an operation to sync_ops ComponentsTable with retry logic
  * @param db - Database instance
+ * @param bs - BlobStorage instance
  * @param nodeId - Node identifier
  * @param op - Sync operation to append
  * @param logger - Optional logger
@@ -173,6 +262,7 @@ function createSerialQueue(): SerialQueue {
  */
 async function appendOp(
   db: Db,
+  bs: Bs,
   nodeId: string,
   op: SyncOp,
   logger?: Logger,
@@ -207,10 +297,33 @@ async function appendOp(
     };
 
     try {
-      await db
-        .collection('sync_ops')
-        .insertOne(doc as unknown as OptionalId<Document>);
+      // Load existing ComponentsTable or create new one
+      let table = await loadSyncOpsTable(db, bs);
+      
+      if (!table) {
+        // Create new ComponentsTable
+        table = hip<ComponentsTable<any>>({
+          _tableCfg: SYNC_OPS_TABLE_CFG._hash as string,
+          _type: 'components',
+          _data: [],
+          _hash: '',
+        });
+      }
 
+      // Add hashed operation to table
+      const hashedDoc = hsh(doc as any);
+      table._data.push(hashedDoc);
+
+      // Clear hash before rehashing (required for hip() to recompute)
+      table._hash = '';
+
+      // Rehash the table
+      table = hip(table);
+
+      // Save updated table
+      await saveSyncOpsTable(db, bs, table);
+
+      // Update local state (still needed for sequence tracking)
       await db.collection('sync_local').updateOne(
         { _id: 'local' } as Record<string, unknown>,
         {
@@ -225,12 +338,12 @@ async function appendOp(
 
       return doc;
     } catch (e) {
-      // Duplicate key: someone wrote this seq already -> reread local and retry
+      // Retry on conflicts
       const error = e as { code?: number; message?: string };
-      if (error?.code === 11000 && attempt < MAX_RETRIES) {
+      if (attempt < MAX_RETRIES) {
         logger?.warn?.(
           { err: error.message, attempt, nextSeq },
-          'duplicate key on sync_ops insert; retrying',
+          'error appending to sync_ops table; retrying',
         );
         continue;
       }
@@ -252,7 +365,11 @@ async function appendOp(
 export async function startDbChangeStream(
   options: StartChangeStreamOptions,
 ): Promise<ChangeStream> {
-  const { db, nodeId, logger, suppressor } = options;
+  const { db, nodeId, logger, suppressor, bs } = options;
+  
+  // Create BlobStorage if not provided
+  const blobStorage = bs || new BsMem();
+  
   const q = createSerialQueue();
 
   // Load resume token
@@ -349,8 +466,8 @@ export async function startDbChangeStream(
         ts: new Date().toISOString(),
       };
 
-      // Append operation
-      await appendOp(db, nodeId, op, logger);
+      // Append operation to ComponentsTable
+      await appendOp(db, blobStorage, nodeId, op, logger);
 
       // Store resume token after successful write
       if (change._id) {

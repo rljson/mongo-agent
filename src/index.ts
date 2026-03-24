@@ -30,6 +30,9 @@ export type {
   DocumentToBlobOptions,
 } from './mongo-blob-adapter.ts';
 
+// Converter exports
+export { MongoToRljsonConverter } from './mongo-to-rljson-converter.ts';
+
 // Example
 export { example } from './example.ts';
 

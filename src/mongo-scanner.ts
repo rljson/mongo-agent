@@ -8,8 +8,12 @@ import { Bs, BsMem } from '@rljson/bs';
 import { hip } from '@rljson/hash';
 import { Json } from '@rljson/json';
 import { Ref } from '@rljson/rljson';
+import type { ComponentsTable, TableCfg, TablesCfgTable } from '@rljson/rljson';
 
-import type { Db, Document } from 'mongodb';
+import type { Db } from 'mongodb';
+
+import { MongoToRljsonConverter } from './mongo-to-rljson-converter.ts';
+import { SYNC_OPS_TABLE_CFG } from './watch-changes.ts';
 
 // Tree structure definition - simplified to match RLJSON expectations
 export interface Tree extends Json {
@@ -46,6 +50,12 @@ export interface MongoNodeMeta extends Json {
   blobId?: string;
   /** Document ID (for documents) */
   docId?: string;
+  /** TableCfg hash (for collections using ComponentsTable) */
+  tableCfgHash?: string;
+  /** ComponentsTable blob ID (for collections) */
+  componentsBlobId?: string;
+  /** TablesCfgTable blob ID (for root database node) */
+  tableCfgsTableBlobId?: string;
 }
 
 /**
@@ -109,11 +119,17 @@ export class MongoScanner {
   private _changeCallbacks: MongoChangeCallback[] = [];
   private _options: MongoScanOptions;
   private _bs: Bs;
+  private _converter: MongoToRljsonConverter;
+  private _tableConfigs: Map<string, TableCfg> = new Map();
 
   constructor(db: Db, options: MongoScanOptions = {}) {
     this._db = db;
     this._options = options;
     this._bs = options.bs || new BsMem();
+    this._converter = new MongoToRljsonConverter();
+    
+    // Register system table configs (like sync_ops)
+    this._tableConfigs.set('sync_ops', SYNC_OPS_TABLE_CFG);
   }
 
   /**
@@ -215,11 +231,16 @@ export class MongoScanner {
       }
     }
 
-    // Create root tree (database node)
+    // Create and save TablesCfgTable (all discovered schemas)
+    const tableCfgsTable = this.createTablesCfgTable();
+    const tableCfgsTableBlobId = await this.saveTablesCfgTable(tableCfgsTable);
+
+    // Create root tree (database node) with tableCfgsTableBlobId
     const rootMeta: MongoNodeMeta = {
       name: this._db.databaseName,
       type: 'database',
       database: this._db.databaseName,
+      tableCfgsTableBlobId,
       mtime: Date.now(),
     };
 
@@ -242,7 +263,7 @@ export class MongoScanner {
   }
 
   /**
-   * Scans a single collection
+   * Scans a single collection and converts it to ComponentsTable
    * @param collectionName - Collection name
    * @param trees - Map to store tree nodes
    * @returns Collection tree node
@@ -252,31 +273,40 @@ export class MongoScanner {
     trees: Map<TreeRef, Tree>,
   ): Promise<Tree | null> {
     const collection = this._db.collection(collectionName);
-    const documents = await collection.find({}).toArray();
 
-    const documentTrees: Tree[] = [];
-
-    for (const doc of documents) {
-      const docTree = await this._scanDocument(collectionName, doc, trees);
-      if (docTree) {
-        documentTrees.push(docTree);
-      }
+    // Get or discover schema (TableCfg)
+    let tableCfg = this._tableConfigs.get(collectionName);
+    if (!tableCfg) {
+      tableCfg = await this._converter.discoverSchema(collection);
+      this._tableConfigs.set(collectionName, tableCfg);
     }
 
-    // Create collection tree node
+    // Convert entire collection to ComponentsTable
+    const componentsTable = await this._converter.convertCollection(
+      collection,
+      tableCfg,
+    );
+
+    // Store ComponentsTable as blob
+    const content = JSON.stringify(componentsTable);
+    const blobProps = await this._bs.setBlob(Buffer.from(content, 'utf-8'));
+    const componentsBlobId = blobProps.blobId;
+
+    // Create collection tree node (no per-document children!)
     const collMeta: MongoNodeMeta = {
       name: collectionName,
       type: 'collection',
       database: this._db.databaseName,
       collection: collectionName,
-      docCount: documents.length,
+      docCount: componentsTable._data.length,
+      tableCfgHash: tableCfg._hash as string,
+      componentsBlobId,
       mtime: Date.now(),
     };
 
     const collTree: Tree = hip({
       id: collectionName,
-      isParent: true,
-      children: documentTrees.map((t) => t._hash as string),
+      isParent: false,
       meta: collMeta,
       _hash: '',
     });
@@ -287,43 +317,31 @@ export class MongoScanner {
   }
 
   /**
-   * Scans a single document
-   * @param collectionName - Collection name
-   * @param doc - MongoDB document
-   * @param trees - Map to store tree nodes
-   * @returns Document tree node
+   * Retrieves a ComponentsTable from blob storage
+   * @param blobId - Blob ID of the ComponentsTable
+   * @returns ComponentsTable
    */
-  private async _scanDocument(
-    collectionName: string,
-    doc: Document,
-    trees: Map<TreeRef, Tree>,
-  ): Promise<Tree | null> {
-    // Store document content in blob storage
-    const content = JSON.stringify(doc);
-    const blobProps = await this._bs.setBlob(Buffer.from(content, 'utf-8'));
-    const blobId = blobProps.blobId;
+  async getComponentsTable(blobId: string): Promise<ComponentsTable<any>> {
+    const blob = await this._bs.getBlob(blobId);
+    const content = blob.content.toString('utf-8');
+    return JSON.parse(content) as ComponentsTable<any>;
+  }
 
-    // Create document tree node
-    const docMeta: MongoNodeMeta = {
-      name: String(doc._id),
-      type: 'document',
-      database: this._db.databaseName,
-      collection: collectionName,
-      docId: String(doc._id),
-      blobId,
-      mtime: Date.now(),
-    };
+  /**
+   * Gets the TableCfg for a collection (if it has been scanned)
+   * @param collectionName - Collection name
+   * @returns TableCfg or undefined if not scanned yet
+   */
+  getTableCfg(collectionName: string): TableCfg | undefined {
+    return this._tableConfigs.get(collectionName);
+  }
 
-    const docTree: Tree = hip({
-      id: String(doc._id),
-      isParent: false,
-      meta: docMeta,
-      _hash: '',
-    });
-
-    trees.set(docTree._hash as string, docTree);
-
-    return docTree;
+  /**
+   * Gets all discovered TableCfgs
+   * @returns Map of collection names to TableCfgs
+   */
+  getAllTableCfgs(): Map<string, TableCfg> {
+    return new Map(this._tableConfigs);
   }
 
   /**
@@ -333,5 +351,61 @@ export class MongoScanner {
   getRootTree(): Tree | null {
     if (!this._tree) return null;
     return this._tree.trees.get(this._tree.rootHash) || null;
+  }
+
+  /**
+   * Creates TablesCfgTable from discovered schemas
+   * @returns TablesCfgTable with all TableCfg objects
+   */
+  createTablesCfgTable(): TablesCfgTable {
+    const tableCfgs = Array.from(this._tableConfigs.values());
+    
+    return {
+      _data: tableCfgs,
+    } as TablesCfgTable;
+  }
+
+  /**
+   * Saves TablesCfgTable to blob storage
+   * @param tableCfgsTable - Table configuration table to save
+   * @returns Blob ID of saved TablesCfgTable
+   */
+  async saveTablesCfgTable(tableCfgsTable: TablesCfgTable): Promise<string> {
+    const content = JSON.stringify(tableCfgsTable);
+    const blobProps = await this._bs.setBlob(Buffer.from(content, 'utf-8'));
+    return blobProps.blobId;
+  }
+
+  /**
+   * Loads TablesCfgTable from blob storage
+   * @param blobId - Blob ID of the TablesCfgTable
+   * @returns TablesCfgTable
+   */
+  async loadTablesCfgTable(blobId: string): Promise<TablesCfgTable> {
+    const blob = await this._bs.getBlob(blobId);
+    const content = blob.content.toString('utf-8');
+    return JSON.parse(content) as TablesCfgTable;
+  }
+
+  /**
+   * Gets a TableCfg by its hash from a TablesCfgTable
+   * @param tableCfgsTable - TablesCfgTable to search
+   * @param hash - Hash of the TableCfg to find
+   * @returns TableCfg or undefined if not found
+   */
+  getTableCfgByHash(
+    tableCfgsTable: TablesCfgTable,
+    hash: string,
+  ): TableCfg | undefined {
+    return tableCfgsTable._data.find((cfg) => cfg._hash === hash);
+  }
+
+  /**
+   * Adds a TableCfg to the internal cache
+   * @param collectionName - Collection name
+   * @param tableCfg - TableCfg to add
+   */
+  addTableCfg(collectionName: string, tableCfg: TableCfg): void {
+    this._tableConfigs.set(collectionName, tableCfg);
   }
 }
