@@ -6,7 +6,7 @@
 
 /**
  * E2E Test: Simple State Log with RLJSON
- * 
+ *
  * Demonstrates:
  * - Simple RLJSON format: {id, hash, type, json: {prevStateHash, currentStateHash}}
  * - Captures entire DB state changes
@@ -15,9 +15,12 @@
  * - Uses existing state hash system
  */
 
+
+
 import { MongoClient } from 'mongodb';
-import { BsMem } from '@rljson/bs';
+
 import { SimpleStateLog } from '../../src/simple-state-log.ts';
+
 
 async function main() {
   console.log('='.repeat(80));
@@ -124,7 +127,7 @@ async function main() {
 
   console.log('\n✅ VALIDATION CHECKS');
   console.log('-'.repeat(80));
-  
+
   const checks = [
     { name: 'Has id field', pass: !!sampleEntry.id },
     { name: 'Has hash field', pass: !!sampleEntry.hash },
@@ -143,7 +146,7 @@ async function main() {
   });
 
   const allPassed = checks.every((c) => c.pass);
-  
+
   console.log('\n' + '='.repeat(80));
   console.log(allPassed ? '✅ ALL CHECKS PASSED' : '❌ SOME CHECKS FAILED');
   console.log('='.repeat(80));

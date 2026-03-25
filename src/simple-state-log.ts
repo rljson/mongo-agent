@@ -4,13 +4,14 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
+import { BsInterface } from '@rljson/bs';
+import { hip, hsh } from '@rljson/hash';
 import type { Db } from 'mongodb';
+
 import {
   computeStateCheckpoint,
   getLatestCheckpoint,
 } from './hashing/state-hash.ts';
-import { type BsInterface } from '@rljson/bs';
-import { hip, hsh } from '@rljson/hash';
 
 /**
  * Simple RLJSON state change entry
@@ -95,7 +96,7 @@ export class SimpleStateLog {
     // Compute hash for the entry content (json field)
     const hashedJson = hsh(entry.json);
     entry.hash = hashedJson._hash as string;
-    
+
     // Compute hash for entire entry
     hip(entry);
 

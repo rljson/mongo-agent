@@ -3,6 +3,7 @@
 ## Overview
 
 This codebase implements **both** RLJSON approaches:
+
 1. **Complex RLJSON** (Phase 1-3, for future use)
 2. **Simple State Log** (current, immediate use)
 
@@ -13,14 +14,17 @@ Both coexist and serve different purposes.
 ## 🎯 Simple State Log (Current Use)
 
 ### Purpose
+
 Track entire MongoDB database state changes over time using minimal RLJSON format.
 
 ### Files
+
 - **Implementation:** [src/simple-state-log.ts](../src/simple-state-log.ts)
 - **Visual Test:** [test/e2e/test-simple-state-visual.ts](../test/e2e/test-simple-state-visual.ts)
 - **Unit Test:** [test/e2e/test-simple-state-log.ts](../test/e2e/test-simple-state-log.ts)
 
 ### RLJSON Structure
+
 ```typescript
 {
   id: string              // Unique identifier
@@ -38,6 +42,7 @@ Track entire MongoDB database state changes over time using minimal RLJSON forma
 ```
 
 ### Example Output
+
 ```typescript
 {
   id: "change_1774434551944_ugozna",
@@ -55,6 +60,7 @@ Track entire MongoDB database state changes over time using minimal RLJSON forma
 ```
 
 ### How It Works
+
 1. **Before Change:** Capture current DB state hash
 2. **Apply Change:** Insert/update/delete documents
 3. **After Change:** Compute new DB state hash
@@ -62,14 +68,16 @@ Track entire MongoDB database state changes over time using minimal RLJSON forma
 5. **Store:** Save to MongoDB or blob storage
 
 ### Benefits
-✅ **Simple** - Only 5 fields, easy to understand  
-✅ **Fast** - Single hash represents entire DB  
-✅ **Reusable** - Uses existing state hash system  
-✅ **Flexible** - Works with any MongoDB schema  
-✅ **Comparable** - Just compare two hashes  
-✅ **Recoverable** - Can restore DB to any state  
+
+✅ **Simple** - Only 5 fields, easy to understand
+✅ **Fast** - Single hash represents entire DB
+✅ **Reusable** - Uses existing state hash system
+✅ **Flexible** - Works with any MongoDB schema
+✅ **Comparable** - Just compare two hashes
+✅ **Recoverable** - Can restore DB to any state
 
 ### Run Visual Demo
+
 ```bash
 npx tsx test/e2e/test-simple-state-visual.ts
 ```
@@ -79,9 +87,11 @@ npx tsx test/e2e/test-simple-state-visual.ts
 ## 🏗️ Complex RLJSON (Future Use)
 
 ### Purpose
+
 Full RLJSON architecture with per-collection ComponentsTables, schema discovery, and detailed document tracking.
 
 ### Files
+
 - **Converter:** [src/mongo-to-rljson-converter.ts](../src/mongo-to-rljson-converter.ts)
 - **Scanner:** [src/mongo-scanner.ts](../src/mongo-scanner.ts)
 - **Watch Changes:** [src/watch-changes.ts](../src/watch-changes.ts)
@@ -91,6 +101,7 @@ Full RLJSON architecture with per-collection ComponentsTables, schema discovery,
 - **Sync Ops Test:** [test/e2e/test-sync-ops-components.ts](../test/e2e/test-sync-ops-components.ts)
 
 ### RLJSON Structure
+
 ```typescript
 // ComponentsTable (per collection)
 {
@@ -129,6 +140,7 @@ Full RLJSON architecture with per-collection ComponentsTables, schema discovery,
 ```
 
 ### How It Works
+
 1. **Discover Schema:** Scan collection, infer types
 2. **Create TableCfg:** Define columns and types
 3. **Convert Documents:** Transform BSON → RLJSON rows
@@ -137,14 +149,16 @@ Full RLJSON architecture with per-collection ComponentsTables, schema discovery,
 6. **Track Changes:** Change stream creates ComponentsTable for sync_ops
 
 ### Benefits
-✅ **Detailed** - Per-document tracking  
-✅ **Typed** - Full schema discovery  
-✅ **Structured** - Standard RLJSON format  
-✅ **Verifiable** - Every row hashed  
-✅ **Synchronized** - Change stream integration  
-✅ **Scalable** - Handles large collections  
+
+✅ **Detailed** - Per-document tracking
+✅ **Typed** - Full schema discovery
+✅ **Structured** - Standard RLJSON format
+✅ **Verifiable** - Every row hashed
+✅ **Synchronized** - Change stream integration
+✅ **Scalable** - Handles large collections
 
 ### Run Complex Tests
+
 ```bash
 # Visual transformation demo
 npx tsx test/e2e/test-mongodb-to-rljson-visual.ts
@@ -163,30 +177,32 @@ npx tsx test/e2e/test-sync-ops-components.ts
 
 ## 📊 Comparison
 
-| Feature | Simple State Log | Complex RLJSON |
-|---------|------------------|----------------|
-| **Granularity** | Entire DB | Per document |
-| **Schema** | None needed | Auto-discovered |
-| **Structure** | 5 fields | ComponentsTable + TableCfg |
-| **Hashing** | One hash for DB | Hash per row + table |
-| **Storage** | Minimal | Detailed |
-| **Complexity** | Very simple | Comprehensive |
-| **Use Case** | State comparison | Full sync & audit |
-| **Performance** | Very fast | Fast (11k docs/sec) |
-| **Setup** | Immediate | Requires schema scan |
+| Feature         | Simple State Log | Complex RLJSON             |
+| --------------- | ---------------- | -------------------------- |
+| **Granularity** | Entire DB        | Per document               |
+| **Schema**      | None needed      | Auto-discovered            |
+| **Structure**   | 5 fields         | ComponentsTable + TableCfg |
+| **Hashing**     | One hash for DB  | Hash per row + table       |
+| **Storage**     | Minimal          | Detailed                   |
+| **Complexity**  | Very simple      | Comprehensive              |
+| **Use Case**    | State comparison | Full sync & audit          |
+| **Performance** | Very fast        | Fast (11k docs/sec)        |
+| **Setup**       | Immediate        | Requires schema scan       |
 
 ---
 
 ## 🚀 When to Use Which
 
-### Use Simple State Log When:
+### Use Simple State Log When
+
 - Need to track "did DB change?"
 - Want fast state comparison
 - Need to restore DB to previous state
 - Don't need per-document details
 - Want minimal overhead
 
-### Use Complex RLJSON When:
+### Use Complex RLJSON When
+
 - Need per-document tracking
 - Want full sync capabilities
 - Need audit trail of changes
@@ -199,12 +215,14 @@ npx tsx test/e2e/test-sync-ops-components.ts
 ## 🔄 Migration Path
 
 ### Current (March 2026)
+
 ```
 Simple State Log → Immediate use
 Complex RLJSON → Ready for future
 ```
 
 ### Future Phases
+
 ```
 Phase 4: Integrate simple state log with complex RLJSON
 Phase 5: Use state hashes as checkpoints for ComponentsTables
@@ -216,6 +234,7 @@ Phase 6: Hybrid approach - state log for tracking, ComponentsTables for details
 ## 💡 Key Insight
 
 Both implementations use the **same underlying hashing** from `@rljson/hash`:
+
 - `hsh(obj)` - Computes hash for object, sets `_hash` field
 - `hip(obj)` - "Hash in place" - modifies and returns object with `_hash`
 
@@ -237,12 +256,14 @@ This consistency ensures both systems are compatible and can be integrated later
 ## ✅ Status
 
 ### Simple State Log
+
 - ✅ Implementation complete
 - ✅ Visual test passing (12/12 checks)
 - ✅ Unit test passing
 - ✅ Ready for production use
 
 ### Complex RLJSON
+
 - ✅ Phase 1: MongoToRljsonConverter (complete)
 - ✅ Phase 2: MongoScanner with ComponentsTable (complete)
 - ✅ Phase 3: watch-changes with ComponentsTable (complete)
@@ -255,6 +276,7 @@ This consistency ensures both systems are compatible and can be integrated later
 ## 🎉 Result
 
 You now have **TWO working RLJSON systems**:
+
 1. Simple & fast for immediate needs
 2. Complex & detailed for future requirements
 

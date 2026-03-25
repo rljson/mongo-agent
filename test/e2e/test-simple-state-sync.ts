@@ -6,7 +6,7 @@
 
 /**
  * E2E Test: Simple State Log - Cross-Instance Sync
- * 
+ *
  * Tests:
  * - Sync data from MongoDB A → MongoDB B
  * - Verify state hashes match after sync
@@ -14,9 +14,10 @@
  * - Verify state log can track sync operations
  */
 
-import { MongoClient, type Db } from 'mongodb';
-import { SimpleStateLog } from '../../src/simple-state-log.ts';
+import { Db, MongoClient } from 'mongodb';
+
 import { computeStateCheckpoint } from '../../src/hashing/state-hash.ts';
+import { SimpleStateLog } from '../../src/simple-state-log.ts';
 
 const MONGO_A_URI = 'mongodb://localhost:27017/?directConnection=true';
 const MONGO_B_URI = 'mongodb://localhost:27018/?directConnection=true';
@@ -60,7 +61,10 @@ async function syncCollection(
   return docs.length;
 }
 
-async function syncAllCollections(sourceDb: Db, targetDb: Db): Promise<Map<string, number>> {
+async function syncAllCollections(
+  sourceDb: Db,
+  targetDb: Db,
+): Promise<Map<string, number>> {
   const collections = await sourceDb.listCollections().toArray();
   const syncedCounts = new Map<string, number>();
 
@@ -71,7 +75,11 @@ async function syncAllCollections(sourceDb: Db, targetDb: Db): Promise<Map<strin
     if (collName.startsWith('system.')) continue;
 
     // Skip internal collections
-    if (['state_checkpoints', 'state_merkle', 'state_changelog'].includes(collName)) {
+    if (
+      ['state_checkpoints', 'state_merkle', 'state_changelog'].includes(
+        collName,
+      )
+    ) {
       continue;
     }
 
@@ -83,11 +91,21 @@ async function syncAllCollections(sourceDb: Db, targetDb: Db): Promise<Map<strin
 }
 
 async function main() {
-  console.log('\n╔════════════════════════════════════════════════════════════════════════════╗');
-  console.log('║              SIMPLE STATE LOG - CROSS-INSTANCE SYNC TEST                  ║');
-  console.log('║                                                                            ║');
-  console.log('║  Tests: State hash consistency across MongoDB instances                   ║');
-  console.log('╚════════════════════════════════════════════════════════════════════════════╝');
+  console.log(
+    '\n╔════════════════════════════════════════════════════════════════════════════╗',
+  );
+  console.log(
+    '║              SIMPLE STATE LOG - CROSS-INSTANCE SYNC TEST                  ║',
+  );
+  console.log(
+    '║                                                                            ║',
+  );
+  console.log(
+    '║  Tests: State hash consistency across MongoDB instances                   ║',
+  );
+  console.log(
+    '╚════════════════════════════════════════════════════════════════════════════╝',
+  );
 
   const clientA = await MongoClient.connect(MONGO_A_URI);
   const clientB = await MongoClient.connect(MONGO_B_URI);
@@ -113,7 +131,7 @@ async function main() {
     await stateLogA.initialize();
 
     console.log('\n🔵 Inserting data on Instance A...');
-    
+
     // Insert users
     await dbA.collection('users').insertMany([
       { _id: 1, name: 'Alice', email: 'alice@example.com', role: 'admin' },
@@ -139,7 +157,10 @@ async function main() {
     console.log('   ✓ Inserted 2 orders');
 
     // Capture state A initial
-    const changeA1 = await stateLogA.captureStateChange('insert', 'Initial data on Instance A');
+    const changeA1 = await stateLogA.captureStateChange(
+      'insert',
+      'Initial data on Instance A',
+    );
 
     console.log('\n📊 Instance A - Initial State:');
     printBox('RLJSON State Entry', {
@@ -158,20 +179,28 @@ async function main() {
 
     const checkpointA = await computeStateCheckpoint({
       db: dbA,
-      ignoredColls: new Set(['state_checkpoints', 'state_merkle', 'state_changelog']),
+      ignoredColls: new Set([
+        'state_checkpoints',
+        'state_merkle',
+        'state_changelog',
+      ]),
       partitionSize: 50000,
       mode: 'full',
     });
 
     console.log('\n📈 Instance A - State Checkpoint:');
     console.log(`   Database Root Hash: ${checkpointA.dbRoot}`);
-    console.log(`   Collections: ${Object.keys(checkpointA.collections).join(', ')}`);
+    console.log(
+      `   Collections: ${Object.keys(checkpointA.collections).join(', ')}`,
+    );
     console.log(`   Timestamp: ${new Date(checkpointA.ts).toISOString()}`);
 
     const collectionsA = Object.entries(checkpointA.collections);
     console.log('\n   Collection Details:');
     collectionsA.forEach(([name, info]) => {
-      console.log(`     • ${name}: ${info.partitions} partition(s), hash: ${info.root.slice(0, 16)}...`);
+      console.log(
+        `     • ${name}: ${info.partitions} partition(s), hash: ${info.root.slice(0, 16)}...`,
+      );
     });
 
     // ========================================================================
@@ -190,7 +219,10 @@ async function main() {
     const stateLogB = new SimpleStateLog(dbB);
     await stateLogB.initialize();
 
-    const changeB1 = await stateLogB.captureStateChange('sync', 'Synced from Instance A');
+    const changeB1 = await stateLogB.captureStateChange(
+      'sync',
+      'Synced from Instance A',
+    );
 
     console.log('\n📊 Instance B - After Sync:');
     printBox('RLJSON State Entry', {
@@ -209,20 +241,28 @@ async function main() {
 
     const checkpointB = await computeStateCheckpoint({
       db: dbB,
-      ignoredColls: new Set(['state_checkpoints', 'state_merkle', 'state_changelog']),
+      ignoredColls: new Set([
+        'state_checkpoints',
+        'state_merkle',
+        'state_changelog',
+      ]),
       partitionSize: 50000,
       mode: 'full',
     });
 
     console.log('\n📈 Instance B - State Checkpoint:');
     console.log(`   Database Root Hash: ${checkpointB.dbRoot}`);
-    console.log(`   Collections: ${Object.keys(checkpointB.collections).join(', ')}`);
+    console.log(
+      `   Collections: ${Object.keys(checkpointB.collections).join(', ')}`,
+    );
     console.log(`   Timestamp: ${new Date(checkpointB.ts).toISOString()}`);
 
     const collectionsB = Object.entries(checkpointB.collections);
     console.log('\n   Collection Details:');
     collectionsB.forEach(([name, info]) => {
-      console.log(`     • ${name}: ${info.partitions} partition(s), hash: ${info.root.slice(0, 16)}...`);
+      console.log(
+        `     • ${name}: ${info.partitions} partition(s), hash: ${info.root.slice(0, 16)}...`,
+      );
     });
 
     // ========================================================================
@@ -233,15 +273,29 @@ async function main() {
     const stateHashesMatch = checkpointA.dbRoot === checkpointB.dbRoot;
 
     console.log('\n🎯 State Hash Comparison:');
-    console.log('┌────────────────────────────────────────────────────────────┐');
-    console.log('│ Instance A:                                                │');
+    console.log(
+      '┌────────────────────────────────────────────────────────────┐',
+    );
+    console.log(
+      '│ Instance A:                                                │',
+    );
     console.log(`│ ${checkpointA.dbRoot}     │`);
-    console.log('│                                                            │');
-    console.log('│ Instance B:                                                │');
+    console.log(
+      '│                                                            │',
+    );
+    console.log(
+      '│ Instance B:                                                │',
+    );
     console.log(`│ ${checkpointB.dbRoot}     │`);
-    console.log('│                                                            │');
-    console.log(`│ Match: ${stateHashesMatch ? '✅ YES' : '❌ NO'}                                                  │`);
-    console.log('└────────────────────────────────────────────────────────────┘');
+    console.log(
+      '│                                                            │',
+    );
+    console.log(
+      `│ Match: ${stateHashesMatch ? '✅ YES' : '❌ NO'}                                                  │`,
+    );
+    console.log(
+      '└────────────────────────────────────────────────────────────┘',
+    );
 
     // Compare collection hashes
     console.log('\n📋 Collection Hash Comparison:');
@@ -275,16 +329,28 @@ async function main() {
     console.log('   Content hash (Instance A): ' + changeA1.hash);
     console.log('   Decoded from json field:');
     console.log('   ├─ prevStateHash:', changeA1.json.prevStateHash || 'null');
-    console.log('   ├─ currentStateHash:', changeA1.json.currentStateHash.slice(0, 48) + '...');
-    console.log('   ├─ timestamp:', new Date(changeA1.json.timestamp).toISOString());
+    console.log(
+      '   ├─ currentStateHash:',
+      changeA1.json.currentStateHash.slice(0, 48) + '...',
+    );
+    console.log(
+      '   ├─ timestamp:',
+      new Date(changeA1.json.timestamp).toISOString(),
+    );
     console.log('   ├─ operation:', changeA1.json.operation);
     console.log('   └─ description:', changeA1.json.description);
 
     console.log('\n   Content hash (Instance B): ' + changeB1.hash);
     console.log('   Decoded from json field:');
     console.log('   ├─ prevStateHash:', changeB1.json.prevStateHash || 'null');
-    console.log('   ├─ currentStateHash:', changeB1.json.currentStateHash.slice(0, 48) + '...');
-    console.log('   ├─ timestamp:', new Date(changeB1.json.timestamp).toISOString());
+    console.log(
+      '   ├─ currentStateHash:',
+      changeB1.json.currentStateHash.slice(0, 48) + '...',
+    );
+    console.log(
+      '   ├─ timestamp:',
+      new Date(changeB1.json.timestamp).toISOString(),
+    );
     console.log('   ├─ operation:', changeB1.json.operation);
     console.log('   └─ description:', changeB1.json.description);
 
@@ -294,23 +360,36 @@ async function main() {
     printSection('✔️  STEP 7: Verify Data Integrity');
 
     console.log('\n🔎 Verifying document counts match:');
-    const verifications: Array<{ collection: string; countA: number; countB: number; match: boolean }> = [];
+    const verifications: Array<{
+      collection: string;
+      countA: number;
+      countB: number;
+      match: boolean;
+    }> = [];
 
     for (const collName of ['users', 'products', 'orders']) {
       const countA = await dbA.collection(collName).countDocuments();
       const countB = await dbB.collection(collName).countDocuments();
       const match = countA === countB;
       verifications.push({ collection: collName, countA, countB, match });
-      
+
       const icon = match ? '✅' : '❌';
       console.log(`   ${icon} ${collName}: A=${countA}, B=${countB}`);
     }
 
     console.log('\n🔎 Verifying document content matches:');
     for (const collName of ['users', 'products', 'orders']) {
-      const docsA = await dbA.collection(collName).find({}).sort({ _id: 1 }).toArray();
-      const docsB = await dbB.collection(collName).find({}).sort({ _id: 1 }).toArray();
-      
+      const docsA = await dbA
+        .collection(collName)
+        .find({})
+        .sort({ _id: 1 })
+        .toArray();
+      const docsB = await dbB
+        .collection(collName)
+        .find({})
+        .sort({ _id: 1 })
+        .toArray();
+
       let contentMatch = true;
       if (docsA.length === docsB.length) {
         for (let i = 0; i < docsA.length; i++) {
@@ -322,9 +401,11 @@ async function main() {
       } else {
         contentMatch = false;
       }
-      
+
       const icon = contentMatch ? '✅' : '❌';
-      console.log(`   ${icon} ${collName}: ${contentMatch ? 'IDENTICAL' : 'DIFFERENT'}`);
+      console.log(
+        `   ${icon} ${collName}: ${contentMatch ? 'IDENTICAL' : 'DIFFERENT'}`,
+      );
     }
 
     // ========================================================================
@@ -333,13 +414,15 @@ async function main() {
     printSection('📝 STEP 8: Update Instance B and Verify Divergence');
 
     console.log('\n🔵 Making changes on Instance B...');
-    await dbB.collection('users').updateOne(
-      { _id: 1 },
-      { $set: { email: 'alice.updated@example.com' } },
-    );
+    await dbB
+      .collection('users')
+      .updateOne({ _id: 1 }, { $set: { email: 'alice.updated@example.com' } });
     console.log('   ✓ Updated user email on Instance B');
 
-    const changeB2 = await stateLogB.captureStateChange('update', 'Updated user on Instance B');
+    const changeB2 = await stateLogB.captureStateChange(
+      'update',
+      'Updated user on Instance B',
+    );
 
     console.log('\n📊 Instance B - After Update:');
     printBox('RLJSON State Entry', {
@@ -353,7 +436,11 @@ async function main() {
     // Compute new state on B
     const checkpointB2 = await computeStateCheckpoint({
       db: dbB,
-      ignoredColls: new Set(['state_checkpoints', 'state_merkle', 'state_changelog']),
+      ignoredColls: new Set([
+        'state_checkpoints',
+        'state_merkle',
+        'state_changelog',
+      ]),
       partitionSize: 50000,
       mode: 'full',
     });
@@ -361,15 +448,29 @@ async function main() {
     const stateHashesDiverged = checkpointA.dbRoot !== checkpointB2.dbRoot;
 
     console.log('\n🔍 State Hash After Update:');
-    console.log('┌────────────────────────────────────────────────────────────┐');
-    console.log('│ Instance A (unchanged):                                    │');
+    console.log(
+      '┌────────────────────────────────────────────────────────────┐',
+    );
+    console.log(
+      '│ Instance A (unchanged):                                    │',
+    );
     console.log(`│ ${checkpointA.dbRoot}     │`);
-    console.log('│                                                            │');
-    console.log('│ Instance B (updated):                                      │');
+    console.log(
+      '│                                                            │',
+    );
+    console.log(
+      '│ Instance B (updated):                                      │',
+    );
     console.log(`│ ${checkpointB2.dbRoot}     │`);
-    console.log('│                                                            │');
-    console.log(`│ Diverged: ${stateHashesDiverged ? '✅ YES (as expected)' : '❌ NO (unexpected)'}                              │`);
-    console.log('└────────────────────────────────────────────────────────────┘');
+    console.log(
+      '│                                                            │',
+    );
+    console.log(
+      `│ Diverged: ${stateHashesDiverged ? '✅ YES (as expected)' : '❌ NO (unexpected)'}                              │`,
+    );
+    console.log(
+      '└────────────────────────────────────────────────────────────┘',
+    );
 
     // ========================================================================
     // VALIDATION
@@ -380,12 +481,35 @@ async function main() {
       { name: 'Instances A and B connected', pass: true },
       { name: 'Data synced from A to B', pass: syncedCounts.size > 0 },
       { name: 'State hashes match after sync', pass: stateHashesMatch },
-      { name: 'All collection hashes match', pass: Object.values(collectionMatches).every(Boolean) },
-      { name: 'Document counts match', pass: verifications.every(v => v.match) },
-      { name: 'Content hash can be decoded', pass: !!changeA1.json.currentStateHash },
-      { name: 'RLJSON entries created on both instances', pass: !!changeA1 && !!changeB1 },
-      { name: 'State entries have all required fields', pass: !!(changeA1.id && changeA1.hash && changeA1.type && changeA1._hash) },
-      { name: 'State chain tracked correctly', pass: changeB2.json.prevStateHash === changeB1.json.currentStateHash },
+      {
+        name: 'All collection hashes match',
+        pass: Object.values(collectionMatches).every(Boolean),
+      },
+      {
+        name: 'Document counts match',
+        pass: verifications.every((v) => v.match),
+      },
+      {
+        name: 'Content hash can be decoded',
+        pass: !!changeA1.json.currentStateHash,
+      },
+      {
+        name: 'RLJSON entries created on both instances',
+        pass: !!changeA1 && !!changeB1,
+      },
+      {
+        name: 'State entries have all required fields',
+        pass: !!(
+          changeA1.id &&
+          changeA1.hash &&
+          changeA1.type &&
+          changeA1._hash
+        ),
+      },
+      {
+        name: 'State chain tracked correctly',
+        pass: changeB2.json.prevStateHash === changeB1.json.currentStateHash,
+      },
       { name: 'Update causes state divergence', pass: stateHashesDiverged },
     ];
 
@@ -403,7 +527,9 @@ async function main() {
       console.log('  ✅ ALL CHECKS PASSED - Cross-Instance Sync Verified!');
       console.log('  ');
       console.log('  Key Results:');
-      console.log('  • State hashes match after sync (data integrity confirmed)');
+      console.log(
+        '  • State hashes match after sync (data integrity confirmed)',
+      );
       console.log('  • Content hash can be decoded from RLJSON entries');
       console.log('  • State log tracks changes across both instances');
       console.log('  • Updates are detected and cause hash divergence');
@@ -411,7 +537,6 @@ async function main() {
       console.log('  ❌ SOME CHECKS FAILED');
     }
     console.log('═'.repeat(80) + '\n');
-
   } finally {
     await clientA.close();
     await clientB.close();
