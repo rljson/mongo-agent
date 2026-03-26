@@ -8,6 +8,7 @@ import type { Db, Document, ObjectId } from 'mongodb';
 import { createHash } from 'node:crypto';
 
 import { computeIntegrityHash } from './integrity-hash.ts';
+import { listDirtyForCollection, clearDirtyForCollection } from './state-dirty.ts';
 
 
 /**
@@ -148,73 +149,179 @@ export async function computeStateCheckpoint(
   for (const collName of all) {
     const coll = db.collection<DocWithHash>(collName);
 
-    // Deterministic cursor
-    const cursor = coll.find({}, { sort: { _id: 1 }, batchSize: 5000 });
+    // Check if we can use incremental mode for this collection
+    let useIncremental = mode === 'incremental';
+    let dirtyPartitions: Set<number> = new Set();
+    let cachedPartitions: MerklePartition[] = [];
 
-    let partIdx = 0;
-    let partCount = 0;
-    let partMinId: ObjectId | string | number | null = null;
-    let partMaxId: ObjectId | string | number | null = null;
+    if (useIncremental) {
+      // Get dirty status
+      const dirtyStatus = await listDirtyForCollection(db, collName);
 
-    const partRoots: string[] = [];
-    let partLines: string[] = [];
+      if (dirtyStatus.full) {
+        // Full rescan required for this collection
+        console.log(`   [${collName}] Full rescan required (dirty status: FULL)`);
+        useIncremental = false;
+      } else {
+        // Load cached partitions
+        cachedPartitions = await db
+          .collection<MerklePartition>('state_merkle')
+          .find({ coll: collName })
+          .sort({ idx: 1 })
+          .toArray();
 
-    async function flushPartition(): Promise<void> {
-      if (partCount === 0) return;
-
-      const payload = partLines.join('\n');
-      const root = sha256Hex(payload);
-
-      const metaDoc: MerklePartition = {
-        _id: `${collName}::p${partIdx}`,
-        coll: collName,
-        idx: partIdx,
-        minId: partMinId!,
-        maxId: partMaxId!,
-        count: partCount,
-        root,
-        ts,
-        updatedAt: nowIso,
-      };
-
-      await db
-        .collection<MerklePartition>('state_merkle')
-        .replaceOne({ _id: metaDoc._id }, metaDoc, { upsert: true });
-
-      partRoots.push(root);
-
-      // Next partition
-      partIdx += 1;
-      partCount = 0;
-      partMinId = null;
-      partMaxId = null;
-      partLines = [];
-    }
-
-    for await (const doc of cursor) {
-      const idStr = String(doc._id);
-      const h = docLeafHash(doc);
-
-      if (partCount === 0) partMinId = doc._id;
-      partMaxId = doc._id;
-
-      // IMPORTANT: keep order stable
-      partLines.push(`${idStr}:${h}`);
-      partCount += 1;
-
-      if (partCount >= partitionSize) {
-        await flushPartition();
+        if (cachedPartitions.length === 0) {
+          // No cache available, must do full scan
+          console.log(`   [${collName}] No cache available - full scan needed`);
+          useIncremental = false;
+        } else {
+          // Use incremental mode with these dirty partitions
+          dirtyPartitions = new Set(dirtyStatus.partitions);
+          console.log(`   [${collName}] Incremental mode: ${dirtyPartitions.size} dirty partitions out of ${cachedPartitions.length}`);
+        }
       }
     }
 
-    // Flush tail
-    await flushPartition();
+    const partRoots: string[] = [];
 
-    // Collection root from ordered partition roots
-    const collRoot = sha256Hex(partRoots.map((r, i) => `${i}:${r}`).join('\n'));
-    collections[collName] = { root: collRoot, partitions: partIdx };
+    if (useIncremental && cachedPartitions.length > 0) {
+      // INCREMENTAL MODE: Reuse cached hashes, only recompute dirty partitions
+      console.log(`   [${collName}] Using incremental mode with ${cachedPartitions.length} cached partitions`);
+      
+      for (const cached of cachedPartitions) {
+        if (dirtyPartitions.has(cached.idx)) {
+          // Recompute this dirty partition
+          console.log(`   [${collName}] Recomputing dirty partition ${cached.idx}`);
+          const cursor = coll.find(
+            { _id: { $gte: cached.minId, $lte: cached.maxId } },
+            { sort: { _id: 1 }, batchSize: 5000 }
+          );
 
-    dbPieces.push(`${collName}:${collRoot}`);
+          const partLines: string[] = [];
+          let partCount = 0;
+          let partMinId: ObjectId | string | number | null = null;
+          let partMaxId: ObjectId | string | number | null = null;
+
+          for await (const doc of cursor) {
+            const idStr = String(doc._id);
+            const h = docLeafHash(doc);
+
+            if (partCount === 0) partMinId = doc._id;
+            partMaxId = doc._id;
+
+            partLines.push(`${idStr}:${h}`);
+            partCount += 1;
+          }
+
+          if (partCount > 0) {
+            const payload = partLines.join('\n');
+            const root = sha256Hex(payload);
+
+            // Update cached partition
+            const metaDoc: MerklePartition = {
+              _id: `${collName}::p${cached.idx}`,
+              coll: collName,
+              idx: cached.idx,
+              minId: partMinId!,
+              maxId: partMaxId!,
+              count: partCount,
+              root,
+              ts,
+              updatedAt: nowIso,
+            };
+
+            await db
+              .collection<MerklePartition>('state_merkle')
+              .replaceOne({ _id: metaDoc._id }, metaDoc, { upsert: true });
+
+            partRoots.push(root);
+          } else {
+            // Partition became empty, use cached hash but mark for potential cleanup
+            partRoots.push(cached.root);
+          }
+        } else {
+          // Use cached hash - no need to scan documents!
+          partRoots.push(cached.root);
+        }
+      }
+
+      // Clear dirty markers for this collection
+      await clearDirtyForCollection(db, collName);
+
+      // Collection root from ordered partition roots
+      const collRoot = sha256Hex(partRoots.map((r, i) => `${i}:${r}`).join('\n'));
+      collections[collName] = { root: collRoot, partitions: cachedPartitions.length };
+
+      dbPieces.push(`${collName}:${collRoot}`);
+    } else {
+      // FULL MODE: Scan all documents and compute all partitions
+      // Deterministic cursor
+      const cursor = coll.find({}, { sort: { _id: 1 }, batchSize: 5000 });
+
+      let partIdx = 0;
+      let partCount = 0;
+      let partMinId: ObjectId | string | number | null = null;
+      let partMaxId: ObjectId | string | number | null = null;
+
+      let partLines: string[] = [];
+
+      async function flushPartition(): Promise<void> {
+        if (partCount === 0) return;
+
+        const payload = partLines.join('\n');
+        const root = sha256Hex(payload);
+
+        const metaDoc: MerklePartition = {
+          _id: `${collName}::p${partIdx}`,
+          coll: collName,
+          idx: partIdx,
+          minId: partMinId!,
+          maxId: partMaxId!,
+          count: partCount,
+          root,
+          ts,
+          updatedAt: nowIso,
+        };
+
+        await db
+          .collection<MerklePartition>('state_merkle')
+          .replaceOne({ _id: metaDoc._id }, metaDoc, { upsert: true });
+
+        partRoots.push(root);
+
+        // Next partition
+        partIdx += 1;
+        partCount = 0;
+        partMinId = null;
+        partMaxId = null;
+        partLines = [];
+      }
+
+      for await (const doc of cursor) {
+        const idStr = String(doc._id);
+        const h = docLeafHash(doc);
+
+        if (partCount === 0) partMinId = doc._id;
+        partMaxId = doc._id;
+
+        // IMPORTANT: keep order stable
+        partLines.push(`${idStr}:${h}`);
+        partCount += 1;
+
+        if (partCount >= partitionSize) {
+          await flushPartition();
+        }
+      }
+
+      // Flush tail
+      await flushPartition();
+
+      // Collection root from ordered partition roots
+      const collRoot = sha256Hex(partRoots.map((r, i) => `${i}:${r}`).join('\n'));
+      collections[collName] = { root: collRoot, partitions: partIdx };
+
+      dbPieces.push(`${collName}:${collRoot}`);
+    }
   }
 
   const dbRoot = sha256Hex(dbPieces.join('\n'));

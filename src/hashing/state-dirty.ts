@@ -44,7 +44,7 @@ export type DirtyDoc = DirtyPartitionDoc | DirtyFullDoc;
  * Partition metadata from state_merkle
  */
 export interface PartitionMeta {
-  partition?: number;
+  idx?: number;
   minId?: ObjectId | string | number;
   maxId?: ObjectId | string | number;
 }
@@ -113,7 +113,7 @@ async function findPartitionForId(
         minId: { $lte: docId },
         maxId: { $gte: docId },
       },
-      { projection: { partition: 1, minId: 1, maxId: 1 } }
+      { projection: { idx: 1, minId: 1, maxId: 1 } }
     );
 }
 
@@ -136,11 +136,17 @@ export async function markDirtyById(
   const { reason } = options;
 
   // If no merkle meta yet, force full scan next time
-  const meta = await findPartitionForId(db, collName, docId).catch(() => null);
+  let meta: PartitionMeta | null = null;
+  try {
+    meta = await findPartitionForId(db, collName, docId);
+  } catch (err) {
+    console.log(`[markDirtyById] ERROR finding partition for docId=${docId}: ${err}`);
+    meta = null;
+  }
 
   const dirtyAt = new Date().toISOString();
 
-  if (!meta || typeof meta.partition !== 'number') {
+  if (!meta || typeof meta.idx !== 'number') {
     // Could be: new docs in a gap / no checkpoint yet
     await db.collection<DirtyFullDoc>('state_dirty').updateOne(
       { _id: dirtyFullId(collName) },
@@ -158,8 +164,8 @@ export async function markDirtyById(
   }
 
   await db.collection<DirtyPartitionDoc>('state_dirty').updateOne(
-    { _id: dirtyPartId(collName, meta.partition) },
-    { $set: { coll: collName, partition: meta.partition, dirtyAt } },
+    { _id: dirtyPartId(collName, meta.idx) },
+    { $set: { coll: collName, partition: meta.idx, dirtyAt } },
     { upsert: true }
   );
 }
