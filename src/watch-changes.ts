@@ -9,6 +9,8 @@ import { hip, hsh } from '@rljson/hash';
 import type { ChangeStream, ChangeStreamDocument, Db } from 'mongodb';
 
 import { computeOpHash, sha256Hex } from './hashing/integrity-hash.ts';
+import { computeStateCheckpoint } from './hashing/state-hash.ts';
+import { markDirtyById } from './hashing/state-dirty.ts';
 
 import type { ComponentsTable, TableCfg } from '@rljson/rljson';
 /**
@@ -36,10 +38,19 @@ export interface SyncOp {
   operationType: string;
   docId: unknown;
   payload?: {
-    fullDocument?: unknown;
-    updateDescription?: unknown;
+    fullDocumentBlobId?: string;        // Blob reference (content hash)
+    updateDescriptionBlobId?: string;   // Blob reference (content hash)
   } | null;
   ts?: string;
+  
+  // Optional change stream metadata
+  changeStreamId?: unknown;     // MongoDB resume token (_id from change event)
+  clusterTime?: unknown;         // MongoDB cluster timestamp
+  wallTime?: string;             // MongoDB wall time (ISO string)
+  
+  // Optional state tracking (for DB synthesis)
+  prevStateHash?: string;        // State hash before this operation
+  currentStateHash?: string;     // State hash after this operation
 }
 
 /**
@@ -52,6 +63,11 @@ export interface SyncOpDoc extends SyncOp {
   prevHash: string;
   opHash: string;
   chainHash: string;
+  
+  // Change stream metadata (for resume and correlation)
+  changeStreamId?: unknown;     // MongoDB resume token (_id from change event)
+  clusterTime?: unknown;         // MongoDB cluster timestamp
+  wallTime?: string;             // MongoDB wall time (ISO string)
 }
 
 /**
@@ -71,6 +87,7 @@ export interface StartChangeStreamOptions {
   logger?: Logger;
   suppressor?: Suppressor;
   bs?: Bs;
+  trackStateHash?: boolean;  // Enable state hash tracking (slower but complete)
 }
 
 /**
@@ -169,9 +186,39 @@ export const SYNC_OPS_TABLE_CFG = hip<TableCfg>({
       key: 'payload',
       type: 'json' as any,
       titleShort: 'Payload',
-      titleLong: 'Payload',
+      titleLong: 'Payload (blob references)',
     },
     { key: 'ts', type: 'string', titleShort: 'TS', titleLong: 'Timestamp' },
+    {
+      key: 'changeStreamId',
+      type: 'json' as any,
+      titleShort: 'CSId',
+      titleLong: 'Change Stream ID',
+    },
+    {
+      key: 'clusterTime',
+      type: 'json' as any,
+      titleShort: 'ClusterT',
+      titleLong: 'Cluster Time',
+    },
+    {
+      key: 'wallTime',
+      type: 'string',
+      titleShort: 'WallT',
+      titleLong: 'Wall Time',
+    },
+    {
+      key: 'prevStateHash',
+      type: 'string',
+      titleShort: 'PrevState',
+      titleLong: 'Previous State Hash',
+    },
+    {
+      key: 'currentStateHash',
+      type: 'string',
+      titleShort: 'CurrState',
+      titleLong: 'Current State Hash',
+    },
   ],
   isHead: false,
   isRoot: false,
@@ -337,6 +384,11 @@ async function appendOp(
       docId: op.docId,
       payload: op.payload,
       ts: op.ts,
+      changeStreamId: op.changeStreamId,
+      clusterTime: op.clusterTime,
+      wallTime: op.wallTime,
+      prevStateHash: op.prevStateHash,
+      currentStateHash: op.currentStateHash,
     };
 
     try {
@@ -408,7 +460,7 @@ async function appendOp(
 export async function startDbChangeStream(
   options: StartChangeStreamOptions,
 ): Promise<ChangeStream> {
-  const { db, nodeId, logger, suppressor, bs } = options;
+  const { db, nodeId, logger, suppressor, bs, trackStateHash } = options;
 
   // Create BlobStorage if not provided
   const blobStorage = bs || new BsMem();
@@ -495,18 +547,69 @@ export async function startDbChangeStream(
       // Suppress echo-loop (from applyOp)
       if (suppressor?.has(ns as Namespace, docId)) return;
 
+      // Store fullDocument and updateDescription as blobs (RLJSON pattern)
+      let fullDocumentBlobId: string | undefined;
+      let updateDescriptionBlobId: string | undefined;
+
+      const fullDoc = (change as { fullDocument?: unknown }).fullDocument;
+      if (fullDoc) {
+        const docJson = JSON.stringify(fullDoc);
+        const blob = await blobStorage.setBlob(Buffer.from(docJson, 'utf-8'));
+        fullDocumentBlobId = blob.blobId;
+      }
+
+      const updateDesc = (change as { updateDescription?: unknown }).updateDescription;
+      if (updateDesc) {
+        const descJson = JSON.stringify(updateDesc);
+        const blob = await blobStorage.setBlob(Buffer.from(descJson, 'utf-8'));
+        updateDescriptionBlobId = blob.blobId;
+      }
+
+      // State tracking: capture state before operation
+      const prevStateHash = trackStateHash ? currentDbStateHash : undefined;
+      
+      // Mark dirty for state hash tracking
+      if (trackStateHash && ns) {
+        await markDirtyById(db, ns.coll, docId, { reason: change.operationType });
+      }
+      
+      // Compute new state hash after operation (if tracking enabled)
+      let newStateHash: string | undefined;
+      if (trackStateHash) {
+        try {
+          const newState = await computeStateCheckpoint({
+            db,
+            ignoredColls: new Set(['state_checkpoints', 'state_merkle', 'state_dirty', 'sync_ops', 'sync_state', 'sync_local', 'sync_resume']),
+            partitionSize: 50000,
+            mode: 'incremental',
+          });
+          newStateHash = newState.dbRoot;
+          currentDbStateHash = newStateHash;  // Update tracked state
+        } catch (err) {
+          logger?.warn?.('Failed to compute new state hash');
+        }
+      }
+
       const op: SyncOp = {
         ns: { db: ns.db, coll: ns.coll },
         operationType: change.operationType,
-        docId,
+        docId: typeof docId === 'object' && docId !== null ? 
+          JSON.parse(JSON.stringify(docId)) : docId,  // Serialize ObjectIds
         payload: {
-          fullDocument:
-            (change as { fullDocument?: unknown }).fullDocument ?? null,
-          updateDescription:
-            (change as { updateDescription?: unknown }).updateDescription ??
-            null,
+          fullDocumentBlobId,
+          updateDescriptionBlobId,
         },
         ts: new Date().toISOString(),
+        // Capture change stream metadata (serialize complex MongoDB objects)
+        changeStreamId: change._id ? JSON.parse(JSON.stringify(change._id)) : undefined,
+        clusterTime: (change as { clusterTime?: unknown }).clusterTime ? 
+          JSON.parse(JSON.stringify((change as { clusterTime?: unknown }).clusterTime)) : undefined,
+        wallTime: (change as { wallTime?: Date }).wallTime?.toISOString?.() ?? 
+          (typeof (change as { wallTime?: string }).wallTime === 'string' ? 
+            (change as { wallTime?: string }).wallTime : undefined),
+        // State tracking (if enabled)
+        prevStateHash,
+        currentStateHash: newStateHash,
       };
 
       // Append operation to ComponentsTable
