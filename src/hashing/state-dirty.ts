@@ -102,19 +102,17 @@ export async function ensureDirtyIndexes(db: Db): Promise<void> {
 async function findPartitionForId(
   db: Db,
   collName: string,
-  docId: ObjectId | string | number
+  docId: ObjectId | string | number,
 ): Promise<PartitionMeta | null> {
   // Needs state_merkle to exist from a previous full scan.
-  return db
-    .collection<PartitionMeta>('state_merkle')
-    .findOne(
-      {
-        coll: collName,
-        minId: { $lte: docId },
-        maxId: { $gte: docId },
-      },
-      { projection: { idx: 1, minId: 1, maxId: 1 } }
-    );
+  return db.collection<PartitionMeta>('state_merkle').findOne(
+    {
+      coll: collName,
+      minId: { $lte: docId },
+      maxId: { $gte: docId },
+    },
+    { projection: { idx: 1, minId: 1, maxId: 1 } },
+  );
 }
 
 /**
@@ -129,7 +127,7 @@ export async function markDirtyById(
   db: Db,
   collName: string | null | undefined,
   docId: ObjectId | string | number,
-  options: MarkDirtyOptions = {}
+  options: MarkDirtyOptions = {},
 ): Promise<void> {
   if (!collName) return;
 
@@ -140,7 +138,9 @@ export async function markDirtyById(
   try {
     meta = await findPartitionForId(db, collName, docId);
   } catch (err) {
-    console.log(`[markDirtyById] ERROR finding partition for docId=${docId}: ${err}`);
+    console.log(
+      `[markDirtyById] ERROR finding partition for docId=${docId}: ${err}`,
+    );
     meta = null;
   }
 
@@ -158,16 +158,18 @@ export async function markDirtyById(
           reason: reason || 'partition_not_found',
         },
       },
-      { upsert: true }
+      { upsert: true },
     );
     return;
   }
 
-  await db.collection<DirtyPartitionDoc>('state_dirty').updateOne(
-    { _id: dirtyPartId(collName, meta.idx) },
-    { $set: { coll: collName, partition: meta.idx, dirtyAt } },
-    { upsert: true }
-  );
+  await db
+    .collection<DirtyPartitionDoc>('state_dirty')
+    .updateOne(
+      { _id: dirtyPartId(collName, meta.idx) },
+      { $set: { coll: collName, partition: meta.idx, dirtyAt } },
+      { upsert: true },
+    );
 }
 
 /**
@@ -178,7 +180,7 @@ export async function markDirtyById(
  */
 export async function listDirtyForCollection(
   db: Db,
-  collName: string
+  collName: string,
 ): Promise<DirtyStatus> {
   const docs = await db
     .collection<DirtyDoc>('state_dirty')
@@ -188,7 +190,10 @@ export async function listDirtyForCollection(
 
   const full = docs.some((d) => 'full' in d && d.full === true);
   const parts = docs
-    .filter((d): d is DirtyPartitionDoc => 'partition' in d && typeof d.partition === 'number')
+    .filter(
+      (d): d is DirtyPartitionDoc =>
+        'partition' in d && typeof d.partition === 'number',
+    )
     .map((d) => d.partition)
     .sort((a, b) => a - b);
 
@@ -202,7 +207,7 @@ export async function listDirtyForCollection(
  */
 export async function clearDirtyForCollection(
   db: Db,
-  collName: string
+  collName: string,
 ): Promise<void> {
   await db.collection('state_dirty').deleteMany({ coll: collName });
 }
@@ -216,7 +221,7 @@ export async function clearDirtyForCollection(
 export async function clearDirtyPartitions(
   db: Db,
   collName: string,
-  partitions: number[]
+  partitions: number[],
 ): Promise<void> {
   if (!partitions || partitions.length === 0) return;
   const ids = partitions.map((p) => dirtyPartId(collName, p));

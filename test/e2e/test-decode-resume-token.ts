@@ -12,7 +12,8 @@
 
 import { MongoClient } from 'mongodb';
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
+const MONGO_URI =
+  process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
 
 function hexToAscii(hex: string): string {
   let str = '';
@@ -27,7 +28,13 @@ function hexToAscii(hex: string): string {
   return str;
 }
 
-function highlightSection(data: string, start: number, length: number, label: string, color: string) {
+function highlightSection(
+  data: string,
+  start: number,
+  length: number,
+  label: string,
+  color: string,
+) {
   const section = data.substr(start, length);
   const ascii = hexToAscii(section);
   console.log(`${color}${label}${'\x1b[0m'}`);
@@ -60,13 +67,13 @@ async function main() {
 
     // Insert document to trigger event
     console.log('Inserting document to capture resume token...\n');
-    await collection.insertOne({ 
+    await collection.insertOne({
       name: 'Alice',
       email: 'alice@example.com',
-      age: 30 
+      age: 30,
     });
 
-    const changeEvent = await eventPromise as any;
+    const changeEvent = (await eventPromise) as any;
     await changeStream.close();
 
     // ========================================================================
@@ -102,7 +109,7 @@ async function main() {
     const magenta = '\x1b[35m';
 
     let pos = 0;
-    
+
     // 1. Timestamp
     highlightSection(dataField, pos, 16, '1. Timestamp (Cluster Time)', cyan);
     pos += 16;
@@ -126,7 +133,7 @@ async function main() {
       console.log(`  Hex:   ${opTypeHex}`);
       console.log(`  ASCII: ${hexToAscii(opTypeHex)}`);
       console.log(`  Pos:   ${opTypeStart}-${opTypeStart + 26}\n`);
-      
+
       // Get operation type value
       const afterOpType = opTypeStart + 26;
       const opTypeValueStart = dataField.indexOf('696E73657274', afterOpType);
@@ -147,7 +154,7 @@ async function main() {
       console.log(`  Hex:   ${docKeyHex}`);
       console.log(`  ASCII: ${hexToAscii(docKeyHex)}`);
       console.log(`  Pos:   ${docKeyStart}-${docKeyStart + 22}\n`);
-      
+
       // Get _id field name
       const idFieldStart = dataField.indexOf('645F6964', docKeyStart + 22);
       if (idFieldStart >= 0) {
@@ -156,7 +163,7 @@ async function main() {
         console.log(`  Hex:   ${idFieldHex}`);
         console.log(`  ASCII: ${hexToAscii(idFieldHex)}`);
         console.log(`  Pos:   ${idFieldStart}-${idFieldStart + 8}\n`);
-        
+
         // Get ObjectId value
         const objectIdStart = idFieldStart + 8;
         const objectIdHex = dataField.substr(objectIdStart, 24);
@@ -172,13 +179,21 @@ async function main() {
     // ========================================================================
     console.log('─'.repeat(80) + '\n');
     console.log('📊 Visual Breakdown:\n');
-    
+
     console.log('Resume Token = Hex-Encoded Binary Data:');
-    console.log('┌─────────────────────────────────────────────────────────────────┐');
-    console.log('│ [Timestamp][Sequence][Type][operationType][insert]             │');
-    console.log('│ [documentKey][_id][ObjectId][CollectionInfo][Position]         │');
-    console.log('└─────────────────────────────────────────────────────────────────┘');
-    
+    console.log(
+      '┌─────────────────────────────────────────────────────────────────┐',
+    );
+    console.log(
+      '│ [Timestamp][Sequence][Type][operationType][insert]             │',
+    );
+    console.log(
+      '│ [documentKey][_id][ObjectId][CollectionInfo][Position]         │',
+    );
+    console.log(
+      '└─────────────────────────────────────────────────────────────────┘',
+    );
+
     console.log('\n🔑 What Each Part Does:\n');
     console.log('1. Timestamp       → When the change occurred (cluster time)');
     console.log('2. Sequence        → Operation order within same timestamp');
@@ -197,14 +212,15 @@ async function main() {
     console.log('  • Guarantee: No duplicates, no missed events');
 
     console.log('\n💡 In Our Implementation:\n');
-    console.log('We store this as: changeStreamId.newString = resumeToken._data');
+    console.log(
+      'We store this as: changeStreamId.newString = resumeToken._data',
+    );
     console.log('Purpose: Resume sync if interrupted');
     console.log('Benefit: Pick up exactly where we left off');
 
     console.log('\n' + '═'.repeat(80));
     console.log('  Resume token decoded successfully!');
     console.log('═'.repeat(80) + '\n');
-
   } finally {
     await client.close();
   }

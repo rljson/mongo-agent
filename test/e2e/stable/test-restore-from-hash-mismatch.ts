@@ -7,77 +7,78 @@
 
 /**
  * RLJSON Data Recovery & Restore Test
- * 
+ *
  * Demonstrates automatic recovery when state hash mismatches are detected,
  * restoring missing or corrupted data from healthy nodes.
- * 
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  * SCENARIO:
  * ═══════════════════════════════════════════════════════════════════════════
- * 
+ *
  * Three nodes (A, B, C) start synchronized with identical data:
- * 
+ *
  * 1. INITIAL STATE: All nodes have 100 users
  *    Node A: 100 users, hash: abc123...
  *    Node B: 100 users, hash: abc123... [synced from A]
  *    Node C: 100 users, hash: abc123... [synced from A]
- * 
+ *
  * 2. DATA LOSS: Node C loses significant data (simulating corruption/failure)
  *    Node A: 100 users, hash: abc123...
  *    Node B: 100 users, hash: abc123...
  *    Node C: 35 users,  hash: xyz789... ❌ MISMATCH!
- * 
+ *
  * 3. DETECTION: Compare state hashes across nodes
  *    - Node C hash differs from A and B
  *    - Partition-level comparison identifies missing data
- * 
+ *
  * 4. RECOVERY: Restore missing data from healthy node
  *    - Fetch missing documents from Node A or B
  *    - Replay operations from ComponentsTable
  *    - Insert missing documents into Node C
- * 
+ *
  * 5. VERIFICATION: All nodes converge to identical state
  *    Node A: 100 users, hash: abc123...
  *    Node B: 100 users, hash: abc123...
  *    Node C: 100 users, hash: abc123... ✅ RESTORED!
- * 
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  * FEATURES TESTED:
  * ═══════════════════════════════════════════════════════════════════════════
- * 
+ *
  * 1. HASH-BASED INTEGRITY DETECTION
  *    ✓ State hash comparison detects data loss
  *    ✓ Partition-level hashing identifies affected regions
  *    ✓ Merkle tree enables efficient mismatch detection
- * 
+ *
  * 2. AUTOMATIC DATA RECOVERY
  *    ✓ Identify missing documents by comparing collections
  *    ✓ Fetch missing data from healthy nodes
  *    ✓ Restore data while maintaining integrity
- * 
+ *
  * 3. PARTITION-LEVEL GRANULARITY
  *    ✓ Only affected partitions need recovery
  *    ✓ Unaffected data remains untouched
  *    ✓ Efficient recovery of large datasets
- * 
+ *
  * 4. EVENTUAL CONSISTENCY
  *    ✓ After recovery, all nodes have identical state
  *    ✓ State hashes match across all nodes
  *    ✓ Document counts and content identical
- * 
+ *
  * 5. PRODUCTION SCENARIOS
  *    ✓ Simulates disk failure / data corruption
  *    ✓ Tests backup/restore workflows
  *    ✓ Validates disaster recovery procedures
- * 
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-import { BsMem } from '@rljson/bs';
-import { MongoClient, ObjectId } from 'mongodb';
+import { MongoClient } from 'mongodb';
+
 import { computeStateCheckpoint } from '../../../src/hashing/state-hash.ts';
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
+const MONGO_URI =
+  process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
 
 async function main() {
   console.log('\n' + '═'.repeat(80));
@@ -116,7 +117,7 @@ async function main() {
       'sync_local',
       'state_merkle',
       'state_dirty',
-      'state_checkpoints'
+      'state_checkpoints',
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -134,16 +135,16 @@ async function main() {
         email: `user${i + 1}@example.com`,
         role: i % 3 === 0 ? 'admin' : i % 3 === 1 ? 'editor' : 'viewer',
         department: ['Engineering', 'Sales', 'Marketing', 'Support'][i % 4],
-        joinDate: new Date(2020 + (i % 5), (i % 12), 1 + (i % 28)),
+        joinDate: new Date(2020 + (i % 5), i % 12, 1 + (i % 28)),
         isActive: i % 10 !== 0, // 90% active
         metadata: {
           loginCount: Math.floor(Math.random() * 1000),
           lastLogin: new Date(2026, 2, Math.floor(Math.random() * 27) + 1),
           preferences: {
             theme: i % 2 === 0 ? 'dark' : 'light',
-            language: ['en', 'de', 'fr', 'es'][i % 4]
-          }
-        }
+            language: ['en', 'de', 'fr', 'es'][i % 4],
+          },
+        },
       });
     }
 
@@ -155,7 +156,7 @@ async function main() {
       db: dbA,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     console.log(`Node A initial state:`);
@@ -164,7 +165,7 @@ async function main() {
 
     // Sync to Node B and C (initial sync - copy all documents)
     console.log('Syncing Node A → Node B, Node C...');
-    
+
     const docsA = await collectionA.find().toArray();
     await collectionB.insertMany(docsA);
     await collectionC.insertMany(docsA);
@@ -173,21 +174,27 @@ async function main() {
       db: dbB,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateC_initial = await computeStateCheckpoint({
       db: dbC,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
-    console.log(`Node B synced: ${await collectionB.countDocuments()} docs, hash: ${stateB_initial.dbRoot.slice(0, 16)}...`);
-    console.log(`Node C synced: ${await collectionC.countDocuments()} docs, hash: ${stateC_initial.dbRoot.slice(0, 16)}...\n`);
+    console.log(
+      `Node B synced: ${await collectionB.countDocuments()} docs, hash: ${stateB_initial.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `Node C synced: ${await collectionC.countDocuments()} docs, hash: ${stateC_initial.dbRoot.slice(0, 16)}...\n`,
+    );
 
-    if (stateA_initial.dbRoot === stateB_initial.dbRoot && 
-        stateB_initial.dbRoot === stateC_initial.dbRoot) {
+    if (
+      stateA_initial.dbRoot === stateB_initial.dbRoot &&
+      stateB_initial.dbRoot === stateC_initial.dbRoot
+    ) {
       console.log('✅ All nodes synchronized - identical state hashes\n');
     } else {
       console.log('❌ Initial sync failed - state hash mismatch!\n');
@@ -202,8 +209,12 @@ async function main() {
 
     // Delete 65% of documents from Node C (simulating data loss)
     const deleteResult = await collectionC.deleteMany({ userId: { $gte: 36 } });
-    console.log(`Node C: Lost ${deleteResult.deletedCount} documents (65% data loss)`);
-    console.log(`  Remaining: ${await collectionC.countDocuments()} documents\n`);
+    console.log(
+      `Node C: Lost ${deleteResult.deletedCount} documents (65% data loss)`,
+    );
+    console.log(
+      `  Remaining: ${await collectionC.countDocuments()} documents\n`,
+    );
 
     // ═══════════════════════════════════════════════════════════════════════
     // PHASE 3: Detection - State Hash Comparison
@@ -220,31 +231,38 @@ async function main() {
       db: dbA,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateB_check = await computeStateCheckpoint({
       db: dbB,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateC_check = await computeStateCheckpoint({
       db: dbC,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     console.log('State Hash Comparison:');
-    console.log(`  Node A: ${await collectionA.countDocuments()} docs, hash: ${stateA_check.dbRoot.slice(0, 16)}...`);
-    console.log(`  Node B: ${await collectionB.countDocuments()} docs, hash: ${stateB_check.dbRoot.slice(0, 16)}...`);
-    console.log(`  Node C: ${await collectionC.countDocuments()} docs, hash: ${stateC_check.dbRoot.slice(0, 16)}...`);
+    console.log(
+      `  Node A: ${await collectionA.countDocuments()} docs, hash: ${stateA_check.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `  Node B: ${await collectionB.countDocuments()} docs, hash: ${stateB_check.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `  Node C: ${await collectionC.countDocuments()} docs, hash: ${stateC_check.dbRoot.slice(0, 16)}...`,
+    );
     console.log('');
 
-    const hashesMatch = stateA_check.dbRoot === stateB_check.dbRoot && 
-                        stateB_check.dbRoot === stateC_check.dbRoot;
+    const hashesMatch =
+      stateA_check.dbRoot === stateB_check.dbRoot &&
+      stateB_check.dbRoot === stateC_check.dbRoot;
 
     if (hashesMatch) {
       console.log('⚠️  WARNING: Expected hash mismatch not detected!\n');
@@ -260,9 +278,15 @@ async function main() {
 
     if (nodeC_corrupted) {
       console.log('🔧 Diagnosis:');
-      console.log(`   Healthy nodes: A, B (hash: ${healthyHash.slice(0, 16)}...)`);
-      console.log(`   Corrupted node: C (hash: ${stateC_check.dbRoot.slice(0, 16)}...)`);
-      console.log(`   Missing docs: ${await collectionA.countDocuments() - await collectionC.countDocuments()}\n`);
+      console.log(
+        `   Healthy nodes: A, B (hash: ${healthyHash.slice(0, 16)}...)`,
+      );
+      console.log(
+        `   Corrupted node: C (hash: ${stateC_check.dbRoot.slice(0, 16)}...)`,
+      );
+      console.log(
+        `   Missing docs: ${(await collectionA.countDocuments()) - (await collectionC.countDocuments())}\n`,
+      );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -278,23 +302,31 @@ async function main() {
     console.log('  4. Verify integrity with state hash\n');
 
     // Get all document IDs from Node A (healthy)
-    const docsA_all = await collectionA.find({}, { projection: { _id: 1, userId: 1 } }).toArray();
-    const idsA = new Set(docsA_all.map(d => d.userId));
+    const docsA_all = await collectionA
+      .find({}, { projection: { _id: 1, userId: 1 } })
+      .toArray();
+    const idsA = new Set(docsA_all.map((d) => d.userId));
 
     // Get all document IDs from Node C (corrupted)
-    const docsC_all = await collectionC.find({}, { projection: { _id: 1, userId: 1 } }).toArray();
-    const idsC = new Set(docsC_all.map(d => d.userId));
+    const docsC_all = await collectionC
+      .find({}, { projection: { _id: 1, userId: 1 } })
+      .toArray();
+    const idsC = new Set(docsC_all.map((d) => d.userId));
 
     // Find missing IDs
-    const missingIds = Array.from(idsA).filter(id => !idsC.has(id));
-    console.log(`Identified ${missingIds.length} missing documents on Node C\n`);
+    const missingIds = Array.from(idsA).filter((id) => !idsC.has(id));
+    console.log(
+      `Identified ${missingIds.length} missing documents on Node C\n`,
+    );
 
     if (missingIds.length > 0) {
       console.log('Fetching missing documents from Node A...');
-      const missingDocs = await collectionA.find({ userId: { $in: missingIds } }).toArray();
-      
+      const missingDocs = await collectionA
+        .find({ userId: { $in: missingIds } })
+        .toArray();
+
       console.log(`Restoring ${missingDocs.length} documents to Node C...`);
-      
+
       // Insert missing documents
       if (missingDocs.length > 0) {
         await collectionC.insertMany(missingDocs);
@@ -319,21 +351,21 @@ async function main() {
       db: dbA,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateB_final = await computeStateCheckpoint({
       db: dbB,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateC_final = await computeStateCheckpoint({
       db: dbC,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     // Count documents
@@ -342,14 +374,22 @@ async function main() {
     const finalCountC = await collectionC.countDocuments();
 
     console.log('Final State After Recovery:');
-    console.log(`  Node A: ${finalCountA} documents, hash: ${stateA_final.dbRoot.slice(0, 16)}...`);
-    console.log(`  Node B: ${finalCountB} documents, hash: ${stateB_final.dbRoot.slice(0, 16)}...`);
-    console.log(`  Node C: ${finalCountC} documents, hash: ${stateC_final.dbRoot.slice(0, 16)}...\n`);
+    console.log(
+      `  Node A: ${finalCountA} documents, hash: ${stateA_final.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `  Node B: ${finalCountB} documents, hash: ${stateB_final.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `  Node C: ${finalCountC} documents, hash: ${stateC_final.dbRoot.slice(0, 16)}...\n`,
+    );
 
     // Verification checks
-    const countMatch = finalCountA === finalCountB && finalCountB === finalCountC;
-    const hashMatch = stateA_final.dbRoot === stateB_final.dbRoot && 
-                      stateB_final.dbRoot === stateC_final.dbRoot;
+    const countMatch =
+      finalCountA === finalCountB && finalCountB === finalCountC;
+    const hashMatch =
+      stateA_final.dbRoot === stateB_final.dbRoot &&
+      stateB_final.dbRoot === stateC_final.dbRoot;
 
     console.log('Verification Results:');
     console.log(`  Document counts match: ${countMatch ? '✅' : '❌'}`);
@@ -363,11 +403,15 @@ async function main() {
     // Show recovery statistics
     console.log('✅ RECOVERY SUCCESSFUL!\n');
     console.log('Recovery Summary:');
-    console.log(`  ✓ Detected data loss: ${deleteResult.deletedCount} documents (65%)`);
+    console.log(
+      `  ✓ Detected data loss: ${deleteResult.deletedCount} documents (65%)`,
+    );
     console.log(`  ✓ Identified corruption via state hash mismatch`);
     console.log(`  ✓ Restored missing data: ${missingIds.length} documents`);
     console.log(`  ✓ All nodes now have: ${finalCountA} documents`);
-    console.log(`  ✓ State hashes identical: ${stateA_final.dbRoot.slice(0, 16)}...`);
+    console.log(
+      `  ✓ State hashes identical: ${stateA_final.dbRoot.slice(0, 16)}...`,
+    );
     console.log(`  ✓ Full integrity restored across all nodes\n`);
 
     console.log('Key achievements:');
@@ -381,7 +425,6 @@ async function main() {
     console.log('  Data Recovery & Restore Test Complete!');
     console.log('═'.repeat(80));
     console.log('');
-
   } finally {
     await client.close();
   }

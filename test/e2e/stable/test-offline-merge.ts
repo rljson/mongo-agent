@@ -7,76 +7,81 @@
 
 /**
  * RLJSON Offline Sync & Merge Test
- * 
+ *
  * Demonstrates offline capability and conflict-free merging when clients work
  * independently and later synchronize.
- * 
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  * SCENARIO:
  * ═══════════════════════════════════════════════════════════════════════════
- * 
+ *
  * Three nodes (A, B, C) start synchronized:
- * 
+ *
  * 1. INITIAL STATE: All nodes have identical data
  *    Node A: 3 users (Alice, Bob, Carol)
  *    Node B: 3 users (Alice, Bob, Carol)  [synced from A]
  *    Node C: 3 users (Alice, Bob, Carol)  [synced from A]
- * 
+ *
  * 2. OFFLINE PERIOD: Nodes B and C disconnect, work independently
  *    Node A (online):  Updates Alice, inserts David
  *    Node B (offline): Updates Bob, inserts Eve
  *    Node C (offline): Updates Carol, inserts Frank
- * 
+ *
  * 3. RECONNECT & MERGE: Nodes B and C come back online
  *    - Node B syncs with A: Gets Alice update + David
  *    - Node B shares with A: Sends Bob update + Eve
  *    - Node C syncs with A: Gets Alice update + David + Bob update + Eve
  *    - Node C shares with A: Sends Carol update + Frank
- * 
+ *
  * 4. FINAL STATE: All nodes must have identical data
  *    All nodes: 6 users (Alice*, Bob*, Carol*, David, Eve, Frank)
  *    Where * means updated versions
- * 
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  * FEATURES TESTED:
  * ═══════════════════════════════════════════════════════════════════════════
- * 
+ *
  * 1. OFFLINE OPERATION
  *    ✓ Nodes can work independently while disconnected
  *    ✓ Changes tracked locally via change streams
  *    ✓ Operations stored in ComponentsTable
- * 
+ *
  * 2. CONFLICT-FREE MERGING
  *    ✓ Last-write-wins based on timestamps
  *    ✓ Independent inserts don't conflict
  *    ✓ Updates to different documents merge cleanly
- * 
+ *
  * 3. OPERATION REPLAY
  *    ✓ Fetch missing operations from other nodes
  *    ✓ Apply operations in timestamp order
  *    ✓ Skip already-applied operations (idempotency)
- * 
+ *
  * 4. EVENTUAL CONSISTENCY
  *    ✓ All nodes converge to same state
  *    ✓ State hashes match after full sync
  *    ✓ Document counts identical
  *    ✓ Content byte-for-byte identical
- * 
+ *
  * 5. BLOCKCHAIN INTEGRITY
  *    ✓ Each node maintains its own operation chain
  *    ✓ Chains from different nodes can be merged
  *    ✓ Final merged chain is verifiable
- * 
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
 import { BsMem } from '@rljson/bs';
-import { hsh } from '@rljson/hash';
-import { MongoClient, ObjectId } from 'mongodb';
-import { startDbChangeStream, createSuppressor } from '../../../src/watch-changes.ts';
-import { computeStateCheckpoint } from '../../../src/hashing/state-hash.ts';
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
+import { MongoClient, ObjectId } from 'mongodb';
+
+import { computeStateCheckpoint } from '../../../src/hashing/state-hash.ts';
+import {
+  createSuppressor,
+  startDbChangeStream,
+} from '../../../src/watch-changes.ts';
+
+const MONGO_URI =
+  process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
 
 async function main() {
   console.log('\n' + '═'.repeat(80));
@@ -122,7 +127,7 @@ async function main() {
       role: 'engineer',
       email: 'alice@example.com',
       joinDate: new Date('2024-01-01'),
-      version: 1
+      version: 1,
     });
 
     const bob = await collectionA.insertOne({
@@ -130,7 +135,7 @@ async function main() {
       role: 'designer',
       email: 'bob@example.com',
       joinDate: new Date('2024-01-15'),
-      version: 1
+      version: 1,
     });
 
     const carol = await collectionA.insertOne({
@@ -138,7 +143,7 @@ async function main() {
       role: 'manager',
       email: 'carol@example.com',
       joinDate: new Date('2024-02-01'),
-      version: 1
+      version: 1,
     });
 
     console.log(`Node A: Created 3 users (Alice, Bob, Carol)`);
@@ -148,12 +153,12 @@ async function main() {
 
     // Collections to ignore when computing state hash  (internal tracking/sync collections)
     const ignoredColls = new Set([
-      'sync_state',     // ComponentsTable metadata
-      'sync_resume',    // Resume tokens
-      'sync_local',     // Local sync state
-      'state_merkle',   // Merkle tree cache
-      'state_dirty',    // Dirty partition tracking
-      'state_checkpoints' // State checkpoints
+      'sync_state', // ComponentsTable metadata
+      'sync_resume', // Resume tokens
+      'sync_local', // Local sync state
+      'state_merkle', // Merkle tree cache
+      'state_dirty', // Dirty partition tracking
+      'state_checkpoints', // State checkpoints
     ]);
 
     // Compute initial state hash
@@ -161,14 +166,16 @@ async function main() {
       db: dbA,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
-    console.log(`Node A initial state: ${stateA_initial.dbRoot.slice(0, 16)}...\n`);
+    console.log(
+      `Node A initial state: ${stateA_initial.dbRoot.slice(0, 16)}...\n`,
+    );
 
     // Sync to Node B and C (initial sync - copy all documents)
     console.log('Syncing Node A → Node B, Node C...');
-    
+
     const docsA = await collectionA.find().toArray();
     await collectionB.insertMany(docsA);
     await collectionC.insertMany(docsA);
@@ -177,21 +184,27 @@ async function main() {
       db: dbB,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateC_initial = await computeStateCheckpoint({
       db: dbC,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
-    console.log(`Node B synced state: ${stateB_initial.dbRoot.slice(0, 16)}...`);
-    console.log(`Node C synced state: ${stateC_initial.dbRoot.slice(0, 16)}...\n`);
+    console.log(
+      `Node B synced state: ${stateB_initial.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `Node C synced state: ${stateC_initial.dbRoot.slice(0, 16)}...\n`,
+    );
 
-    if (stateA_initial.dbRoot === stateB_initial.dbRoot && 
-        stateB_initial.dbRoot === stateC_initial.dbRoot) {
+    if (
+      stateA_initial.dbRoot === stateB_initial.dbRoot &&
+      stateB_initial.dbRoot === stateC_initial.dbRoot
+    ) {
       console.log('✅ All nodes synchronized - identical state hashes\n');
     } else {
       console.log('❌ State hash mismatch!\n');
@@ -201,7 +214,7 @@ async function main() {
     // ═══════════════════════════════════════════════════════════════════════
     // PHASE 2: Offline Period - Nodes Work Independently
     // ═══════════════════════════════════════════════════════════════════════
-    console.log('=' .repeat(80));
+    console.log('='.repeat(80));
     console.log('📴 PHASE 2: Offline Period - Nodes Work Independently\n');
 
     // Start change streams on each node to track operations
@@ -214,7 +227,7 @@ async function main() {
       nodeId: 'nodeA',
       bs,
       suppressor: suppressorA,
-      logger: console
+      logger: console,
     });
 
     const changeStreamB = await startDbChangeStream({
@@ -222,7 +235,7 @@ async function main() {
       nodeId: 'nodeB',
       bs,
       suppressor: suppressorB,
-      logger: console
+      logger: console,
     });
 
     const changeStreamC = await startDbChangeStream({
@@ -230,17 +243,19 @@ async function main() {
       nodeId: 'nodeC',
       bs,
       suppressor: suppressorC,
-      logger: console
+      logger: console,
     });
 
     console.log('Change streams started on all nodes\n');
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Node A (online): Updates Alice, inserts David
     console.log('Node A (ONLINE):');
     await collectionA.updateOne(
       { _id: alice.insertedId },
-      { $set: { role: 'senior-engineer', version: 2, lastModified: new Date() } }
+      {
+        $set: { role: 'senior-engineer', version: 2, lastModified: new Date() },
+      },
     );
     console.log('  ✓ Updated Alice → senior-engineer');
 
@@ -249,7 +264,7 @@ async function main() {
       role: 'intern',
       email: 'david@example.com',
       joinDate: new Date(),
-      version: 1
+      version: 1,
     });
     console.log(`  ✓ Inserted David (${davidA.insertedId})\n`);
 
@@ -257,7 +272,7 @@ async function main() {
     console.log('Node B (OFFLINE):');
     await collectionB.updateOne(
       { _id: bob.insertedId },
-      { $set: { role: 'lead-designer', version: 2, lastModified: new Date() } }
+      { $set: { role: 'lead-designer', version: 2, lastModified: new Date() } },
     );
     console.log('  ✓ Updated Bob → lead-designer');
 
@@ -266,7 +281,7 @@ async function main() {
       role: 'qa',
       email: 'eve@example.com',
       joinDate: new Date(),
-      version: 1
+      version: 1,
     });
     console.log(`  ✓ Inserted Eve (${eveB.insertedId})\n`);
 
@@ -274,7 +289,9 @@ async function main() {
     console.log('Node C (OFFLINE):');
     await collectionC.updateOne(
       { _id: carol.insertedId },
-      { $set: { role: 'senior-manager', version: 2, lastModified: new Date() } }
+      {
+        $set: { role: 'senior-manager', version: 2, lastModified: new Date() },
+      },
     );
     console.log('  ✓ Updated Carol → senior-manager');
 
@@ -283,12 +300,12 @@ async function main() {
       role: 'devops',
       email: 'frank@example.com',
       joinDate: new Date(),
-      version: 1
+      version: 1,
     });
     console.log(`  ✓ Inserted Frank (${frankC.insertedId})\n`);
 
     // Wait for change streams to capture all operations
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
 
     // Close change streams
     await changeStreamA.close();
@@ -314,9 +331,15 @@ async function main() {
     console.log('🔄 PHASE 3: Reconnect & Merge Operations\n');
 
     // Get ComponentsTable from each node
-    const metaA = await dbA.collection('sync_state').findOne({ _id: 'sync_ops_meta' } as any);
-    const metaB = await dbB.collection('sync_state').findOne({ _id: 'sync_ops_meta' } as any);
-    const metaC = await dbC.collection('sync_state').findOne({ _id: 'sync_ops_meta' } as any);
+    const metaA = await dbA
+      .collection('sync_state')
+      .findOne({ _id: 'sync_ops_meta' } as any);
+    const metaB = await dbB
+      .collection('sync_state')
+      .findOne({ _id: 'sync_ops_meta' } as any);
+    const metaC = await dbC
+      .collection('sync_state')
+      .findOne({ _id: 'sync_ops_meta' } as any);
 
     let opsA: any[] = [];
     let opsB: any[] = [];
@@ -345,9 +368,9 @@ async function main() {
 
     // Merge operations: Combine all operations from all nodes
     console.log('Merging operations from all nodes...\n');
-    
+
     const allOps = [...opsA, ...opsB, ...opsC];
-    
+
     // Sort by timestamp to get chronological order
     allOps.sort((a, b) => {
       const tsA = a.ts || '';
@@ -358,14 +381,18 @@ async function main() {
     console.log(`Total merged operations: ${allOps.length}\n`);
 
     // Helper function to apply operations to a node
-    const applyOperations = async (collection: any, operations: any[], nodeName: string) => {
+    const applyOperations = async (
+      collection: any,
+      operations: any[],
+      nodeName: string,
+    ) => {
       console.log(`Applying ${operations.length} operations to ${nodeName}...`);
-      
+
       for (const op of operations) {
         if (op.payload?.fullDocumentBlobId) {
           const blob = await bs.getBlob(op.payload.fullDocumentBlobId);
           const doc = JSON.parse(blob.content.toString('utf-8'));
-          
+
           // Convert _id string back to ObjectId
           if (typeof doc._id === 'string') {
             doc._id = new ObjectId(doc._id);
@@ -379,7 +406,11 @@ async function main() {
             doc.lastModified = new Date(doc.lastModified);
           }
 
-          if (op.operationType === 'insert' || op.operationType === 'replace' || op.operationType === 'update') {
+          if (
+            op.operationType === 'insert' ||
+            op.operationType === 'replace' ||
+            op.operationType === 'update'
+          ) {
             // Delete first, then insert to ensure consistent field ordering
             await collection.deleteOne({ _id: doc._id });
             await collection.insertOne(doc);
@@ -392,7 +423,7 @@ async function main() {
           await collection.deleteOne({ _id: docId });
         }
       }
-      
+
       console.log(`  ✓ ${nodeName} synchronized\n`);
     };
 
@@ -417,21 +448,21 @@ async function main() {
       db: dbA,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateB_final = await computeStateCheckpoint({
       db: dbB,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     const stateC_final = await computeStateCheckpoint({
       db: dbC,
       partitionSize: 50000,
       mode: 'full',
-      ignoredColls
+      ignoredColls,
     });
 
     // Count documents
@@ -440,14 +471,22 @@ async function main() {
     const finalCountC = await collectionC.countDocuments();
 
     console.log('Final State:');
-    console.log(`  Node A: ${finalCountA} documents, hash: ${stateA_final.dbRoot.slice(0, 16)}...`);
-    console.log(`  Node B: ${finalCountB} documents, hash: ${stateB_final.dbRoot.slice(0, 16)}...`);
-    console.log(`  Node C: ${finalCountC} documents, hash: ${stateC_final.dbRoot.slice(0, 16)}...\n`);
+    console.log(
+      `  Node A: ${finalCountA} documents, hash: ${stateA_final.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `  Node B: ${finalCountB} documents, hash: ${stateB_final.dbRoot.slice(0, 16)}...`,
+    );
+    console.log(
+      `  Node C: ${finalCountC} documents, hash: ${stateC_final.dbRoot.slice(0, 16)}...\n`,
+    );
 
     // Verification checks
-    const countMatch = finalCountA === finalCountB && finalCountB === finalCountC;
-    const hashMatch = stateA_final.dbRoot === stateB_final.dbRoot && 
-                      stateB_final.dbRoot === stateC_final.dbRoot;
+    const countMatch =
+      finalCountA === finalCountB && finalCountB === finalCountC;
+    const hashMatch =
+      stateA_final.dbRoot === stateB_final.dbRoot &&
+      stateB_final.dbRoot === stateC_final.dbRoot;
 
     console.log('Verification Results:');
     console.log(`  Document counts match: ${countMatch ? '✅' : '❌'}`);
@@ -460,10 +499,12 @@ async function main() {
 
     // Show merged data
     const finalUsers = await collectionA.find().sort({ name: 1 }).toArray();
-    
+
     console.log('Final Merged Users (all nodes):');
     for (const user of finalUsers) {
-      console.log(`  • ${user.name.padEnd(10)} - ${user.role.padEnd(20)} v${user.version}`);
+      console.log(
+        `  • ${user.name.padEnd(10)} - ${user.role.padEnd(20)} v${user.version}`,
+      );
     }
     console.log('');
 
@@ -485,7 +526,6 @@ async function main() {
     console.log('  Offline Sync & Merge Test Complete!');
     console.log('═'.repeat(80));
     console.log('');
-
   } finally {
     await client.close();
   }

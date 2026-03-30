@@ -6,11 +6,12 @@
 
 import { Bs, BsMem } from '@rljson/bs';
 import { hip, hsh } from '@rljson/hash';
-import type { ChangeStream, ChangeStreamDocument, Db } from 'mongodb';
 
 import { computeOpHash, sha256Hex } from './hashing/integrity-hash.ts';
-import { computeStateCheckpoint } from './hashing/state-hash.ts';
 import { markDirtyById } from './hashing/state-dirty.ts';
+import { computeStateCheckpoint } from './hashing/state-hash.ts';
+
+import type { ChangeStream, ChangeStreamDocument, Db } from 'mongodb';
 
 import type { ComponentsTable, TableCfg } from '@rljson/rljson';
 /**
@@ -38,19 +39,19 @@ export interface SyncOp {
   operationType: string;
   docId: unknown;
   payload?: {
-    fullDocumentBlobId?: string;        // Blob reference (content hash)
-    updateDescriptionBlobId?: string;   // Blob reference (content hash)
+    fullDocumentBlobId?: string; // Blob reference (content hash)
+    updateDescriptionBlobId?: string; // Blob reference (content hash)
   } | null;
   ts?: string;
-  
+
   // Optional change stream metadata
-  changeStreamId?: unknown;     // MongoDB resume token (_id from change event)
-  clusterTime?: unknown;         // MongoDB cluster timestamp
-  wallTime?: string;             // MongoDB wall time (ISO string)
-  
+  changeStreamId?: unknown; // MongoDB resume token (_id from change event)
+  clusterTime?: unknown; // MongoDB cluster timestamp
+  wallTime?: string; // MongoDB wall time (ISO string)
+
   // Optional state tracking (for DB synthesis)
-  prevStateHash?: string;        // State hash before this operation
-  currentStateHash?: string;     // State hash after this operation
+  prevStateHash?: string; // State hash before this operation
+  currentStateHash?: string; // State hash after this operation
 }
 
 /**
@@ -63,11 +64,11 @@ export interface SyncOpDoc extends SyncOp {
   prevHash: string;
   opHash: string;
   chainHash: string;
-  
+
   // Change stream metadata (for resume and correlation)
-  changeStreamId?: unknown;     // MongoDB resume token (_id from change event)
-  clusterTime?: unknown;         // MongoDB cluster timestamp
-  wallTime?: string;             // MongoDB wall time (ISO string)
+  changeStreamId?: unknown; // MongoDB resume token (_id from change event)
+  clusterTime?: unknown; // MongoDB cluster timestamp
+  wallTime?: string; // MongoDB wall time (ISO string)
 }
 
 /**
@@ -87,7 +88,7 @@ export interface StartChangeStreamOptions {
   logger?: Logger;
   suppressor?: Suppressor;
   bs?: Bs;
-  trackStateHash?: boolean;  // Enable state hash tracking (slower but complete)
+  trackStateHash?: boolean; // Enable state hash tracking (slower but complete)
 }
 
 /**
@@ -558,7 +559,8 @@ export async function startDbChangeStream(
         fullDocumentBlobId = blob.blobId;
       }
 
-      const updateDesc = (change as { updateDescription?: unknown }).updateDescription;
+      const updateDesc = (change as { updateDescription?: unknown })
+        .updateDescription;
       if (updateDesc) {
         const descJson = JSON.stringify(updateDesc);
         const blob = await blobStorage.setBlob(Buffer.from(descJson, 'utf-8'));
@@ -567,24 +569,34 @@ export async function startDbChangeStream(
 
       // State tracking: capture state before operation
       const prevStateHash = trackStateHash ? currentDbStateHash : undefined;
-      
+
       // Mark dirty for state hash tracking
       if (trackStateHash && ns) {
-        await markDirtyById(db, ns.coll, docId, { reason: change.operationType });
+        await markDirtyById(db, ns.coll, docId, {
+          reason: change.operationType,
+        });
       }
-      
+
       // Compute new state hash after operation (if tracking enabled)
       let newStateHash: string | undefined;
       if (trackStateHash) {
         try {
           const newState = await computeStateCheckpoint({
             db,
-            ignoredColls: new Set(['state_checkpoints', 'state_merkle', 'state_dirty', 'sync_ops', 'sync_state', 'sync_local', 'sync_resume']),
+            ignoredColls: new Set([
+              'state_checkpoints',
+              'state_merkle',
+              'state_dirty',
+              'sync_ops',
+              'sync_state',
+              'sync_local',
+              'sync_resume',
+            ]),
             partitionSize: 50000,
             mode: 'incremental',
           });
           newStateHash = newState.dbRoot;
-          currentDbStateHash = newStateHash;  // Update tracked state
+          currentDbStateHash = newStateHash; // Update tracked state
         } catch (err) {
           logger?.warn?.('Failed to compute new state hash');
         }
@@ -593,20 +605,29 @@ export async function startDbChangeStream(
       const op: SyncOp = {
         ns: { db: ns.db, coll: ns.coll },
         operationType: change.operationType,
-        docId: typeof docId === 'object' && docId !== null ? 
-          JSON.parse(JSON.stringify(docId)) : docId,  // Serialize ObjectIds
+        docId:
+          typeof docId === 'object' && docId !== null
+            ? JSON.parse(JSON.stringify(docId))
+            : docId, // Serialize ObjectIds
         payload: {
           fullDocumentBlobId,
           updateDescriptionBlobId,
         },
         ts: new Date().toISOString(),
         // Capture change stream metadata (serialize complex MongoDB objects)
-        changeStreamId: change._id ? JSON.parse(JSON.stringify(change._id)) : undefined,
-        clusterTime: (change as { clusterTime?: unknown }).clusterTime ? 
-          JSON.parse(JSON.stringify((change as { clusterTime?: unknown }).clusterTime)) : undefined,
-        wallTime: (change as { wallTime?: Date }).wallTime?.toISOString?.() ?? 
-          (typeof (change as { wallTime?: string }).wallTime === 'string' ? 
-            (change as { wallTime?: string }).wallTime : undefined),
+        changeStreamId: change._id
+          ? JSON.parse(JSON.stringify(change._id))
+          : undefined,
+        clusterTime: (change as { clusterTime?: unknown }).clusterTime
+          ? JSON.parse(
+              JSON.stringify((change as { clusterTime?: unknown }).clusterTime),
+            )
+          : undefined,
+        wallTime:
+          (change as { wallTime?: Date }).wallTime?.toISOString?.() ??
+          (typeof (change as { wallTime?: string }).wallTime === 'string'
+            ? (change as { wallTime?: string }).wallTime
+            : undefined),
         // State tracking (if enabled)
         prevStateHash,
         currentStateHash: newStateHash,

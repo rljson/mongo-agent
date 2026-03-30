@@ -8,8 +8,10 @@ import type { Db, Document, ObjectId } from 'mongodb';
 import { createHash } from 'node:crypto';
 
 import { computeIntegrityHash } from './integrity-hash.ts';
-import { listDirtyForCollection, clearDirtyForCollection } from './state-dirty.ts';
-
+import {
+  clearDirtyForCollection,
+  listDirtyForCollection,
+} from './state-dirty.ts';
 
 /**
  * Computes SHA-256 hash of a string
@@ -160,7 +162,9 @@ export async function computeStateCheckpoint(
 
       if (dirtyStatus.full) {
         // Full rescan required for this collection
-        console.log(`   [${collName}] Full rescan required (dirty status: FULL)`);
+        console.log(
+          `   [${collName}] Full rescan required (dirty status: FULL)`,
+        );
         useIncremental = false;
       } else {
         // Load cached partitions
@@ -177,7 +181,9 @@ export async function computeStateCheckpoint(
         } else {
           // Use incremental mode with these dirty partitions
           dirtyPartitions = new Set(dirtyStatus.partitions);
-          console.log(`   [${collName}] Incremental mode: ${dirtyPartitions.size} dirty partitions out of ${cachedPartitions.length}`);
+          console.log(
+            `   [${collName}] Incremental mode: ${dirtyPartitions.size} dirty partitions out of ${cachedPartitions.length}`,
+          );
         }
       }
     }
@@ -186,15 +192,19 @@ export async function computeStateCheckpoint(
 
     if (useIncremental && cachedPartitions.length > 0) {
       // INCREMENTAL MODE: Reuse cached hashes, only recompute dirty partitions
-      console.log(`   [${collName}] Using incremental mode with ${cachedPartitions.length} cached partitions`);
-      
+      console.log(
+        `   [${collName}] Using incremental mode with ${cachedPartitions.length} cached partitions`,
+      );
+
       for (const cached of cachedPartitions) {
         if (dirtyPartitions.has(cached.idx)) {
           // Recompute this dirty partition
-          console.log(`   [${collName}] Recomputing dirty partition ${cached.idx}`);
+          console.log(
+            `   [${collName}] Recomputing dirty partition ${cached.idx}`,
+          );
           const cursor = coll.find(
             { _id: { $gte: cached.minId, $lte: cached.maxId } },
-            { sort: { _id: 1 }, batchSize: 5000 }
+            { sort: { _id: 1 }, batchSize: 5000 },
           );
 
           const partLines: string[] = [];
@@ -249,8 +259,13 @@ export async function computeStateCheckpoint(
       await clearDirtyForCollection(db, collName);
 
       // Collection root from ordered partition roots
-      const collRoot = sha256Hex(partRoots.map((r, i) => `${i}:${r}`).join('\n'));
-      collections[collName] = { root: collRoot, partitions: cachedPartitions.length };
+      const collRoot = sha256Hex(
+        partRoots.map((r, i) => `${i}:${r}`).join('\n'),
+      );
+      collections[collName] = {
+        root: collRoot,
+        partitions: cachedPartitions.length,
+      };
 
       dbPieces.push(`${collName}:${collRoot}`);
     } else {
@@ -317,7 +332,9 @@ export async function computeStateCheckpoint(
       await flushPartition();
 
       // Collection root from ordered partition roots
-      const collRoot = sha256Hex(partRoots.map((r, i) => `${i}:${r}`).join('\n'));
+      const collRoot = sha256Hex(
+        partRoots.map((r, i) => `${i}:${r}`).join('\n'),
+      );
       collections[collName] = { root: collRoot, partitions: partIdx };
 
       dbPieces.push(`${collName}:${collRoot}`);
