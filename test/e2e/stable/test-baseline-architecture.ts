@@ -201,16 +201,13 @@ import { hsh } from '@rljson/hash';
 import { MongoClient, ObjectId } from 'mongodb';
 
 import {
-  clearDirtyForCollection,
-  listDirtyForCollection,
-  markDirtyById,
+  clearDirtyForCollection, listDirtyForCollection, markDirtyById
 } from '../../../src/hashing/state-dirty.ts';
 import { computeStateCheckpoint } from '../../../src/hashing/state-hash.ts';
-import {
-  createSuppressor,
-  startDbChangeStream,
-} from '../../../src/watch-changes.ts';
+import { createSuppressor, startDbChangeStream } from '../../../src/watch-changes.ts';
+
 import { SimpleMemoryStorage } from './simple-memory-storage.ts';
+
 
 const MONGO_URI =
   process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
@@ -669,7 +666,9 @@ async function main() {
 
         // Fetch and show the actual stored content
         if (syncOp.payload?.fullDocumentBlobId) {
-          const storedData = await bs.getBlob(syncOp.payload.fullDocumentBlobId);
+          const storedData = await bs.getBlob(
+            syncOp.payload.fullDocumentBlobId,
+          );
           if (storedData) {
             const docContent = JSON.parse(storedData.content.toString('utf-8'));
             console.log(`\n  [In-Memory Content Preview]:`);
@@ -755,7 +754,9 @@ async function main() {
     console.log('\n💾 Storage:');
     console.log('  • Entire ComponentsTable stored in memory as ONE object');
     console.log('  • Reference ID maintained in sync_state.sync_ops_meta');
-    console.log('  • Individual document payloads stored as separate in-memory objects');
+    console.log(
+      '  • Individual document payloads stored as separate in-memory objects',
+    );
 
     // ========================================================================
     // PART 4: Side-by-Side Comparison
@@ -865,7 +866,9 @@ async function main() {
     );
     console.log('  ✓ Size: SyncOpDoc stays tiny (~500 bytes)');
     console.log("  ✓ Integrity: Hash guarantees content hasn't changed");
-    console.log('  ✓ Immutable: Once stored, never changes (new version = new hash)');
+    console.log(
+      '  ✓ Immutable: Once stored, never changes (new version = new hash)',
+    );
     console.log('  ✓ Content-addressable: Same content = same hash worldwide');
 
     console.log('\n🎯 Overall Benefits:\n');
@@ -1333,9 +1336,7 @@ async function main() {
     console.log(
       '  ✓ Small sync ops (~500 bytes) stored separately from documents (10KB+)',
     );
-    console.log(
-      '  ✓ De-duplication: Same document synced 100x = fetched 1x',
-    );
+    console.log('  ✓ De-duplication: Same document synced 100x = fetched 1x');
     console.log(
       '  ✓ Bandwidth efficient: Only send reference ID, check "do I have this?"',
     );
@@ -1512,7 +1513,9 @@ async function main() {
     console.log('  Node C: Empty database (new node joining)\n');
 
     // Node C needs full state, not just operations
-    console.log('  Strategy 1: Fetch all documents via ComponentsTable references');
+    console.log(
+      '  Strategy 1: Fetch all documents via ComponentsTable references',
+    );
     console.log('    • Get all sync ops from Node A');
     console.log('    • Apply them in sequence');
     console.log('    • Result: Full database state\n');

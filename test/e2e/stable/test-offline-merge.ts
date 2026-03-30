@@ -73,11 +73,10 @@
 import { MongoClient, ObjectId } from 'mongodb';
 
 import { computeStateCheckpoint } from '../../../src/hashing/state-hash.ts';
-import {
-  createSuppressor,
-  startDbChangeStream,
-} from '../../../src/watch-changes.ts';
+import { createSuppressor, startDbChangeStream } from '../../../src/watch-changes.ts';
+
 import { SimpleMemoryStorage } from './simple-memory-storage.ts';
+
 
 const MONGO_URI =
   process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
