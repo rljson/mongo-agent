@@ -36,12 +36,12 @@
  *    ✓ ObjectId handling
  *    ✓ Date serialization/deserialization
  *
- * 4. BLOB-BASED STORAGE ARCHITECTURE
- *    ✓ Documents stored as content-addressed blobs
- *    ✓ Sync ops contain blob references (not embedded documents)
+ * 4. IN-MEMORY STORAGE ARCHITECTURE
+ *    ✓ Documents stored as content-addressed in-memory objects
+ *    ✓ Sync ops contain in-memory references (not embedded documents)
  *    ✓ Content de-duplication (same content = same hash = stored once)
  *    ✓ Small sync ops (~500 bytes) vs large documents (10KB+)
- *    ✓ BsMem implementation (in-memory blob storage for testing)
+ *    ✓ SimpleMemoryStorage implementation (JavaScript Map-based storage)
  *
  * 5. BLOCKCHAIN CHAIN INTEGRITY
  *    ✓ Sequential operation linking (prevHash → chainHash)
@@ -55,7 +55,7 @@
  *    ✓ All sync ops stored in single ComponentsTable
  *    ✓ Table configuration (TableCfg) with schema hash
  *    ✓ Merkle tree hashing of entire table
- *    ✓ Blob storage of ComponentsTable JSON
+ *    ✓ In-memory storage of ComponentsTable JSON
  *    ✓ Metadata tracking (componentsBlobId, rowCount, etc.)
  *
  * 7. STATE HASH TRACKING
@@ -69,7 +69,7 @@
  * 8. NODE-TO-NODE SYNCHRONIZATION
  *    ✓ Node A (producer) captures operations
  *    ✓ Node B (consumer) fetches ComponentsTable
- *    ✓ Blob-based document transfer
+ *    ✓ In-memory document transfer
  *    ✓ Operation application (insert/update/replace/delete)
  *    ✓ ObjectId type conversion (string → ObjectId)
  *    ✓ Date type restoration (ISO string → Date)
@@ -91,8 +91,8 @@
  *     ✓ Operation type (insert/update/replace/delete)
  *
  * 11. ERROR HANDLING & EDGE CASES
- *     ✓ Delete operations without blob references
- *     ✓ ObjectId serialization in JSON blobs
+ *     ✓ Delete operations without in-memory references
+ *     ✓ ObjectId serialization in JSON storage
  *     ✓ Date preservation through JSON round-trip
  *     ✓ Matched vs upserted document tracking
  *
@@ -127,24 +127,24 @@
  *     • 2 updates (Alice, Bob)
  *     • 1 insert + delete (David - temporary)
  *     • 1 replace (Carol)
- *   - Store as RLJSON ComponentsTable with blob references
+ *   - Store as RLJSON ComponentsTable with in-memory references
  *   - Show complete ComponentsTable JSON structure
  *   - Display operation chain and metadata
  *
  * PART 3: ComponentsTable Structure
  *   - Explain ComponentsTable format
  *   - Show _type, _tableCfg, _hash, _data structure
- *   - Demonstrate blob storage pattern
+ *   - Demonstrate in-memory storage pattern
  *
  * PART 4: MongoDB vs RLJSON Comparison
  *   - Side-by-side comparison table
  *   - Highlight added features (blockchain, state tracking)
- *   - Show benefits of blob-based architecture
+ *   - Show benefits of in-memory architecture
  *
  * PART 5: Node-to-Node Synchronization
  *   Step 1: Node B fetches ComponentsTable from Node A
  *   Step 2: Node B applies all 8 operations
- *     - Fetch blobs from blob storage
+ *     - Fetch documents from in-memory storage
  *     - Restore ObjectIds and Dates
  *     - Apply to local database
  *   Step 2b: Verify Blockchain Chain Integrity
@@ -181,7 +181,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ✅ 8 operations captured and stored
- * ✅ 7 blobs stored (delete has no blob)
+ * ✅ 7 documents stored in memory (delete has no document)
  * ✅ 3 final documents in both Node A and Node B
  * ✅ Blockchain chain verified (all 8 operations linked)
  * ✅ State hashes match (cryptographic proof of identical state)
@@ -196,7 +196,6 @@
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-import { BsMem } from '@rljson/bs';
 import { hsh } from '@rljson/hash';
 
 import { MongoClient, ObjectId } from 'mongodb';
@@ -211,6 +210,7 @@ import {
   createSuppressor,
   startDbChangeStream,
 } from '../../../src/watch-changes.ts';
+import { SimpleMemoryStorage } from './simple-memory-storage.ts';
 
 const MONGO_URI =
   process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
@@ -222,7 +222,7 @@ async function main() {
   console.log('\n🎯 Features Tested:\n');
   console.log('  ✓ MongoDB change stream integration');
   console.log('  ✓ RLJSON ComponentsTable format');
-  console.log('  ✓ Blob-based storage architecture');
+  console.log('  ✓ In-memory storage architecture');
   console.log('  ✓ Blockchain chain integrity (8 operations linked)');
   console.log('  ✓ State hash verification (Merkle tree)');
   console.log('  ✓ Comprehensive CRUD (insert/update/delete/replace)');
@@ -299,8 +299,8 @@ async function main() {
     await db.collection('sync_resume').deleteMany({});
     await collection.deleteMany({});
 
-    // Start our change stream handler
-    const bs = new BsMem();
+    // Start our change stream handler with simple in-memory storage
+    const bs = new SimpleMemoryStorage();
     const suppressor = createSuppressor();
     const logger = {
       info: (msg: any, ...args: any[]) => console.log('[INFO]', msg, ...args),
@@ -576,7 +576,7 @@ async function main() {
     console.log('  • Net result: 3 documents in collection\n');
     console.log('─'.repeat(80));
 
-    // Wait longer for async processing (change stream -> blob storage -> sync_state)
+    // Wait longer for async processing (change stream -> in-memory storage -> sync_state)
     console.log('\nWaiting for change stream processing (8 operations)...\n');
     await new Promise((resolve) => setTimeout(resolve, 8000));
 
@@ -596,17 +596,17 @@ async function main() {
     console.log('Debug: sync_state meta =', meta ? 'found' : 'null');
 
     if (meta && (meta as any).componentsBlobId) {
-      const blobId = (meta as any).componentsBlobId;
-      console.log('Debug: blobId =', blobId);
-      const blob = await bs.getBlob(blobId);
+      const memoryId = (meta as any).componentsBlobId;
+      console.log('Debug: memoryId =', memoryId);
+      const storedData = await bs.getBlob(memoryId);
       console.log(
-        'Debug: blob =',
-        blob ? 'found' : 'null',
-        blob ? `(${blob.content.length} bytes)` : '',
+        'Debug: stored data =',
+        storedData ? 'found' : 'null',
+        storedData ? `(${storedData.content.length} bytes)` : '',
       );
 
-      if (blob) {
-        const table = JSON.parse(blob.content.toString('utf-8'));
+      if (storedData) {
+        const table = JSON.parse(storedData.content.toString('utf-8'));
 
         console.log(`\n📋 ComponentsTable Summary:`);
         console.log(`  Total operations: ${table._data.length}`);
@@ -619,7 +619,7 @@ async function main() {
         for (let i = 0; i < table._data.length; i++) {
           const op = table._data[i];
           const docPreview = op.payload?.fullDocumentBlobId
-            ? '✓ blob'
+            ? '✓ in-memory'
             : '(no doc)';
           console.log(
             `  ${i + 1}. seq=${op.seq} ${op.operationType.padEnd(8)} ${op.ns.coll.padEnd(10)} ${docPreview} chain=${op.chainHash.substring(0, 12)}...`,
@@ -659,25 +659,25 @@ async function main() {
         );
         console.log(`  wallTime:               ${syncOp.wallTime}`);
 
-        console.log('\nPayload (RLJSON Blob References):');
+        console.log('\nPayload (RLJSON In-Memory References):');
         console.log(
-          `  fullDocumentBlobId:     ${syncOp.payload?.fullDocumentBlobId || 'null'}`,
+          `  fullDocumentBlobId:     ${syncOp.payload?.fullDocumentBlobId || 'null'} (in-memory ref)`,
         );
         console.log(
-          `  updateDescriptionBlobId: ${syncOp.payload?.updateDescriptionBlobId || 'null'}`,
+          `  updateDescriptionBlobId: ${syncOp.payload?.updateDescriptionBlobId || 'null'} (in-memory ref)`,
         );
 
-        // Fetch and show the actual blob content
+        // Fetch and show the actual stored content
         if (syncOp.payload?.fullDocumentBlobId) {
-          const blob = await bs.getBlob(syncOp.payload.fullDocumentBlobId);
-          if (blob) {
-            const docContent = JSON.parse(blob.content.toString('utf-8'));
-            console.log(`\n  [Blob Content Preview]:`);
+          const storedData = await bs.getBlob(syncOp.payload.fullDocumentBlobId);
+          if (storedData) {
+            const docContent = JSON.parse(storedData.content.toString('utf-8'));
+            console.log(`\n  [In-Memory Content Preview]:`);
             console.log(`    _id: ${docContent._id}`);
             console.log(`    name: ${docContent.name}`);
             console.log(`    age: ${docContent.age}`);
             console.log(`    role: ${docContent.role}`);
-            console.log(`    Blob size: ${blob.content.length} bytes`);
+            console.log(`    Storage size: ${storedData.content.length} bytes`);
           }
         }
 
@@ -736,7 +736,7 @@ async function main() {
       "opHash": "ac19...",
       "chainHash": "733b...",
       "payload": {
-        "fullDocumentBlobId": "mr7k..."  ← Blob reference!
+        "fullDocumentBlobId": "mr7k..."  ← In-memory reference!
       },
       "changeStreamId": {...},
       "prevStateHash": "...",      ← State before
@@ -753,9 +753,9 @@ async function main() {
     console.log('  • _data: Array of operations (each with its own _hash)');
 
     console.log('\n💾 Storage:');
-    console.log('  • Entire ComponentsTable stored as ONE blob');
-    console.log('  • BlobId referenced in sync_state.sync_ops_meta');
-    console.log('  • Individual document payloads stored as separate blobs');
+    console.log('  • Entire ComponentsTable stored in memory as ONE object');
+    console.log('  • Reference ID maintained in sync_state.sync_ops_meta');
+    console.log('  • Individual document payloads stored as separate in-memory objects');
 
     // ========================================================================
     // PART 4: Side-by-Side Comparison
@@ -825,8 +825,8 @@ async function main() {
     );
 
     console.log('\n✅ What We Added:\n');
-    console.log('  1. Blob-Based Storage (✨ KEY ARCHITECTURE)');
-    console.log('     - fullDocument stored as blob (content hash)');
+    console.log('  1. In-Memory Storage (✨ KEY ARCHITECTURE)');
+    console.log('     - fullDocument stored in memory (content hash)');
     console.log('     - De-duplication: same doc = same hash');
     console.log('     - Small SyncOpDoc (~500 bytes vs 10KB+)');
     console.log('     - Content-addressable (verifiable integrity)');
@@ -854,18 +854,18 @@ async function main() {
     console.log('     - Client can check: "Do I have prevState? Can apply!"');
 
     console.log('\n  6. ComponentsTable Storage');
-    console.log('     - All sync ops in one table (blob storage)');
+    console.log('     - All sync ops in one table (in-memory storage)');
     console.log('     - Merkle tree hashing');
     console.log('     - Schema version tracking (TableCfg)');
 
-    console.log('\n🎯 Blob Storage Benefits:\n');
+    console.log('\n🎯 In-Memory Storage Benefits:\n');
     console.log('  ✓ De-duplication: Same document synced 100x = stored 1x');
     console.log(
-      '  ✓ Bandwidth: Only send blobId, receiver checks "do I have this?"',
+      '  ✓ Bandwidth: Only send reference ID, receiver checks "do I have this?"',
     );
     console.log('  ✓ Size: SyncOpDoc stays tiny (~500 bytes)');
     console.log("  ✓ Integrity: Hash guarantees content hasn't changed");
-    console.log('  ✓ Immutable: Blobs never change (new version = new hash)');
+    console.log('  ✓ Immutable: Once stored, never changes (new version = new hash)');
     console.log('  ✓ Content-addressable: Same content = same hash worldwide');
 
     console.log('\n🎯 Overall Benefits:\n');
@@ -882,7 +882,7 @@ async function main() {
     console.log('\n📋 Complete RLJSON Sync Pattern:\n');
     console.log('  [MongoDB Change] → [Change Stream]');
     console.log('       ↓');
-    console.log('  [Store fullDocument as Blob] → BlobId');
+    console.log('  [Store fullDocument in Memory] → Reference ID');
     console.log('       ↓');
     console.log('  [Create SyncOp]:');
     console.log('    • Metadata: seq, origin, timestamps');
@@ -891,12 +891,12 @@ async function main() {
     console.log('    • Payload: fullDocumentBlobId (reference!)');
     console.log('    • State: prevStateHash, currentStateHash ✅');
     console.log('       ↓');
-    console.log('  [Store in ComponentsTable] → Blob Storage');
+    console.log('  [Store in ComponentsTable] → In-Memory Storage');
     console.log('       ↓');
     console.log('  [Client Downloads]:');
-    console.log('    • Gets sync ops (small, just metadata + blobIds)');
+    console.log('    • Gets sync ops (small, just metadata + reference IDs)');
     console.log('    • Checks state: "Do I have prevStateHash?"');
-    console.log('    • Downloads missing blobs (de-duplicated)');
+    console.log('    • Downloads missing documents (de-duplicated)');
     console.log('    • Applies operations in sequence');
     console.log('    • Verifies blockchain chain integrity');
     console.log('    • Verifies state transitions');
@@ -933,21 +933,21 @@ async function main() {
     }
 
     const componentsBlobId = (metaFromA as any).componentsBlobId;
-    const componentsBlob = await bs.getBlob(componentsBlobId);
+    const componentsData = await bs.getBlob(componentsBlobId);
 
-    if (!componentsBlob) {
-      console.log('❌ ComponentsTable blob not found');
+    if (!componentsData) {
+      console.log('❌ ComponentsTable not found in memory');
       return;
     }
 
     const componentsTable = JSON.parse(
-      componentsBlob.content.toString('utf-8'),
+      componentsData.content.toString('utf-8'),
     );
     console.log(
       `✓ Fetched ComponentsTable with ${componentsTable._data.length} operations`,
     );
     console.log(
-      `  Payload size: ${(componentsBlob.content.length / 1024).toFixed(2)} KB`,
+      `  Payload size: ${(componentsData.content.length / 1024).toFixed(2)} KB`,
     );
     console.log(`  Table hash: ${componentsTable._hash}\n`);
 
@@ -956,7 +956,7 @@ async function main() {
     console.log('─'.repeat(60));
 
     let opsApplied = 0;
-    let blobsFetched = 0;
+    let itemsFetched = 0;
     const opTypes = { insert: 0, update: 0, replace: 0, delete: 0 };
 
     for (const syncOp of componentsTable._data) {
@@ -970,11 +970,11 @@ async function main() {
         (opTypes as any)[syncOp.operationType]++;
       }
 
-      // Fetch document blob
+      // Fetch document from memory
       const docBlobId = syncOp.payload?.fullDocumentBlobId;
 
       if (!docBlobId) {
-        console.log(`    ⚠️  No blob reference (delete operation)`);
+        console.log(`    ⚠️  No in-memory reference (delete operation)`);
 
         // Handle delete operation
         if (syncOp.operationType === 'delete') {
@@ -1005,19 +1005,19 @@ async function main() {
         continue;
       }
 
-      const docBlob = await bs.getBlob(docBlobId);
+      const docData = await bs.getBlob(docBlobId);
 
-      if (!docBlob) {
-        console.log(`    ❌ Blob not found: ${docBlobId}`);
+      if (!docData) {
+        console.log(`    ❌ Document not found in memory: ${docBlobId}`);
         continue;
       }
 
-      blobsFetched++;
-      const fullDocument = JSON.parse(docBlob.content.toString('utf-8'));
+      itemsFetched++;
+      const fullDocument = JSON.parse(docData.content.toString('utf-8'));
 
-      console.log(`    ✓ Fetched blob: ${docBlob.content.length} bytes`);
+      console.log(`    ✓ Fetched from memory: ${docData.content.length} bytes`);
       console.log(
-        `    Original _id from blob: ${fullDocument._id} (type: ${typeof fullDocument._id})`,
+        `    Original _id from storage: ${fullDocument._id} (type: ${typeof fullDocument._id})`,
       );
 
       // Convert string _id back to ObjectId if it looks like an ObjectId
@@ -1055,7 +1055,7 @@ async function main() {
 
       const restoredDoc = convertDates(fullDocument);
 
-      console.log(`    ✓ Fetched blob: ${docBlob.content.length} bytes`);
+      console.log(`    ✓ Fetched from memory: ${docData.content.length} bytes`);
 
       // Show summary of document
       if (restoredDoc.name) {
@@ -1094,7 +1094,7 @@ async function main() {
     }
 
     console.log(
-      `\n✓ Sync complete: ${opsApplied} operations applied, ${blobsFetched} blobs fetched`,
+      `\n✓ Sync complete: ${opsApplied} operations applied, ${itemsFetched} documents fetched from memory`,
     );
     console.log(`  Operation breakdown:`);
     console.log(`    • Inserts:  ${opTypes.insert}`);
@@ -1334,10 +1334,10 @@ async function main() {
       '  ✓ Small sync ops (~500 bytes) stored separately from documents (10KB+)',
     );
     console.log(
-      '  ✓ Blob de-duplication: Same document synced 100x = fetched 1x',
+      '  ✓ De-duplication: Same document synced 100x = fetched 1x',
     );
     console.log(
-      '  ✓ Bandwidth efficient: Only send blobId, check "do I have this?"',
+      '  ✓ Bandwidth efficient: Only send reference ID, check "do I have this?"',
     );
     console.log(
       '  ✓ Blockchain integrity: Every operation cryptographically linked',
@@ -1512,7 +1512,7 @@ async function main() {
     console.log('  Node C: Empty database (new node joining)\n');
 
     // Node C needs full state, not just operations
-    console.log('  Strategy 1: Fetch all documents via ComponentsTable blobs');
+    console.log('  Strategy 1: Fetch all documents via ComponentsTable references');
     console.log('    • Get all sync ops from Node A');
     console.log('    • Apply them in sequence');
     console.log('    • Result: Full database state\n');
@@ -1542,10 +1542,10 @@ async function main() {
 
       if (!docBlobId) continue;
 
-      const docBlob = await bs.getBlob(docBlobId);
-      if (!docBlob) continue;
+      const docData = await bs.getBlob(docBlobId);
+      if (!docData) continue;
 
-      const fullDocument = JSON.parse(docBlob.content.toString('utf-8'));
+      const fullDocument = JSON.parse(docData.content.toString('utf-8'));
 
       // Convert ObjectId
       if (

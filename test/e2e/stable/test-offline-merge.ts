@@ -70,8 +70,6 @@
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-import { BsMem } from '@rljson/bs';
-
 import { MongoClient, ObjectId } from 'mongodb';
 
 import { computeStateCheckpoint } from '../../../src/hashing/state-hash.ts';
@@ -79,6 +77,7 @@ import {
   createSuppressor,
   startDbChangeStream,
 } from '../../../src/watch-changes.ts';
+import { SimpleMemoryStorage } from './simple-memory-storage.ts';
 
 const MONGO_URI =
   process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
@@ -113,8 +112,8 @@ async function main() {
     const collectionB = dbB.collection('users');
     const collectionC = dbC.collection('users');
 
-    // Shared blob storage (simulates shared network storage or hub)
-    const bs = new BsMem();
+    // Shared in-memory storage (simulates shared network storage or hub)
+    const bs = new SimpleMemoryStorage();
 
     // ═══════════════════════════════════════════════════════════════════════
     // PHASE 1: Initial State - All Nodes Synchronized
