@@ -1,0 +1,244 @@
+<div
+  class="resolver-container"
+  *ngIf="conflict">
+  <header class="resolver-header">
+    <div class="header-left">
+      <a
+        routerLink="/"
+        class="back-link"
+        >← Back to List</a
+      >
+      <h1>Resolve Conflict</h1>
+    </div>
+    <div
+      class="integrity-badge"
+      *ngIf="!verifyingChain">
+      <span
+        *ngIf="hashChainValid === true"
+        class="valid"
+        >✅ Hash Chain Valid</span
+      >
+      <span
+        *ngIf="hashChainValid === false"
+        class="invalid"
+        >⚠️ Hash Chain Invalid</span
+      >
+    </div>
+  </header>
+
+  <div class="conflict-metadata">
+    <div class="metadata-item">
+      <span class="label">Document ID:</span>
+      <code>{{ conflict.documentId }}</code>
+    </div>
+    <div class="metadata-item">
+      <span class="label">Collection:</span>
+      <span>{{ conflict.database }}.{{ conflict.collection }}</span>
+    </div>
+    <div class="metadata-item">
+      <span class="label">Type:</span>
+      <span>{{ conflict.conflictType }}</span>
+    </div>
+    <div class="metadata-item">
+      <span class="label">Detected:</span>
+      <span>{{ getTimeAgo(conflict.detectedAt) }}</span>
+    </div>
+  </div>
+
+  <!-- Resolution Mode Selection -->
+  <section
+    class="resolution-modes"
+    *ngIf="!resolutionMode">
+    <h2>Choose Resolution Strategy</h2>
+    <div class="mode-cards">
+      <div
+        class="mode-card"
+        (click)="selectResolutionMode('use-local')">
+        <div class="mode-icon">📍</div>
+        <h3>Use Local Version</h3>
+        <p>Keep the version from {{ conflict.versions[0].nodeId }}</p>
+        <div class="mode-details">
+          <span>{{ conflict.versions[0].operationType }}</span>
+          <span>{{ getTimeAgo(conflict.versions[0].timestamp) }}</span>
+        </div>
+      </div>
+
+      <div
+        class="mode-card"
+        (click)="selectResolutionMode('use-remote')">
+        <div class="mode-icon">🌐</div>
+        <h3>Use Remote Version</h3>
+        <p>Keep the version from {{ conflict.versions[1].nodeId }}</p>
+        <div class="mode-details">
+          <span>{{ conflict.versions[1].operationType }}</span>
+          <span>{{ getTimeAgo(conflict.versions[1].timestamp) }}</span>
+        </div>
+      </div>
+
+      <div
+        class="mode-card"
+        (click)="selectResolutionMode('field-merge')">
+        <div class="mode-icon">🔀</div>
+        <h3>Field-by-Field Merge</h3>
+        <p>Choose specific fields from each version</p>
+        <div class="mode-details">
+          <span>{{ fieldConflicts.length }} conflicting fields</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Version Comparison for use-local/use-remote -->
+  <section
+    class="version-comparison"
+    *ngIf="resolutionMode && resolutionMode !== 'field-merge'">
+    <div class="comparison-header">
+      <h2>Version Comparison</h2>
+      <button
+        class="btn-secondary"
+        (click)="resolutionMode = null">
+        Change Strategy
+      </button>
+    </div>
+
+    <div class="versions-grid">
+      <div
+        class="version-panel"
+        [class.selected]="resolutionMode === 'use-local'">
+        <div class="version-header">
+          <h3>📍 Local Version</h3>
+          <span class="node-id">{{ conflict.versions[0].nodeId }}</span>
+        </div>
+        <div class="version-meta">
+          <span>{{ conflict.versions[0].operationType }}</span>
+          <span>{{ getTimeAgo(conflict.versions[0].timestamp) }}</span>
+        </div>
+        <pre class="json-viewer">{{
+          formatJson(conflict.versions[0].data)
+        }}</pre>
+      </div>
+
+      <div
+        class="version-panel"
+        [class.selected]="resolutionMode === 'use-remote'">
+        <div class="version-header">
+          <h3>🌐 Remote Version</h3>
+          <span class="node-id">{{ conflict.versions[1].nodeId }}</span>
+        </div>
+        <div class="version-meta">
+          <span>{{ conflict.versions[1].operationType }}</span>
+          <span>{{ getTimeAgo(conflict.versions[1].timestamp) }}</span>
+        </div>
+        <pre class="json-viewer">{{
+          formatJson(conflict.versions[1].data)
+        }}</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Field-by-Field Merge Interface -->
+  <section
+    class="field-merge"
+    *ngIf="resolutionMode === 'field-merge'">
+    <div class="merge-header">
+      <h2>Field-by-Field Merge</h2>
+      <button
+        class="btn-secondary"
+        (click)="resolutionMode = null">
+        Change Strategy
+      </button>
+    </div>
+
+    <div class="field-conflicts">
+      <div
+        class="field-conflict-item"
+        *ngFor="let fieldConflict of fieldConflicts">
+        <div class="field-name">
+          <code>{{ fieldConflict.fieldPath }}</code>
+        </div>
+
+        <div class="field-values">
+          <div
+            class="field-value-option"
+            [class.selected]="
+              fieldConflict.selectedValue === fieldConflict.localValue
+            "
+            (click)="selectFieldValue(fieldConflict, true)">
+            <div class="option-header">
+              <input
+                type="radio"
+                [checked]="
+                  fieldConflict.selectedValue === fieldConflict.localValue
+                "
+                [name]="fieldConflict.fieldPath" />
+              <span class="source-label"
+                >Local ({{ conflict.versions[0].nodeId }})</span
+              >
+            </div>
+            <pre class="value-display">{{
+              diffService.formatValue(fieldConflict.localValue)
+            }}</pre>
+          </div>
+
+          <div
+            class="field-value-option"
+            [class.selected]="
+              fieldConflict.selectedValue === fieldConflict.remoteValue
+            "
+            (click)="selectFieldValue(fieldConflict, false)">
+            <div class="option-header">
+              <input
+                type="radio"
+                [checked]="
+                  fieldConflict.selectedValue === fieldConflict.remoteValue
+                "
+                [name]="fieldConflict.fieldPath" />
+              <span class="source-label"
+                >Remote ({{ conflict.versions[1].nodeId }})</span
+              >
+            </div>
+            <pre class="value-display">{{
+              diffService.formatValue(fieldConflict.remoteValue)
+            }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      class="merged-preview"
+      *ngIf="mergedDocument">
+      <h3>Merged Document Preview</h3>
+      <pre class="json-viewer">{{ formatJson(mergedDocument) }}</pre>
+    </div>
+  </section>
+
+  <!-- Action Buttons -->
+  <div
+    class="resolution-actions"
+    *ngIf="resolutionMode">
+    <button
+      class="btn-cancel"
+      (click)="resolutionMode = null">
+      Cancel
+    </button>
+    <button
+      class="btn-submit"
+      (click)="submitResolution()">
+      ✅ Apply Resolution
+    </button>
+  </div>
+
+  <div
+    class="error-message"
+    *ngIf="error">
+    {{ error }}
+  </div>
+</div>
+
+<div
+  class="loading-state"
+  *ngIf="loading">
+  <div class="spinner"></div>
+  <p>Loading conflict details...</p>
+</div>

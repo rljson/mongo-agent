@@ -30,5 +30,8 @@ Thumbs.db
 # Optional npm cache files
 .npm/
 
+# Angular cache
+.angular/
+
 # Other
 *.lock  # (Optional: for ignoring package-lock.json or yarn.lock if you don't want to version them)

@@ -13,7 +13,8 @@
  * - Health monitoring
  */
 
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { FastifyInstance } from 'fastify';
+
 
 /** Default port for the hub server */
 const PORT = parseInt(process.env.PORT || '3200', 10);
@@ -111,7 +112,7 @@ export function createHubApp(options: HubAppOptions = {}): {
       const clientId = req.params.clientId;
       registry.delete(clientId);
       return { ok: true };
-    }
+    },
   );
 
   /**
@@ -209,7 +210,7 @@ export function createHubApp(options: HubAppOptions = {}): {
             targetUrl,
             statusCode: resp.status,
           },
-          'relay ok'
+          'relay ok',
         );
 
         // Return JSON as JSON, otherwise text
@@ -223,7 +224,7 @@ export function createHubApp(options: HubAppOptions = {}): {
                 targetUrl,
                 message: err instanceof Error ? err.message : String(err),
               },
-              'relay response claimed JSON but could not be parsed'
+              'relay response claimed JSON but could not be parsed',
             );
             return text;
           }
@@ -237,7 +238,7 @@ export function createHubApp(options: HubAppOptions = {}): {
             targetUrl,
             message: err instanceof Error ? err.message : String(err),
           },
-          'relay failed'
+          'relay failed',
         );
 
         return reply.code(502).send({
@@ -247,7 +248,7 @@ export function createHubApp(options: HubAppOptions = {}): {
           message: err instanceof Error ? err.message : String(err),
         });
       }
-    }
+    },
   );
 
   /**
@@ -278,4 +279,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 /* v8 ignore stop */
-
