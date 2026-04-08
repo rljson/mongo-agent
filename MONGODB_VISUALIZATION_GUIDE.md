@@ -5,6 +5,7 @@
 ### 1. **MongoDB Compass** (Recommended - Official GUI)
 
 **Download & Install:**
+
 ```bash
 # macOS - Install via Homebrew
 brew install --cask mongodb-compass
@@ -13,18 +14,21 @@ brew install --cask mongodb-compass
 ```
 
 **Connect to Your Docker MongoDB:**
+
 1. Open MongoDB Compass
 2. Connection string: `mongodb://localhost:27017`
 3. Click "Connect"
 
 **What You'll See:**
-- **Databases:** syncdb, CARATDB, test_* databases
-- **Collections:** 
+
+- **Databases:** syncdb, CARATDB, test\_\* databases
+- **Collections:**
   - `sync_ops` - 66,557+ operations with hash chains
   - `articles` - Your synced articles
   - `sync_state`, `state_merkle`, etc.
 
 **Features:**
+
 - ✅ Visual query builder
 - ✅ Aggregation pipeline builder
 - ✅ Schema analyzer
@@ -36,17 +40,20 @@ brew install --cask mongodb-compass
 ### 2. **MongoDB VS Code Extension**
 
 **Install:**
+
 1. Open VS Code
 2. Go to Extensions (⌘+Shift+X)
 3. Search for "MongoDB for VS Code"
 4. Install it
 
 **Connect:**
+
 1. Click MongoDB icon in sidebar
 2. Add connection: `mongodb://localhost:27017`
 3. Browse your databases right in VS Code!
 
 **Features:**
+
 - ✅ IntelliSense for MongoDB queries
 - ✅ Run queries from `.mongodb` files
 - ✅ Document editing
@@ -59,6 +66,7 @@ brew install --cask mongodb-compass
 **Download:** https://studio3t.com/download/
 
 **Features:**
+
 - ✅ SQL to MongoDB query translation
 - ✅ Visual query builder
 - ✅ Data comparison
@@ -69,6 +77,7 @@ brew install --cask mongodb-compass
 ## 🔍 Quick Queries to Run
 
 ### View Operations with Hash Chains
+
 ```javascript
 // In MongoDB Compass or mongosh
 use syncdb
@@ -76,59 +85,66 @@ db.sync_ops.find({}).sort({seq: -1}).limit(10).pretty()
 ```
 
 ### Find Concurrent Operations (Potential Conflicts)
+
 ```javascript
 db.sync_ops.aggregate([
   {
     $group: {
-      _id: "$docId",
+      _id: '$docId',
       operations: {
         $push: {
-          origin: "$origin",
-          operationType: "$operationType",
-          ts: "$ts",
-          seq: "$seq"
-        }
+          origin: '$origin',
+          operationType: '$operationType',
+          ts: '$ts',
+          seq: '$seq',
+        },
       },
-      count: { $sum: 1 }
-    }
+      count: { $sum: 1 },
+    },
   },
   {
     $match: {
-      count: { $gte: 2 }
-    }
+      count: { $gte: 2 },
+    },
   },
   {
-    $limit: 10
-  }
-])
+    $limit: 10,
+  },
+]);
 ```
 
 ### Get Node Statistics
+
 ```javascript
 db.sync_ops.aggregate([
   {
     $group: {
-      _id: "$origin",
+      _id: '$origin',
       totalOps: { $sum: 1 },
-      lastOperation: { $max: "$ts" },
+      lastOperation: { $max: '$ts' },
       operations: {
-        $push: "$operationType"
-      }
-    }
-  }
-])
+        $push: '$operationType',
+      },
+    },
+  },
+]);
 ```
 
 ### View Hash Chain Integrity
+
 ```javascript
-db.sync_ops.find({
-  origin: "nodeA"
-}).sort({seq: 1}).limit(5).forEach(op => {
-  print(`Seq: ${op.seq}, Hash: ${op.opHash.substring(0, 16)}...`);
-  print(`Chain: ${op.chainHash.substring(0, 16)}...`);
-  print(`Prev: ${op.prevHash.substring(0, 16)}...`);
-  print("---");
-})
+db.sync_ops
+  .find({
+    origin: 'nodeA',
+  })
+  .sort({ seq: 1 })
+  .limit(5)
+  .forEach((op) => {
+    print(`Seq: ${op.seq}, Hash: ${op.opHash.substring(0, 16)}...`);
+    print(`Chain: ${op.chainHash.substring(0, 16)}...`);
+    print(`Prev: ${op.prevHash.substring(0, 16)}...`);
+    print('---');
+  });
 ```
 
 ---
@@ -148,6 +164,7 @@ Once you have MongoDB Compass open:
    - Different `origin` (nodeA vs nodeB)
 
 3. **Create Test Conflicts:**
+
 ```javascript
 // In MongoDB Compass or mongosh
 use syncdb
@@ -204,44 +221,47 @@ db.sync_ops.insertOne({
 ## 📈 Data Visualization Tips
 
 ### 1. Operations Timeline
+
 ```javascript
 // Visualize operations over time
 db.sync_ops.aggregate([
   {
     $group: {
       _id: {
-        $dateToString: { format: "%Y-%m-%d", date: { $toDate: "$ts" } }
+        $dateToString: { format: '%Y-%m-%d', date: { $toDate: '$ts' } },
       },
-      count: { $sum: 1 }
-    }
+      count: { $sum: 1 },
+    },
   },
-  { $sort: { _id: 1 } }
-])
+  { $sort: { _id: 1 } },
+]);
 ```
 
 ### 2. Operations by Type
+
 ```javascript
 db.sync_ops.aggregate([
   {
     $group: {
-      _id: "$operationType",
-      count: { $sum: 1 }
-    }
-  }
-])
+      _id: '$operationType',
+      count: { $sum: 1 },
+    },
+  },
+]);
 ```
 
 ### 3. Node Activity
+
 ```javascript
 db.sync_ops.aggregate([
   {
     $group: {
-      _id: "$origin",
+      _id: '$origin',
       operations: { $sum: 1 },
-      collections: { $addToSet: "$ns.coll" }
-    }
-  }
-])
+      collections: { $addToSet: '$ns.coll' },
+    },
+  },
+]);
 ```
 
 ---
@@ -259,6 +279,7 @@ db.sync_ops.aggregate([
 ## 🔧 Troubleshooting
 
 **Can't connect to MongoDB?**
+
 ```bash
 # Check if Docker container is running
 docker ps | grep mongo
@@ -271,11 +292,12 @@ docker-compose restart mongoa
 ```
 
 **Slow responses?**
+
 - MongoDB might be under heavy load with 66K+ operations
 - Consider adding indexes:
   ```javascript
-  db.sync_ops.createIndex({ docId: 1, ts: 1 })
-  db.sync_ops.createIndex({ origin: 1, seq: 1 })
+  db.sync_ops.createIndex({ docId: 1, ts: 1 });
+  db.sync_ops.createIndex({ origin: 1, seq: 1 });
   ```
 
 ---

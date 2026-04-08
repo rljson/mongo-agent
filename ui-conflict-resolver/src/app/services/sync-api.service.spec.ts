@@ -106,7 +106,9 @@ describe('SyncApiService', () => {
       done();
     });
 
-    const req = httpMock.expectOne(`${service['apiBaseUrl']}/conflicts/${conflictId}`);
+    const req = httpMock.expectOne(
+      `${service['apiBaseUrl']}/conflicts/${conflictId}`,
+    );
     expect(req.request.method).toBe('GET');
     req.flush(mockConflict);
   });

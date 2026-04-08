@@ -1,11 +1,14 @@
-import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { HttpClientTestingModule } from '@angular/common/http/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+
 import { of, throwError } from 'rxjs';
 
-import { ConflictListComponent } from './conflict-list.component';
-import { SyncApiService } from '../../services/sync-api.service';
 import { ConflictInfo } from '../../models/conflict.types';
+import { SyncApiService } from '../../services/sync-api.service';
+
+import { ConflictListComponent } from './conflict-list.component';
+
 
 describe('ConflictListComponent', () => {
   let component: ConflictListComponent;
@@ -107,9 +110,15 @@ describe('ConflictListComponent', () => {
   });
 
   it('should get conflict type label', () => {
-    expect(component.getConflictTypeLabel('concurrent-update')).toBe('Concurrent Updates');
-    expect(component.getConflictTypeLabel('update-delete')).toBe('Update vs Delete');
-    expect(component.getConflictTypeLabel('concurrent-insert')).toBe('Concurrent Inserts');
+    expect(component.getConflictTypeLabel('concurrent-update')).toBe(
+      'Concurrent Updates',
+    );
+    expect(component.getConflictTypeLabel('update-delete')).toBe(
+      'Update vs Delete',
+    );
+    expect(component.getConflictTypeLabel('concurrent-insert')).toBe(
+      'Concurrent Inserts',
+    );
     expect(component.getConflictTypeLabel('unknown')).toBe('unknown');
   });
 
@@ -135,7 +144,10 @@ describe('ConflictListComponent', () => {
 
     component.triggerSync();
 
-    expect(console.error).toHaveBeenCalledWith('Failed to trigger sync:', error);
+    expect(console.error).toHaveBeenCalledWith(
+      'Failed to trigger sync:',
+      error,
+    );
   });
 
   it('should format time ago correctly', () => {

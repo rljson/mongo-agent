@@ -1,13 +1,16 @@
-import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { HttpClientTestingModule } from '@angular/common/http/testing';
-import { RouterTestingModule } from '@angular/router/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute, Router } from '@angular/router';
+import { RouterTestingModule } from '@angular/router/testing';
+
 import { of, throwError } from 'rxjs';
 
-import { ConflictResolverComponent } from './conflict-resolver.component';
-import { SyncApiService } from '../../services/sync-api.service';
-import { DiffService } from '../../services/diff.service';
 import { ConflictInfo, FieldConflict } from '../../models/conflict.types';
+import { DiffService } from '../../services/diff.service';
+import { SyncApiService } from '../../services/sync-api.service';
+
+import { ConflictResolverComponent } from './conflict-resolver.component';
+
 
 describe('ConflictResolverComponent', () => {
   let component: ConflictResolverComponent;
@@ -112,7 +115,9 @@ describe('ConflictResolverComponent', () => {
   it('should handle load conflict error', () => {
     const error = new Error('Not found');
     syncApiService.getConflict.and.returnValue(throwError(() => error));
-    syncApiService.verifyHashChain.and.returnValue(of({ valid: false, details: {} }));
+    syncApiService.verifyHashChain.and.returnValue(
+      of({ valid: false, details: {} }),
+    );
 
     fixture.detectChanges();
 
@@ -212,7 +217,9 @@ describe('ConflictResolverComponent', () => {
 
     component.submitResolution();
 
-    expect(component.error).toBe('Failed to resolve conflict: Resolution failed');
+    expect(component.error).toBe(
+      'Failed to resolve conflict: Resolution failed',
+    );
   });
 
   it('should not submit without conflict or resolution mode', () => {
@@ -253,7 +260,10 @@ describe('ConflictResolverComponent', () => {
   });
 
   it('should handle conflict with less than 2 versions', () => {
-    component.conflict = { ...mockConflict, versions: [mockConflict.versions[0]] };
+    component.conflict = {
+      ...mockConflict,
+      versions: [mockConflict.versions[0]],
+    };
 
     const result = component.getDiffForField('name');
 
