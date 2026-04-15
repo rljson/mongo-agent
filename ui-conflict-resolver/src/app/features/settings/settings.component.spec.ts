@@ -1,6 +1,8 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
+
 import { SettingsComponent } from './settings.component';
+
 
 describe('SettingsComponent', () => {
   let component: SettingsComponent;

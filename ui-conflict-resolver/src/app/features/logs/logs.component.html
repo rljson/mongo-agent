@@ -1,7 +1,7 @@
 <div class="logs">
   <div class="logs-header">
     <h2>System Logs</h2>
-    
+
     <div class="logs-stats">
       <div class="stat-badge stat-info">
         <span class="stat-icon">ℹ️</span>
@@ -29,29 +29,25 @@
         <button
           class="filter-btn"
           [class.active]="selectedLevels.has('info')"
-          (click)="toggleLevel('info')"
-        >
+          (click)="toggleLevel('info')">
           <span class="filter-icon">ℹ️</span> Info
         </button>
         <button
           class="filter-btn"
           [class.active]="selectedLevels.has('warn')"
-          (click)="toggleLevel('warn')"
-        >
+          (click)="toggleLevel('warn')">
           <span class="filter-icon">⚠️</span> Warn
         </button>
         <button
           class="filter-btn"
           [class.active]="selectedLevels.has('error')"
-          (click)="toggleLevel('error')"
-        >
+          (click)="toggleLevel('error')">
           <span class="filter-icon">❌</span> Error
         </button>
         <button
           class="filter-btn"
           [class.active]="selectedLevels.has('debug')"
-          (click)="toggleLevel('debug')"
-        >
+          (click)="toggleLevel('debug')">
           <span class="filter-icon">🔧</span> Debug
         </button>
       </div>
@@ -63,8 +59,7 @@
           placeholder="Search logs..."
           [(ngModel)]="searchTerm"
           (input)="onSearchChange()"
-          class="search-input"
-        />
+          class="search-input" />
       </div>
     </div>
 
@@ -73,28 +68,35 @@
       <label class="auto-scroll-toggle">
         <input
           type="checkbox"
-          [(ngModel)]="autoScroll"
-        />
+          [(ngModel)]="autoScroll" />
         <span>Auto-scroll</span>
       </label>
 
       <!-- Action buttons -->
-      <button class="action-btn" (click)="clearLogs()">
+      <button
+        class="action-btn"
+        (click)="clearLogs()">
         🗑️ Clear
       </button>
-      <button class="action-btn" (click)="exportLogs()">
+      <button
+        class="action-btn"
+        (click)="exportLogs()">
         💾 Export
       </button>
     </div>
   </div>
 
   <!-- Log viewer -->
-  <div class="log-viewer" #logContainer>
+  <div
+    class="log-viewer"
+    #logContainer>
     <div class="log-count-info">
       Showing {{ filteredLogs.length }} of {{ logs.length }} logs
     </div>
 
-    <div *ngIf="filteredLogs.length === 0" class="empty-state">
+    <div
+      *ngIf="filteredLogs.length === 0"
+      class="empty-state">
       <p *ngIf="logs.length === 0">No logs yet. Waiting for events...</p>
       <p *ngIf="logs.length > 0">No logs match the current filters.</p>
     </div>
@@ -106,8 +108,7 @@
         [class.log-info]="log.level === 'info'"
         [class.log-warn]="log.level === 'warn'"
         [class.log-error]="log.level === 'error'"
-        [class.log-debug]="log.level === 'debug'"
-      >
+        [class.log-debug]="log.level === 'debug'">
         <span class="log-timestamp">{{ formatTimestamp(log.timestamp) }}</span>
         <span class="log-level">
           <span class="level-icon">{{ getLevelIcon(log.level) }}</span>

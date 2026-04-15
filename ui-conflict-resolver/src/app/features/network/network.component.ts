@@ -1,9 +1,11 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+
+import { formatDistanceToNow } from 'date-fns';
 import { interval, Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
-import { formatDistanceToNow } from 'date-fns';
+
 
 type NodeRole = 'hub' | 'client' | 'unassigned';
 type FormationMethod = 'broadcast' | 'cloud' | 'static' | 'election' | 'manual';
@@ -53,7 +55,7 @@ interface DiscoveryLayer {
   standalone: true,
   imports: [CommonModule, FormsModule],
   templateUrl: './network.component.html',
-  styleUrls: ['./network.component.scss']
+  styleUrls: ['./network.component.scss'],
 })
 export class NetworkComponent implements OnInit, OnDestroy {
   // Topology state
@@ -72,7 +74,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
         port: 3000,
         role: 'hub',
         startedAt: new Date(Date.now() - 7200000),
-        isLocal: true
+        isLocal: true,
       },
       {
         nodeId: 'node-b2e4-d9',
@@ -80,7 +82,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
         addresses: ['192.168.1.37'],
         port: 3000,
         role: 'client',
-        startedAt: new Date(Date.now() - 5400000)
+        startedAt: new Date(Date.now() - 5400000),
       },
       {
         nodeId: 'node-c7f2-a1',
@@ -88,8 +90,8 @@ export class NetworkComponent implements OnInit, OnDestroy {
         addresses: ['192.168.1.249'],
         port: 3000,
         role: 'client',
-        startedAt: new Date(Date.now() - 3600000)
-      }
+        startedAt: new Date(Date.now() - 3600000),
+      },
     ],
     probes: [
       {
@@ -99,7 +101,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
         latencyMs: 3,
         failCount: 0,
         state: 'reachable',
-        lastProbeAt: new Date(Date.now() - 2000)
+        lastProbeAt: new Date(Date.now() - 2000),
       },
       {
         nodeId: 'node-b2e4-d9',
@@ -108,7 +110,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
         latencyMs: 5,
         failCount: 0,
         state: 'reachable',
-        lastProbeAt: new Date(Date.now() - 2000)
+        lastProbeAt: new Date(Date.now() - 2000),
       },
       {
         nodeId: 'node-c7f2-a1',
@@ -117,9 +119,9 @@ export class NetworkComponent implements OnInit, OnDestroy {
         latencyMs: 4,
         failCount: 0,
         state: 'reachable',
-        lastProbeAt: new Date(Date.now() - 2000)
-      }
-    ]
+        lastProbeAt: new Date(Date.now() - 2000),
+      },
+    ],
   };
 
   // Discovery layers
@@ -129,29 +131,29 @@ export class NetworkComponent implements OnInit, OnDestroy {
       type: 'broadcast',
       active: true,
       config: 'UDP:41234',
-      peerCount: 3
+      peerCount: 3,
     },
     {
       name: 'Cloud',
       type: 'cloud',
       active: false,
       config: 'Not configured',
-      peerCount: 0
+      peerCount: 0,
     },
     {
       name: 'Static',
       type: 'static',
       active: false,
       config: 'Not configured',
-      peerCount: 0
+      peerCount: 0,
     },
     {
       name: 'Manual',
       type: 'manual',
       active: true,
       config: 'No override',
-      peerCount: 0
-    }
+      peerCount: 0,
+    },
   ];
 
   // UI state
@@ -184,23 +186,28 @@ export class NetworkComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const selectedNode = this.topology.nodes.find(n => n.nodeId === this.selectedHubNodeId);
+    const selectedNode = this.topology.nodes.find(
+      (n) => n.nodeId === this.selectedHubNodeId,
+    );
     if (!selectedNode) return;
 
     console.log('Assigning hub to:', this.selectedHubNodeId);
-    
+
     // Update topology
-    this.topology.nodes.forEach(node => {
+    this.topology.nodes.forEach((node) => {
       node.role = node.nodeId === this.selectedHubNodeId ? 'hub' : 'client';
     });
-    
+
     this.topology.hubNodeId = this.selectedHubNodeId;
     this.topology.hubAddress = `${selectedNode.addresses[0]}:${selectedNode.port}`;
     this.topology.formedBy = 'manual';
     this.topology.formedAt = new Date();
-    this.topology.myRole = this.topology.nodes.find(n => n.isLocal)?.role || 'client';
+    this.topology.myRole =
+      this.topology.nodes.find((n) => n.isLocal)?.role || 'client';
 
-    alert(`Hub assigned to ${selectedNode.hostname} (${this.selectedHubNodeId})`);
+    alert(
+      `Hub assigned to ${selectedNode.hostname} (${this.selectedHubNodeId})`,
+    );
   }
 
   clearOverride(): void {
@@ -211,20 +218,21 @@ export class NetworkComponent implements OnInit, OnDestroy {
     console.log('Clearing hub override');
     this.topology.formedBy = 'election';
     this.topology.formedAt = new Date();
-    
+
     // Simulate re-election (pick node with lowest nodeId)
-    const sortedNodes = [...this.topology.nodes].sort((a, b) => 
-      a.nodeId.localeCompare(b.nodeId)
+    const sortedNodes = [...this.topology.nodes].sort((a, b) =>
+      a.nodeId.localeCompare(b.nodeId),
     );
     const newHub = sortedNodes[0];
-    
-    this.topology.nodes.forEach(node => {
+
+    this.topology.nodes.forEach((node) => {
       node.role = node.nodeId === newHub.nodeId ? 'hub' : 'client';
     });
-    
+
     this.topology.hubNodeId = newHub.nodeId;
     this.topology.hubAddress = `${newHub.addresses[0]}:${newHub.port}`;
-    this.topology.myRole = this.topology.nodes.find(n => n.isLocal)?.role || 'client';
+    this.topology.myRole =
+      this.topology.nodes.find((n) => n.isLocal)?.role || 'client';
 
     alert(`Hub override cleared. New hub: ${newHub.hostname}`);
   }
@@ -235,13 +243,21 @@ export class NetworkComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const node = this.topology.nodes.find(n => n.nodeId === this.excludeNodeId);
+    const node = this.topology.nodes.find(
+      (n) => n.nodeId === this.excludeNodeId,
+    );
     if (!node) return;
 
-    console.log('Excluding from election:', this.excludeNodeId, 'for', this.excludeDuration, 'ms');
-    
+    console.log(
+      'Excluding from election:',
+      this.excludeNodeId,
+      'for',
+      this.excludeDuration,
+      'ms',
+    );
+
     this.excludedNodes.add(this.excludeNodeId);
-    
+
     setTimeout(() => {
       this.excludedNodes.delete(this.excludeNodeId!);
       alert(`${node.hostname} is no longer excluded from election`);
@@ -252,14 +268,16 @@ export class NetworkComponent implements OnInit, OnDestroy {
   }
 
   disconnect(): void {
-    if (!confirm('Disconnect from network? This will stop all sync operations.')) {
+    if (
+      !confirm('Disconnect from network? This will stop all sync operations.')
+    ) {
       return;
     }
 
     console.log('Disconnecting from network');
     this.isConnected = false;
     this.topology.transportReady = false;
-    
+
     alert('Disconnected from network');
   }
 
@@ -267,7 +285,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
     console.log('Reconnecting to network');
     this.isConnected = true;
     this.topology.transportReady = true;
-    
+
     alert('Reconnected to network');
   }
 
@@ -282,7 +300,7 @@ Node Details:
 - Started: ${formatDistanceToNow(node.startedAt, { addSuffix: true })}
 - Local: ${node.isLocal ? 'Yes' : 'No'}
     `.trim();
-    
+
     alert(details);
   }
 
@@ -296,17 +314,20 @@ Probe Details:
 - State: ${probe.state}
 - Last Probe: ${formatDistanceToNow(probe.lastProbeAt, { addSuffix: true })}
     `.trim();
-    
+
     alert(details);
   }
 
   // Helpers
   private updateProbes(): void {
-    this.topology.probes.forEach(probe => {
+    this.topology.probes.forEach((probe) => {
       // Simulate latency fluctuation
-      probe.latencyMs = Math.max(1, probe.latencyMs + (Math.random() - 0.5) * 2);
+      probe.latencyMs = Math.max(
+        1,
+        probe.latencyMs + (Math.random() - 0.5) * 2,
+      );
       probe.lastProbeAt = new Date();
-      
+
       // Occasionally simulate failures
       if (Math.random() < 0.05) {
         probe.failCount++;
@@ -318,11 +339,11 @@ Probe Details:
   }
 
   getLocalNode(): NodeInfo | undefined {
-    return this.topology.nodes.find(n => n.isLocal);
+    return this.topology.nodes.find((n) => n.isLocal);
   }
 
   getReachableCount(): number {
-    return this.topology.probes.filter(p => p.state === 'reachable').length;
+    return this.topology.probes.filter((p) => p.state === 'reachable').length;
   }
 
   getFormationMethodLabel(method: FormationMethod): string {
@@ -331,7 +352,7 @@ Probe Details:
       cloud: 'Cloud Registry',
       static: 'Static Configuration',
       election: 'Automatic Election',
-      manual: 'Manual Assignment'
+      manual: 'Manual Assignment',
     };
     return labels[method];
   }
@@ -340,7 +361,7 @@ Probe Details:
     const icons = {
       hub: '🎯',
       client: '💻',
-      unassigned: '❓'
+      unassigned: '❓',
     };
     return icons[role];
   }
@@ -353,7 +374,7 @@ Probe Details:
     const icons = {
       reachable: '✓',
       unreachable: '✗',
-      timeout: '⏱'
+      timeout: '⏱',
     };
     return icons[state];
   }
@@ -376,7 +397,9 @@ Probe Details:
 
   getHubNode(): NodeInfo | undefined {
     if (!this.topology.hubNodeId) return undefined;
-    return this.topology.nodes.find(n => n.nodeId === this.topology.hubNodeId);
+    return this.topology.nodes.find(
+      (n) => n.nodeId === this.topology.hubNodeId,
+    );
   }
 
   getHubHostname(): string {

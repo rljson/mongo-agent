@@ -1,8 +1,10 @@
 import { CommonModule } from '@angular/common';
 import { Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Subject, interval } from 'rxjs';
+
+import { interval, Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
+
 
 type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 
@@ -18,32 +20,38 @@ interface LogEntry {
   standalone: true,
   imports: [CommonModule, FormsModule],
   templateUrl: './logs.component.html',
-  styleUrls: ['./logs.component.scss']
+  styleUrls: ['./logs.component.scss'],
 })
 export class LogsComponent implements OnInit, OnDestroy {
   @ViewChild('logContainer') logContainer?: ElementRef;
 
   logs: LogEntry[] = [];
   filteredLogs: LogEntry[] = [];
-  
+
   // Filters
   selectedLevels: Set<LogLevel> = new Set(['info', 'warn', 'error', 'debug']);
   searchTerm: string = '';
   autoScroll: boolean = true;
-  
+
   // Stats
   logCounts = {
     info: 0,
     warn: 0,
     error: 0,
-    debug: 0
+    debug: 0,
   };
 
   private destroy$ = new Subject<void>();
   private maxLogs = 500; // Keep only last 500 logs
 
   // Simulated log sources and messages
-  private logSources = ['sync-agent', 'network', 'conflict-resolver', 'hub', 'storage'];
+  private logSources = [
+    'sync-agent',
+    'network',
+    'conflict-resolver',
+    'hub',
+    'storage',
+  ];
   private logMessages = {
     info: [
       'Sync operation completed successfully',
@@ -52,29 +60,29 @@ export class LogsComponent implements OnInit, OnDestroy {
       'Document synchronized',
       'Health check passed',
       'Configuration loaded',
-      'WebSocket connection established'
+      'WebSocket connection established',
     ],
     warn: [
       'Retry attempt {n} for failed operation',
       'Network latency detected: {n}ms',
       'Approaching storage limit',
       'Peer response timeout',
-      'Using fallback configuration'
+      'Using fallback configuration',
     ],
     error: [
       'Failed to connect to MongoDB',
       'Conflict resolution failed',
       'Invalid hash chain detected',
       'Network partition detected',
-      'Authentication failed'
+      'Authentication failed',
     ],
     debug: [
       'Processing message: {data}',
       'Cache miss for key {key}',
       'Heartbeat sent to peer',
       'State transition: {old} -> {new}',
-      'Memory usage: {n}MB'
-    ]
+      'Memory usage: {n}MB',
+    ],
   };
 
   ngOnInit(): void {
@@ -96,25 +104,56 @@ export class LogsComponent implements OnInit, OnDestroy {
 
   private addInitialLogs(): void {
     const initialMessages = [
-      { level: 'info' as LogLevel, message: 'System startup initiated', source: 'hub' },
-      { level: 'info' as LogLevel, message: 'MongoDB connection established', source: 'storage' },
-      { level: 'info' as LogLevel, message: 'Sync agents initialized', source: 'sync-agent' },
-      { level: 'debug' as LogLevel, message: 'Loaded configuration from env', source: 'hub' },
-      { level: 'info' as LogLevel, message: 'Network topology formed', source: 'network' }
+      {
+        level: 'info' as LogLevel,
+        message: 'System startup initiated',
+        source: 'hub',
+      },
+      {
+        level: 'info' as LogLevel,
+        message: 'MongoDB connection established',
+        source: 'storage',
+      },
+      {
+        level: 'info' as LogLevel,
+        message: 'Sync agents initialized',
+        source: 'sync-agent',
+      },
+      {
+        level: 'debug' as LogLevel,
+        message: 'Loaded configuration from env',
+        source: 'hub',
+      },
+      {
+        level: 'info' as LogLevel,
+        message: 'Network topology formed',
+        source: 'network',
+      },
     ];
 
-    initialMessages.forEach(msg => {
+    initialMessages.forEach((msg) => {
       this.addLog(msg.level, msg.message, msg.source);
     });
   }
 
   private generateRandomLog(): void {
-    const levels: LogLevel[] = ['info', 'info', 'info', 'warn', 'error', 'debug']; // Weighted distribution
+    const levels: LogLevel[] = [
+      'info',
+      'info',
+      'info',
+      'warn',
+      'error',
+      'debug',
+    ]; // Weighted distribution
     const level = levels[Math.floor(Math.random() * levels.length)];
-    const source = this.logSources[Math.floor(Math.random() * this.logSources.length)];
-    
-    let message = this.logMessages[level][Math.floor(Math.random() * this.logMessages[level].length)];
-    
+    const source =
+      this.logSources[Math.floor(Math.random() * this.logSources.length)];
+
+    let message =
+      this.logMessages[level][
+        Math.floor(Math.random() * this.logMessages[level].length)
+      ];
+
     // Replace placeholders
     message = message
       .replace('{n}', Math.floor(Math.random() * 1000).toString())
@@ -131,7 +170,7 @@ export class LogsComponent implements OnInit, OnDestroy {
       timestamp: new Date(),
       level,
       message,
-      source
+      source,
     };
 
     this.logs.unshift(entry); // Add to beginning
@@ -163,12 +202,13 @@ export class LogsComponent implements OnInit, OnDestroy {
   }
 
   applyFilters(): void {
-    this.filteredLogs = this.logs.filter(log => {
+    this.filteredLogs = this.logs.filter((log) => {
       const levelMatch = this.selectedLevels.has(log.level);
-      const searchMatch = !this.searchTerm || 
+      const searchMatch =
+        !this.searchTerm ||
         log.message.toLowerCase().includes(this.searchTerm.toLowerCase()) ||
         log.source.toLowerCase().includes(this.searchTerm.toLowerCase());
-      
+
       return levelMatch && searchMatch;
     });
   }
@@ -182,14 +222,16 @@ export class LogsComponent implements OnInit, OnDestroy {
   }
 
   exportLogs(): void {
-    const data = this.logs.map(log => ({
+    const data = this.logs.map((log) => ({
       timestamp: log.timestamp.toISOString(),
       level: log.level,
       source: log.source,
-      message: log.message
+      message: log.message,
     }));
 
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: 'application/json',
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -214,18 +256,18 @@ export class LogsComponent implements OnInit, OnDestroy {
       info: 'ℹ️',
       warn: '⚠️',
       error: '❌',
-      debug: '🔧'
+      debug: '🔧',
     };
     return icons[level];
   }
 
   formatTimestamp(date: Date): string {
-    return date.toLocaleTimeString('en-US', { 
+    return date.toLocaleTimeString('en-US', {
       hour12: false,
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      fractionalSecondDigits: 3
+      fractionalSecondDigits: 3,
     });
   }
 }

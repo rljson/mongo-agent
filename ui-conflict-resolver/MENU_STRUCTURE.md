@@ -17,14 +17,14 @@ The UI has been restructured from a single-purpose conflict resolver into a mult
 
 ## Tab Routes
 
-| Tab | Route | Component | Status | Description |
-|-----|-------|-----------|--------|-------------|
-| **Dashboard** | `/dashboard` | `DashboardComponent` | 🚧 Placeholder | Node status, topology overview, alerts |
-| **Network** | `/network` | `NetworkComponent` | 🚧 Placeholder | Topology map, peer management |
-| **Sync** | `/sync` | `SyncComponent` | 🚧 Placeholder | File & MongoDB sync agents |
-| **Conflicts** | `/conflicts` | `ConflictListComponent` | ✅ Complete | Conflict resolution (existing) |
-| **Logs** | `/logs` | `LogsComponent` | 🚧 Placeholder | Real-time log streaming |
-| **Settings** | `/settings` | `SettingsComponent` | 🚧 Placeholder | Configuration editor |
+| Tab           | Route        | Component               | Status         | Description                            |
+| ------------- | ------------ | ----------------------- | -------------- | -------------------------------------- |
+| **Dashboard** | `/dashboard` | `DashboardComponent`    | 🚧 Placeholder | Node status, topology overview, alerts |
+| **Network**   | `/network`   | `NetworkComponent`      | 🚧 Placeholder | Topology map, peer management          |
+| **Sync**      | `/sync`      | `SyncComponent`         | 🚧 Placeholder | File & MongoDB sync agents             |
+| **Conflicts** | `/conflicts` | `ConflictListComponent` | ✅ Complete    | Conflict resolution (existing)         |
+| **Logs**      | `/logs`      | `LogsComponent`         | 🚧 Placeholder | Real-time log streaming                |
+| **Settings**  | `/settings`  | `SettingsComponent`     | 🚧 Placeholder | Configuration editor                   |
 
 ## File Structure
 
@@ -57,6 +57,7 @@ ui-conflict-resolver/
 ### Shell Component
 
 The `ShellComponent` serves as the main layout wrapper:
+
 - **Header**: Displays node ID and role badge
 - **Navigation**: Tab menu with icons and labels
 - **Content Area**: `<router-outlet>` for child routes
@@ -131,6 +132,7 @@ npm test
 ### Backward Compatibility
 
 All existing conflict resolution functionality remains intact:
+
 - ✅ Conflict list view
 - ✅ Conflict resolver with 3 strategies
 - ✅ Real-time polling

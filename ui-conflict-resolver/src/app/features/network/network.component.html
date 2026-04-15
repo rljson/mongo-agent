@@ -2,7 +2,9 @@
   <div class="network-header">
     <h2>Network Topology</h2>
     <div class="header-info">
-      <span class="transport-badge" [class.ready]="topology.transportReady">
+      <span
+        class="transport-badge"
+        [class.ready]="topology.transportReady">
         {{ topology.transportReady ? '● Ready' : '○ Not Ready' }}
       </span>
       <span class="formation-info">
@@ -20,30 +22,44 @@
       <h3>Topology Map</h3>
       <div class="topology-stats">
         <span class="stat">{{ topology.nodes.length }} nodes</span>
-        <span class="stat">{{ getReachableCount() }}/{{ topology.probes.length }} reachable</span>
+        <span class="stat"
+          >{{ getReachableCount() }}/{{
+            topology.probes.length
+          }}
+          reachable</span
+        >
       </div>
     </div>
 
     <div class="topology-map">
       <!-- Hub Node -->
       <div class="topology-container">
-        <div 
-          *ngFor="let node of topology.nodes" 
+        <div
+          *ngFor="let node of topology.nodes"
           class="topology-node"
           [class.hub]="node.role === 'hub'"
           [class.client]="node.role === 'client'"
           [class.local]="node.isLocal"
           [class.excluded]="isNodeExcluded(node.nodeId)"
-          (click)="viewNodeDetails(node)"
-        >
+          (click)="viewNodeDetails(node)">
           <div class="node-icon">{{ getRoleIcon(node.role) }}</div>
           <div class="node-info">
             <div class="node-hostname">{{ node.hostname }}</div>
             <div class="node-role">{{ node.role }}</div>
-            <div class="node-address">{{ node.addresses[0] }}:{{ node.port }}</div>
+            <div class="node-address"
+              >{{ node.addresses[0] }}:{{ node.port }}</div
+            >
             <div class="node-id">{{ shortenNodeId(node.nodeId) }}</div>
-            <div class="node-badge" *ngIf="node.isLocal">Local</div>
-            <div class="node-badge excluded" *ngIf="isNodeExcluded(node.nodeId)">Excluded</div>
+            <div
+              class="node-badge"
+              *ngIf="node.isLocal"
+              >Local</div
+            >
+            <div
+              class="node-badge excluded"
+              *ngIf="isNodeExcluded(node.nodeId)"
+              >Excluded</div
+            >
           </div>
         </div>
       </div>
@@ -70,23 +86,26 @@
   <!-- Actions -->
   <div class="actions-section">
     <h3>Network Actions</h3>
-    
+
     <div class="actions-grid">
       <!-- Assign Hub -->
       <div class="action-card">
         <label class="action-label">Assign Hub</label>
         <div class="action-controls">
-          <select [(ngModel)]="selectedHubNodeId" class="select-input">
+          <select
+            [(ngModel)]="selectedHubNodeId"
+            class="select-input">
             <option [value]="null">Select node...</option>
-            <option *ngFor="let node of topology.nodes" [value]="node.nodeId">
+            <option
+              *ngFor="let node of topology.nodes"
+              [value]="node.nodeId">
               {{ node.hostname }} ({{ node.role }})
             </option>
           </select>
-          <button 
-            class="btn-primary" 
+          <button
+            class="btn-primary"
             (click)="assignHub()"
-            [disabled]="!selectedHubNodeId"
-          >
+            [disabled]="!selectedHubNodeId">
             Assign Hub
           </button>
         </div>
@@ -96,10 +115,14 @@
       <div class="action-card">
         <label class="action-label">Hub Override</label>
         <div class="action-controls">
-          <div class="current-hub" *ngIf="topology.hubNodeId">
+          <div
+            class="current-hub"
+            *ngIf="topology.hubNodeId">
             Current: {{ getHubHostname() }}
           </div>
-          <button class="btn-secondary" (click)="clearOverride()">
+          <button
+            class="btn-secondary"
+            (click)="clearOverride()">
             Clear Override
           </button>
         </div>
@@ -109,23 +132,28 @@
       <div class="action-card">
         <label class="action-label">Exclude from Election</label>
         <div class="action-controls">
-          <select [(ngModel)]="excludeNodeId" class="select-input">
+          <select
+            [(ngModel)]="excludeNodeId"
+            class="select-input">
             <option [value]="null">Select node...</option>
-            <option *ngFor="let node of topology.nodes" [value]="node.nodeId">
+            <option
+              *ngFor="let node of topology.nodes"
+              [value]="node.nodeId">
               {{ node.hostname }}
             </option>
           </select>
-          <select [(ngModel)]="excludeDuration" class="select-input duration">
+          <select
+            [(ngModel)]="excludeDuration"
+            class="select-input duration">
             <option [value]="60000">1 minute</option>
             <option [value]="300000">5 minutes</option>
             <option [value]="600000">10 minutes</option>
             <option [value]="1800000">30 minutes</option>
           </select>
-          <button 
-            class="btn-warning" 
+          <button
+            class="btn-warning"
             (click)="excludeFromElection()"
-            [disabled]="!excludeNodeId"
-          >
+            [disabled]="!excludeNodeId">
             Exclude
           </button>
         </div>
@@ -136,22 +164,22 @@
         <label class="action-label">Connection</label>
         <div class="action-controls">
           <div class="connection-status">
-            <span [class.connected]="isConnected" [class.disconnected]="!isConnected">
+            <span
+              [class.connected]="isConnected"
+              [class.disconnected]="!isConnected">
               {{ isConnected ? '● Connected' : '○ Disconnected' }}
             </span>
           </div>
-          <button 
-            *ngIf="isConnected" 
-            class="btn-danger" 
-            (click)="disconnect()"
-          >
+          <button
+            *ngIf="isConnected"
+            class="btn-danger"
+            (click)="disconnect()">
             Disconnect
           </button>
-          <button 
-            *ngIf="!isConnected" 
-            class="btn-success" 
-            (click)="reconnect()"
-          >
+          <button
+            *ngIf="!isConnected"
+            class="btn-success"
+            (click)="reconnect()">
             Reconnect
           </button>
         </div>
@@ -176,11 +204,10 @@
         <div class="col-action">Action</div>
       </div>
       <div class="table-body">
-        <div 
-          *ngFor="let probe of topology.probes" 
+        <div
+          *ngFor="let probe of topology.probes"
           class="table-row"
-          [class]="getStateClass(probe.state)"
-        >
+          [class]="getStateClass(probe.state)">
           <div class="col-peer">
             <div class="peer-name">{{ probe.hostname }}</div>
             <div class="peer-id">{{ shortenNodeId(probe.nodeId) }}</div>
@@ -189,22 +216,32 @@
             <code>{{ probe.address }}</code>
           </div>
           <div class="col-latency">
-            <span class="latency-value" [class.good]="probe.latencyMs < 10" [class.medium]="probe.latencyMs >= 10 && probe.latencyMs < 50" [class.bad]="probe.latencyMs >= 50">
+            <span
+              class="latency-value"
+              [class.good]="probe.latencyMs < 10"
+              [class.medium]="probe.latencyMs >= 10 && probe.latencyMs < 50"
+              [class.bad]="probe.latencyMs >= 50">
               {{ probe.latencyMs.toFixed(1) }}ms
             </span>
           </div>
           <div class="col-fails">
-            <span class="fail-count" [class.has-fails]="probe.failCount > 0">
+            <span
+              class="fail-count"
+              [class.has-fails]="probe.failCount > 0">
               {{ probe.failCount }}
             </span>
           </div>
           <div class="col-state">
-            <span class="state-badge" [class]="getStateClass(probe.state)">
+            <span
+              class="state-badge"
+              [class]="getStateClass(probe.state)">
               {{ getStateIcon(probe.state) }} {{ probe.state }}
             </span>
           </div>
           <div class="col-action">
-            <button class="btn-small" (click)="viewProbeDetails(probe)">
+            <button
+              class="btn-small"
+              (click)="viewProbeDetails(probe)">
               Details
             </button>
           </div>
@@ -221,11 +258,10 @@
     </div>
 
     <div class="discovery-grid">
-      <div 
-        *ngFor="let layer of discoveryLayers" 
+      <div
+        *ngFor="let layer of discoveryLayers"
         class="discovery-card"
-        [class.active]="layer.active"
-      >
+        [class.active]="layer.active">
         <div class="discovery-header">
           <div class="discovery-name">
             <span class="discovery-icon">{{ layer.active ? '●' : '○' }}</span>
@@ -235,7 +271,9 @@
         </div>
         <div class="discovery-body">
           <div class="discovery-config">{{ layer.config }}</div>
-          <div class="discovery-peers" *ngIf="layer.peerCount > 0">
+          <div
+            class="discovery-peers"
+            *ngIf="layer.peerCount > 0">
             {{ layer.peerCount }} peer{{ layer.peerCount !== 1 ? 's' : '' }}
           </div>
         </div>
@@ -244,12 +282,16 @@
   </div>
 
   <!-- Current Node Info -->
-  <div class="node-info-section" *ngIf="getLocalNode() as localNode">
+  <div
+    class="node-info-section"
+    *ngIf="getLocalNode() as localNode">
     <h3>This Node</h3>
     <div class="node-info-grid">
       <div class="info-item">
         <span class="label">Role:</span>
-        <span class="value" [class]="getRoleClass(topology.myRole)">
+        <span
+          class="value"
+          [class]="getRoleClass(topology.myRole)">
           {{ getRoleIcon(topology.myRole) }} {{ topology.myRole }}
         </span>
       </div>
@@ -263,15 +305,21 @@
       </div>
       <div class="info-item">
         <span class="label">Address:</span>
-        <code class="value">{{ localNode.addresses[0] }}:{{ localNode.port }}</code>
+        <code class="value"
+          >{{ localNode.addresses[0] }}:{{ localNode.port }}</code
+        >
       </div>
       <div class="info-item">
         <span class="label">Uptime:</span>
-        <span class="value">{{ formatDistanceToNow(localNode.startedAt) }}</span>
+        <span class="value">{{
+          formatDistanceToNow(localNode.startedAt)
+        }}</span>
       </div>
       <div class="info-item">
         <span class="label">Transport:</span>
-        <span class="value" [class.ready]="topology.transportReady">
+        <span
+          class="value"
+          [class.ready]="topology.transportReady">
           {{ topology.transportReady ? '● Ready' : '○ Not Ready' }}
         </span>
       </div>

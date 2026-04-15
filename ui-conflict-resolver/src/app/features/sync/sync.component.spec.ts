@@ -1,6 +1,10 @@
-import { ComponentFixture, TestBed, fakeAsync, tick, flush, discardPeriodicTasks } from '@angular/core/testing';
+import {
+  ComponentFixture, discardPeriodicTasks, fakeAsync, flush, TestBed, tick
+} from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+
 import { SyncComponent } from './sync.component';
+
 
 describe('SyncComponent', () => {
   let component: SyncComponent;
@@ -35,9 +39,9 @@ describe('SyncComponent', () => {
   it('should build database tree on init', fakeAsync(() => {
     fixture.detectChanges();
     tick();
-    
+
     expect(component.databaseTree.length).toBeGreaterThan(0);
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -45,23 +49,23 @@ describe('SyncComponent', () => {
   it('should update mongo agent periodically', fakeAsync(() => {
     fixture.detectChanges();
     const initialSeq = component.mongoAgent.lastSeq;
-    
+
     tick(5000);
-    
+
     expect(component.mongoAgent.lastSeq).toBeGreaterThan(initialSeq);
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should simulate collection sync', fakeAsync(() => {
     fixture.detectChanges();
-    
+
     tick(3000);
-    
+
     // Collection sync should have been called
     expect(component.databaseTree.length).toBeGreaterThan(0);
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -69,7 +73,7 @@ describe('SyncComponent', () => {
   it('should rescan agent', fakeAsync(() => {
     spyOn(console, 'log');
     component.rescanAgent();
-    
+
     expect(component.mongoAgent.status).toBe('syncing');
     tick(1000);
     expect(console.log).toHaveBeenCalledWith('Re-scanning MongoDB agent...');
@@ -78,9 +82,9 @@ describe('SyncComponent', () => {
   it('should reset agent with confirmation', () => {
     spyOn(window, 'confirm').and.returnValue(true);
     spyOn(console, 'log');
-    
+
     component.resetAgent();
-    
+
     expect(component.mongoAgent.lastSeq).toBe(0);
     expect(component.mongoAgent.lastHash).toBe('GENESIS');
     expect(component.mongoAgent.lastSyncAt).toBeNull();
@@ -89,9 +93,9 @@ describe('SyncComponent', () => {
   it('should not reset agent without confirmation', () => {
     spyOn(window, 'confirm').and.returnValue(false);
     const initialSeq = component.mongoAgent.lastSeq;
-    
+
     component.resetAgent();
-    
+
     expect(component.mongoAgent.lastSeq).toBe(initialSeq);
   });
 
@@ -104,9 +108,9 @@ describe('SyncComponent', () => {
     spyOn(console, 'log');
     const origin = component.syncOrigins[0];
     const initialSeq = origin.lastSeqPulled;
-    
+
     component.syncOrigin(origin);
-    
+
     expect(origin.status).toBe('pending');
     tick(1500);
     expect(origin.lastSeqPulled).toBeGreaterThan(initialSeq);
@@ -116,9 +120,9 @@ describe('SyncComponent', () => {
   it('should view origin details', () => {
     spyOn(console, 'log');
     const origin = component.syncOrigins[0];
-    
+
     component.viewOriginDetails(origin);
-    
+
     expect(console.log).toHaveBeenCalledWith('View origin details:', origin);
   });
 
@@ -173,22 +177,22 @@ describe('SyncComponent', () => {
     component.buildDatabaseTree();
     const db = component.databaseTree[0];
     const initialExpanded = db.expanded;
-    
+
     component.toggleDatabase(db);
-    
+
     expect(db.expanded).toBe(!initialExpanded);
   });
 
   it('should sync collection', fakeAsync(() => {
     spyOn(console, 'log');
     const collection = component.collections[0];
-    
+
     component.syncCollection(collection);
-    
+
     expect(collection.syncStatus).toBe('syncing');
     tick(2000);
     expect(collection.syncStatus).toBe('synced');
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -197,18 +201,18 @@ describe('SyncComponent', () => {
     spyOn(console, 'log');
     component.buildDatabaseTree();
     const db = component.databaseTree[0];
-    
+
     component.syncDatabase(db);
-    
+
     expect(db.syncStatus).toBe('syncing');
-    db.collections.forEach(coll => {
+    db.collections.forEach((coll) => {
       expect(coll.syncStatus).toBe('syncing');
     });
-    
+
     tick(3000);
     // Tree should be rebuilt after sync
     expect(component.databaseTree.length).toBeGreaterThan(0);
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -227,9 +231,9 @@ describe('SyncComponent', () => {
 
   it('should build database tree correctly', () => {
     component.buildDatabaseTree();
-    
+
     expect(component.databaseTree.length).toBeGreaterThan(0);
-    component.databaseTree.forEach(db => {
+    component.databaseTree.forEach((db) => {
       expect(db.collections.length).toBeGreaterThan(0);
       expect(db.totalDocuments).toBeGreaterThan(0);
     });
@@ -237,21 +241,21 @@ describe('SyncComponent', () => {
 
   it('should unsubscribe on destroy', fakeAsync(() => {
     fixture.detectChanges();
-    
+
     spyOn(component['destroy$'], 'next');
     spyOn(component['destroy$'], 'complete');
-    
+
     component.ngOnDestroy();
-    
+
     expect(component['destroy$'].next).toHaveBeenCalled();
     expect(component['destroy$'].complete).toHaveBeenCalled();
-    
+
     discardPeriodicTasks();
   }));
 
   it('should handle multiple sync origins', () => {
     expect(component.syncOrigins.length).toBeGreaterThan(0);
-    component.syncOrigins.forEach(origin => {
+    component.syncOrigins.forEach((origin) => {
       expect(origin.nodeId).toBeDefined();
       expect(origin.origin).toBeDefined();
     });
@@ -259,7 +263,7 @@ describe('SyncComponent', () => {
 
   it('should display recent operations', () => {
     expect(component.recentOperations.length).toBeGreaterThan(0);
-    component.recentOperations.forEach(op => {
+    component.recentOperations.forEach((op) => {
       expect(op.seq).toBeDefined();
       expect(op.operationType).toBeDefined();
     });

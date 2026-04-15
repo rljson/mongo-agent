@@ -1,6 +1,10 @@
-import { ComponentFixture, TestBed, fakeAsync, tick, flush, discardPeriodicTasks } from '@angular/core/testing';
+import {
+  ComponentFixture, discardPeriodicTasks, fakeAsync, flush, TestBed, tick
+} from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
+
 import { NetworkComponent } from './network.component';
+
 
 describe('NetworkComponent', () => {
   let component: NetworkComponent;
@@ -35,12 +39,14 @@ describe('NetworkComponent', () => {
     fixture.detectChanges();
     const initialProbe = component.topology.probes[0];
     const initialTimestamp = initialProbe.lastProbeAt;
-    
+
     tick(3000);
-    
-    const updatedProbe = component.topology.probes.find(p => p.nodeId === initialProbe.nodeId);
+
+    const updatedProbe = component.topology.probes.find(
+      (p) => p.nodeId === initialProbe.nodeId,
+    );
     expect(updatedProbe?.lastProbeAt).not.toEqual(initialTimestamp);
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -105,7 +111,7 @@ describe('NetworkComponent', () => {
   });
 
   it('should identify local node', () => {
-    const localNode = component.topology.nodes.find(n => n.isLocal);
+    const localNode = component.topology.nodes.find((n) => n.isLocal);
     expect(localNode).toBeDefined();
   });
 
@@ -115,21 +121,23 @@ describe('NetworkComponent', () => {
   });
 
   it('should calculate reachable nodes', () => {
-    const reachable = component.topology.probes.filter(p => p.state === 'reachable');
+    const reachable = component.topology.probes.filter(
+      (p) => p.state === 'reachable',
+    );
     expect(reachable.length).toBeGreaterThanOrEqual(0);
   });
 
   it('should unsubscribe on destroy', fakeAsync(() => {
     fixture.detectChanges();
-    
+
     spyOn(component['destroy$'], 'next');
     spyOn(component['destroy$'], 'complete');
-    
+
     component.ngOnDestroy();
-    
+
     expect(component['destroy$'].next).toHaveBeenCalled();
     expect(component['destroy$'].complete).toHaveBeenCalled();
-    
+
     discardPeriodicTasks();
   }));
 
@@ -151,4 +159,3 @@ describe('NetworkComponent', () => {
     expect(typeof label).toBe('string');
   });
 });
-

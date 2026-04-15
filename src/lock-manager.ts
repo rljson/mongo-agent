@@ -6,13 +6,14 @@
 
 /**
  * Lock Manager for distributed record locking
- * 
+ *
  * Prevents concurrent edits across multiple nodes by maintaining
  * a locking collection in MongoDB. When a record is locked by one
  * node, other nodes cannot modify it until the lock is released.
  */
 
 import { Collection, Db } from 'mongodb';
+
 
 /**
  * Common fields for all database records
@@ -31,15 +32,15 @@ interface CommonFields {
  * Lock record stored in the locking collection
  */
 export interface LockRecord {
-  _id: string;           // Format: "typ-value" e.g., "8-127731"
-  typ: number;           // Type of the locked entity (e.g., 8 for users)
-  value: string;         // ID of the locked record
-  key: string;           // User/node key doing the locking
-  name: string;          // User/node name
-  telefone?: string;     // Optional phone number
-  eMail?: string;        // Optional email
-  compName: string;      // Computer/node name
-  clientName?: string;   // Optional client name
+  _id: string; // Format: "typ-value" e.g., "8-127731"
+  typ: number; // Type of the locked entity (e.g., 8 for users)
+  value: string; // ID of the locked record
+  key: string; // User/node key doing the locking
+  name: string; // User/node name
+  telefone?: string; // Optional phone number
+  eMail?: string; // Optional email
+  compName: string; // Computer/node name
+  clientName?: string; // Optional client name
   commonFields: CommonFields;
 }
 
@@ -54,7 +55,7 @@ export const EntityType = {
   // Add more entity types as needed
 } as const;
 
-export type EntityTypeValue = typeof EntityType[keyof typeof EntityType];
+export type EntityTypeValue = (typeof EntityType)[keyof typeof EntityType];
 
 /**
  * Options for acquiring a lock
@@ -62,9 +63,9 @@ export type EntityTypeValue = typeof EntityType[keyof typeof EntityType];
 export interface LockOptions {
   typ: number;
   value: string;
-  key: string;          // Who is locking (node/user ID)
-  name: string;         // Display name of locker
-  compName: string;     // Computer/node name
+  key: string; // Who is locking (node/user ID)
+  name: string; // Display name of locker
+  compName: string; // Computer/node name
   telefone?: string;
   eMail?: string;
   clientName?: string;
@@ -75,7 +76,7 @@ export interface LockOptions {
  */
 export class LockManager {
   private lockCollection: Collection<LockRecord>;
-  
+
   constructor(private db: Db) {
     this.lockCollection = db.collection<LockRecord>('locking');
   }
@@ -85,9 +86,15 @@ export class LockManager {
    */
   async initialize(): Promise<void> {
     // Create indexes for efficient queries
-    await this.lockCollection.createIndex({ typ: 1, value: 1 }, { unique: false });
+    await this.lockCollection.createIndex(
+      { typ: 1, value: 1 },
+      { unique: false },
+    );
     await this.lockCollection.createIndex({ key: 1 }, { unique: false });
-    await this.lockCollection.createIndex({ 'commonFields.createdAt': 1 }, { unique: false });
+    await this.lockCollection.createIndex(
+      { 'commonFields.createdAt': 1 },
+      { unique: false },
+    );
   }
 
   /**
@@ -103,10 +110,10 @@ export class LockManager {
    */
   async acquireLock(options: LockOptions): Promise<boolean> {
     const lockId = this.generateLockId(options.typ, options.value);
-    
+
     // Check if lock already exists
     const existingLock = await this.lockCollection.findOne({ _id: lockId });
-    
+
     if (existingLock) {
       // Lock exists - check if it's by the same key (re-entrant lock)
       if (existingLock.key === options.key) {
@@ -116,9 +123,9 @@ export class LockManager {
           {
             $set: {
               'commonFields.updatedAt': new Date(),
-              'commonFields.updatedBy': options.key
-            }
-          }
+              'commonFields.updatedBy': options.key,
+            },
+          },
         );
         return true;
       }
@@ -145,8 +152,8 @@ export class LockManager {
         version: 1,
         recordNo: 0,
         createdAt: now,
-        updatedAt: now
-      }
+        updatedAt: now,
+      },
     };
 
     try {
@@ -154,7 +161,8 @@ export class LockManager {
       return true;
     } catch (err: any) {
       // Handle race condition where another node acquired lock simultaneously
-      if (err.code === 11000) { // Duplicate key error
+      if (err.code === 11000) {
+        // Duplicate key error
         return false;
       }
       throw err;
@@ -167,10 +175,10 @@ export class LockManager {
    */
   async releaseLock(typ: number, value: string, key: string): Promise<boolean> {
     const lockId = this.generateLockId(typ, value);
-    
+
     const result = await this.lockCollection.deleteOne({
       _id: lockId,
-      key: key  // Ensure only the owner can release
+      key: key, // Ensure only the owner can release
     });
 
     return result.deletedCount === 1;
@@ -214,9 +222,9 @@ export class LockManager {
    */
   async removeOldLocks(maxAgeMs: number): Promise<number> {
     const cutoffDate = new Date(Date.now() - maxAgeMs);
-    
+
     const result = await this.lockCollection.deleteMany({
-      'commonFields.updatedAt': { $lt: cutoffDate }
+      'commonFields.updatedAt': { $lt: cutoffDate },
     });
 
     return result.deletedCount;
@@ -228,7 +236,7 @@ export class LockManager {
    */
   async canModify(typ: number, value: string, key: string): Promise<boolean> {
     const lock = await this.isLocked(typ, value);
-    
+
     // No lock exists - modification allowed
     if (!lock) {
       return true;
@@ -240,6 +248,26 @@ export class LockManager {
 
   /**
    * Attempt to acquire lock with retry
+   */
+  async acquireLockWithRetry(
+    options: LockOptions,
+    maxRetries = 3,
+    retryDelayMs = 100,
+  ): Promise<boolean> {
+    for (let i = 0; i < maxRetries; i++) {
+      const acquired = await this.acquireLock(options);
+      if (acquired) {
+        return true;
+      }
+
+      if (i < maxRetries - 1) {
+        await new Promise((resolve)
+
+  /**
+   * Attempt to acquire lock with retry
+   * @param options
+   * @param maxRetries
+   * @param retryDelayMs
    */
   async acquireLockWithRetry(
     options: LockOptions,
@@ -263,6 +291,7 @@ export class LockManager {
 
 /**
  * Create a lock manager instance
+ * @param db
  */
 export function createLockManager(db: Db): LockManager {
   return new LockManager(db);

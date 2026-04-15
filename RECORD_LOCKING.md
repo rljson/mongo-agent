@@ -36,18 +36,17 @@ const acquired = await lockManager.acquireLock({
   key: 'node-a',
   name: 'Node A',
   compName: 'SERVER-A-01',
-  eMail: 'node-a@example.com'
+  eMail: 'node-a@example.com',
 });
 
 if (acquired) {
   console.log('Lock acquired, can edit user');
-  
+
   // Perform modifications...
-  await db.collection('users').updateOne(
-    { _id: 'user-123' },
-    { $set: { name: 'Updated Name' } }
-  );
-  
+  await db
+    .collection('users')
+    .updateOne({ _id: 'user-123' }, { $set: { name: 'Updated Name' } });
+
   // Release lock
   await lockManager.releaseLock(EntityType.USERS, 'user-123', 'node-a');
 } else {
@@ -126,10 +125,10 @@ Locks are stored in the `locking` collection with the following structure:
 Predefined entity types:
 
 ```typescript
-EntityType.USERS     // 8
-EntityType.ORDERS    // 9
-EntityType.PRODUCTS  // 10
-EntityType.ARTICLES  // 11
+EntityType.USERS; // 8
+EntityType.ORDERS; // 9
+EntityType.PRODUCTS; // 10
+EntityType.ARTICLES; // 11
 ```
 
 Add custom types as needed:
@@ -153,6 +152,7 @@ pnpm exec tsx test/e2e/stable/test-record-locking.ts
 ```
 
 The e2e test simulates:
+
 1. Node A locks a user
 2. Node B tries to edit (blocked)
 3. Node A releases lock
@@ -165,26 +165,23 @@ When integrating with sync operations:
 ```typescript
 async function updateRecord(userId: string, updates: any, nodeKey: string) {
   const lockManager = createLockManager(db);
-  
+
   // Try to acquire lock
   const acquired = await lockManager.acquireLock({
     typ: EntityType.USERS,
     value: userId,
     key: nodeKey,
     name: `Node ${nodeKey}`,
-    compName: process.env.HOSTNAME || 'unknown'
+    compName: process.env.HOSTNAME || 'unknown',
   });
-  
+
   if (!acquired) {
     throw new Error('Record is locked by another node');
   }
-  
+
   try {
     // Perform update
-    await db.collection('users').updateOne(
-      { _id: userId },
-      { $set: updates }
-    );
+    await db.collection('users').updateOne({ _id: userId }, { $set: updates });
   } finally {
     // Always release lock
     await lockManager.releaseLock(EntityType.USERS, userId, nodeKey);
@@ -205,32 +202,41 @@ async function updateRecord(userId: string, updates: any, nodeKey: string) {
 ### LockManager
 
 #### `acquireLock(options: LockOptions): Promise<boolean>`
+
 Acquire a lock on a record. Returns true if successful.
 
 #### `releaseLock(typ: number, value: string, key: string): Promise<boolean>`
+
 Release a lock. Only the owner can release. Returns true if successful.
 
 #### `isLocked(typ: number, value: string): Promise<LockRecord | null>`
+
 Check if a record is locked. Returns lock record or null.
 
 #### `canModify(typ: number, value: string, key: string): Promise<boolean>`
+
 Check if a node can modify a record. Returns true if allowed.
 
 #### `getLocksBy(key: string): Promise<LockRecord[]>`
+
 Get all locks held by a specific node.
 
 #### `releaseAllLocks(key: string): Promise<number>`
+
 Release all locks for a node. Returns count of locks released.
 
 #### `removeOldLocks(maxAgeMs: number): Promise<number>`
+
 Remove locks older than specified age. Returns count removed.
 
 #### `acquireLockWithRetry(options, maxRetries?, retryDelayMs?): Promise<boolean>`
+
 Attempt to acquire lock with automatic retry.
 
 ## Troubleshooting
 
 ### Lock Not Released
+
 If a node crashes before releasing locks, use `removeOldLocks()` to clean up:
 
 ```typescript
@@ -239,12 +245,15 @@ await lockManager.removeOldLocks(30 * 60 * 1000);
 ```
 
 ### Lock Contention
+
 If multiple nodes frequently contend for the same locks, consider:
+
 - Implementing a lock queue
 - Using exponential backoff with `acquireLockWithRetry()`
 - Reducing lock hold time
 
 ### Verification
+
 Check locks in MongoDB:
 
 ```bash

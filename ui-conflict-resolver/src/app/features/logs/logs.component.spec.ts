@@ -1,6 +1,10 @@
-import { ComponentFixture, TestBed, fakeAsync, tick, flush, discardPeriodicTasks } from '@angular/core/testing';
+import {
+  ComponentFixture, discardPeriodicTasks, fakeAsync, flush, TestBed, tick
+} from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
+
 import { LogsComponent } from './logs.component';
+
 
 describe('LogsComponent', () => {
   let component: LogsComponent;
@@ -35,10 +39,10 @@ describe('LogsComponent', () => {
   it('should add initial logs on init', fakeAsync(() => {
     fixture.detectChanges();
     tick();
-    
+
     expect(component.logs.length).toBeGreaterThan(0);
     expect(component.filteredLogs.length).toBeGreaterThan(0);
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -46,37 +50,57 @@ describe('LogsComponent', () => {
   it('should generate random logs periodically', fakeAsync(() => {
     fixture.detectChanges();
     const initialLength = component.logs.length;
-    
+
     tick(2000);
     expect(component.logs.length).toBeGreaterThan(initialLength);
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should filter logs by level', () => {
     component.logs = [
-      { timestamp: new Date(), level: 'info', message: 'Test info', source: 'test' },
-      { timestamp: new Date(), level: 'error', message: 'Test error', source: 'test' },
+      {
+        timestamp: new Date(),
+        level: 'info',
+        message: 'Test info',
+        source: 'test',
+      },
+      {
+        timestamp: new Date(),
+        level: 'error',
+        message: 'Test error',
+        source: 'test',
+      },
     ];
-    
+
     component.selectedLevels.clear();
     component.selectedLevels.add('info');
     component.applyFilters();
-    
+
     expect(component.filteredLogs.length).toBe(1);
     expect(component.filteredLogs[0].level).toBe('info');
   });
 
   it('should filter logs by search term', () => {
     component.logs = [
-      { timestamp: new Date(), level: 'info', message: 'Test MongoDB', source: 'test' },
-      { timestamp: new Date(), level: 'info', message: 'Test sync', source: 'test' },
+      {
+        timestamp: new Date(),
+        level: 'info',
+        message: 'Test MongoDB',
+        source: 'test',
+      },
+      {
+        timestamp: new Date(),
+        level: 'info',
+        message: 'Test sync',
+        source: 'test',
+      },
     ];
-    
+
     component.searchTerm = 'MongoDB';
     component.applyFilters();
-    
+
     expect(component.filteredLogs.length).toBe(1);
     expect(component.filteredLogs[0].message).toContain('MongoDB');
   });
@@ -85,7 +109,7 @@ describe('LogsComponent', () => {
     const initialSize = component.selectedLevels.size;
     component.toggleLevel('info');
     expect(component.selectedLevels.size).toBe(initialSize - 1);
-    
+
     component.toggleLevel('info');
     expect(component.selectedLevels.size).toBe(initialSize);
   });
@@ -96,9 +120,9 @@ describe('LogsComponent', () => {
       { timestamp: new Date(), level: 'info', message: 'Test', source: 'test' },
     ];
     component.logCounts.info = 1;
-    
+
     component.clearLogs();
-    
+
     expect(component.logs.length).toBe(0);
     expect(component.logCounts.info).toBe(0);
   });
@@ -108,9 +132,9 @@ describe('LogsComponent', () => {
     component.logs = [
       { timestamp: new Date(), level: 'info', message: 'Test', source: 'test' },
     ];
-    
+
     component.clearLogs();
-    
+
     expect(component.logs.length).toBe(1);
   });
 
@@ -121,22 +145,22 @@ describe('LogsComponent', () => {
     spyOn(document, 'createElement').and.returnValue({
       href: '',
       download: '',
-      click: linkClickSpy
+      click: linkClickSpy,
     } as any);
-    
+
     component.logs = [
       { timestamp: new Date(), level: 'info', message: 'Test', source: 'test' },
     ];
-    
+
     component.exportLogs();
-    
+
     expect(linkClickSpy).toHaveBeenCalled();
   });
 
   it('should respect max logs limit', fakeAsync(() => {
     component['maxLogs'] = 10;
     fixture.detectChanges();
-    
+
     // Add logs without triggering timers by directly modifying the array
     component.logs = [];
     for (let i = 0; i < 20; i++) {
@@ -144,32 +168,32 @@ describe('LogsComponent', () => {
         timestamp: new Date(),
         level: 'info',
         message: `Message ${i}`,
-        source: 'test'
+        source: 'test',
       });
     }
-    
+
     // Trigger max logs limit check
     if (component.logs.length > component['maxLogs']) {
       component.logs = component.logs.slice(-component['maxLogs']);
     }
-    
+
     expect(component.logs.length).toBeLessThanOrEqual(10);
-    
+
     component.ngOnDestroy();
     discardPeriodicTasks();
   }));
 
   it('should unsubscribe on destroy', fakeAsync(() => {
     fixture.detectChanges();
-    
+
     spyOn(component['destroy$'], 'next');
     spyOn(component['destroy$'], 'complete');
-    
+
     component.ngOnDestroy();
-    
+
     expect(component['destroy$'].next).toHaveBeenCalled();
     expect(component['destroy$'].complete).toHaveBeenCalled();
-    
+
     discardPeriodicTasks();
   }));
 });

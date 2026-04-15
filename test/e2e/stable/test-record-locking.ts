@@ -18,8 +18,10 @@
  * attempt to edit the same record simultaneously.
  */
 
-import { MongoClient, Db as MongoDb } from 'mongodb';
-import { createLockManager, LockManager, EntityType } from '../../../src/lock-manager.ts';
+import { Db as MongoDb, MongoClient } from 'mongodb';
+
+import { createLockManager, EntityType, LockManager } from '../../../src/lock-manager.ts';
+
 
 // Test configuration
 const MONGO_URI =
@@ -30,13 +32,13 @@ const TEST_DB = 'test_locking';
 const NODE_A = {
   key: 'nodeA',
   name: 'Node A - Primary',
-  compName: 'SERVER-A-001'
+  compName: 'SERVER-A-001',
 };
 
 const NODE_B = {
   key: 'nodeB',
   name: 'Node B - Secondary',
-  compName: 'SERVER-B-002'
+  compName: 'SERVER-B-002',
 };
 
 // ANSI color codes for output
@@ -103,22 +105,22 @@ async function setupTestData(db: MongoDb): Promise<void> {
       name: 'Alice Johnson',
       email: 'alice@example.com',
       role: 'admin',
-      updatedBy: 'system'
+      updatedBy: 'system',
     },
     {
       _id: 'user-456',
       name: 'Bob Smith',
       email: 'bob@example.com',
       role: 'user',
-      updatedBy: 'system'
+      updatedBy: 'system',
     },
     {
       _id: 'user-789',
       name: 'Charlie Brown',
       email: 'charlie@example.com',
       role: 'user',
-      updatedBy: 'system'
-    }
+      updatedBy: 'system',
+    },
   ]);
 
   success('Inserted 3 test users');
@@ -141,7 +143,7 @@ async function testBasicLocking(lockManager: LockManager): Promise<boolean> {
     key: NODE_A.key,
     name: NODE_A.name,
     compName: NODE_A.compName,
-    eMail: 'nodea@example.com'
+    eMail: 'nodea@example.com',
   });
 
   if (!acquired) {
@@ -185,7 +187,7 @@ async function testBasicLocking(lockManager: LockManager): Promise<boolean> {
  */
 async function testConcurrentLockPrevention(
   db: MongoDb,
-  lockManager: LockManager
+  lockManager: LockManager,
 ): Promise<boolean> {
   section('Test 2: Lock Prevents Concurrent Modifications');
 
@@ -199,7 +201,7 @@ async function testConcurrentLockPrevention(
     value: userId,
     key: NODE_A.key,
     name: NODE_A.name,
-    compName: NODE_A.compName
+    compName: NODE_A.compName,
   });
 
   if (!acquiredA) {
@@ -215,11 +217,13 @@ async function testConcurrentLockPrevention(
     value: userId,
     key: NODE_B.key,
     name: NODE_B.name,
-    compName: NODE_B.compName
+    compName: NODE_B.compName,
   });
 
   if (acquiredB) {
-    error('Node B should NOT have acquired the lock (already locked by Node A)');
+    error(
+      'Node B should NOT have acquired the lock (already locked by Node A)',
+    );
     return false;
   }
   success('Node B correctly denied lock acquisition (locked by Node A)');
@@ -258,10 +262,12 @@ async function testConcurrentLockPrevention(
 
   // Node A updates the user
   info('Node A updating user...');
-  const updateResult = await db.collection('users').updateOne(
-    { _id: userId },
-    { $set: { name: 'Bob Smith Jr.', updatedBy: NODE_A.key } }
-  );
+  const updateResult = await db
+    .collection('users')
+    .updateOne(
+      { _id: userId },
+      { $set: { name: 'Bob Smith Jr.', updatedBy: NODE_A.key } },
+    );
   if (updateResult.modifiedCount !== 1) {
     error('Failed to update user');
     return false;
@@ -288,7 +294,7 @@ async function testConcurrentLockPrevention(
     value: userId,
     key: NODE_B.key,
     name: NODE_B.name,
-    compName: NODE_B.compName
+    compName: NODE_B.compName,
   });
 
   if (!acquiredB2) {
@@ -299,10 +305,12 @@ async function testConcurrentLockPrevention(
 
   // Node B updates the user
   info('Node B updating user...');
-  const updateResultB = await db.collection('users').updateOne(
-    { _id: userId },
-    { $set: { email: 'bob.smith.jr@example.com', updatedBy: NODE_B.key } }
-  );
+  const updateResultB = await db
+    .collection('users')
+    .updateOne(
+      { _id: userId },
+      { $set: { email: 'bob.smith.jr@example.com', updatedBy: NODE_B.key } },
+    );
   if (updateResultB.modifiedCount !== 1) {
     error('Failed to update user');
     return false;
@@ -339,7 +347,7 @@ async function testReentrantLock(lockManager: LockManager): Promise<boolean> {
     value: userId,
     key: NODE_A.key,
     name: NODE_A.name,
-    compName: NODE_A.compName
+    compName: NODE_A.compName,
   });
 
   if (!acquired1) {
@@ -355,7 +363,7 @@ async function testReentrantLock(lockManager: LockManager): Promise<boolean> {
     value: userId,
     key: NODE_A.key,
     name: NODE_A.name,
-    compName: NODE_A.compName
+    compName: NODE_A.compName,
   });
 
   if (!acquired2) {
@@ -366,7 +374,7 @@ async function testReentrantLock(lockManager: LockManager): Promise<boolean> {
 
   // Verify only one lock exists
   const locks = await lockManager.getLocksBy(NODE_A.key);
-  const userLocks = locks.filter(l => l.value === userId);
+  const userLocks = locks.filter((l) => l.value === userId);
   if (userLocks.length !== 1) {
     error(`Expected 1 lock, found ${userLocks.length}`);
     return false;
@@ -394,14 +402,14 @@ async function testLockCleanup(lockManager: LockManager): Promise<boolean> {
     value: 'user-123',
     key: NODE_A.key,
     name: NODE_A.name,
-    compName: NODE_A.compName
+    compName: NODE_A.compName,
   });
   await lockManager.acquireLock({
     typ: userTyp,
     value: 'user-456',
     key: NODE_A.key,
     name: NODE_A.name,
-    compName: NODE_A.compName
+    compName: NODE_A.compName,
   });
   success('Node A acquired 2 locks');
 
@@ -438,7 +446,7 @@ async function testLockCleanup(lockManager: LockManager): Promise<boolean> {
  */
 async function runTests() {
   header('RECORD LOCKING E2E TEST');
-  
+
   let client: MongoClient | null = null;
   let testsPassed = 0;
   let testsFailed = 0;
@@ -464,9 +472,12 @@ async function runTests() {
     // Run tests
     const tests = [
       { name: 'Basic Locking', fn: () => testBasicLocking(lockManager) },
-      { name: 'Concurrent Lock Prevention', fn: () => testConcurrentLockPrevention(db, lockManager) },
+      {
+        name: 'Concurrent Lock Prevention',
+        fn: () => testConcurrentLockPrevention(db, lockManager),
+      },
       { name: 'Re-entrant Lock', fn: () => testReentrantLock(lockManager) },
-      { name: 'Lock Cleanup', fn: () => testLockCleanup(lockManager) }
+      { name: 'Lock Cleanup', fn: () => testLockCleanup(lockManager) },
     ];
 
     for (const test of tests) {
@@ -498,7 +509,6 @@ async function runTests() {
       error(`\n${testsFailed} test(s) failed`);
       process.exit(1);
     }
-
   } catch (err) {
     error('Test execution failed:');
     console.error(err);

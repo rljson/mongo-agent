@@ -1,10 +1,16 @@
-import { ComponentFixture, TestBed, fakeAsync, tick, flush, discardPeriodicTasks } from '@angular/core/testing';
 import { HttpClientTestingModule } from '@angular/common/http/testing';
+import {
+  ComponentFixture, discardPeriodicTasks, fakeAsync, flush, TestBed, tick
+} from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+
 import { of, throwError } from 'rxjs';
-import { DashboardComponent } from './dashboard.component';
-import { SyncApiService } from '../../services/sync-api.service';
+
 import { ConflictInfo } from '../../models/conflict.types';
+import { SyncApiService } from '../../services/sync-api.service';
+
+import { DashboardComponent } from './dashboard.component';
+
 
 describe('DashboardComponent', () => {
   let component: DashboardComponent;
@@ -38,11 +44,17 @@ describe('DashboardComponent', () => {
     const syncApiSpy = jasmine.createSpyObj('SyncApiService', ['getConflicts']);
 
     await TestBed.configureTestingModule({
-      imports: [DashboardComponent, HttpClientTestingModule, RouterTestingModule],
+      imports: [
+        DashboardComponent,
+        HttpClientTestingModule,
+        RouterTestingModule,
+      ],
       providers: [{ provide: SyncApiService, useValue: syncApiSpy }],
     }).compileComponents();
 
-    syncApiService = TestBed.inject(SyncApiService) as jasmine.SpyObj<SyncApiService>;
+    syncApiService = TestBed.inject(
+      SyncApiService,
+    ) as jasmine.SpyObj<SyncApiService>;
     fixture = TestBed.createComponent(DashboardComponent);
     component = fixture.componentInstance;
   });
@@ -66,7 +78,7 @@ describe('DashboardComponent', () => {
 
   it('should load conflicts on init', fakeAsync(() => {
     syncApiService.getConflicts.and.returnValue(of(mockConflicts));
-    
+
     fixture.detectChanges(); // triggers ngOnInit
     tick();
 
@@ -74,62 +86,66 @@ describe('DashboardComponent', () => {
     expect(component.conflictsCount).toBe(2);
     expect(component.alerts.length).toBe(1);
     expect(component.alerts[0].type).toBe('warning');
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should handle no conflicts', fakeAsync(() => {
     syncApiService.getConflicts.and.returnValue(of([]));
-    
+
     fixture.detectChanges();
     tick();
 
     expect(component.conflictsCount).toBe(0);
     expect(component.alerts.length).toBe(0);
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should handle conflicts API error gracefully', fakeAsync(() => {
-    syncApiService.getConflicts.and.returnValue(throwError(() => new Error('API Error')));
-    
+    syncApiService.getConflicts.and.returnValue(
+      throwError(() => new Error('API Error')),
+    );
+
     fixture.detectChanges();
     tick();
 
     // Should not throw and should handle silently
     expect(component.conflictsCount).toBe(0);
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should update uptime periodically', fakeAsync(() => {
     syncApiService.getConflicts.and.returnValue(of([]));
-    
+
     const initialUptime = component.nodeInfo.uptime;
     fixture.detectChanges();
-    
+
     tick(1000);
     expect(component.nodeInfo.uptime).toBeGreaterThan(initialUptime);
-    
+
     tick(1000);
     expect(component.nodeInfo.uptime).toBeGreaterThan(initialUptime + 1000);
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should call loadConflicts periodically', fakeAsync(() => {
     syncApiService.getConflicts.and.returnValue(of([]));
-    
+
     fixture.detectChanges();
     const initialCallCount = syncApiService.getConflicts.calls.count();
-    
+
     tick(10000);
-    expect(syncApiService.getConflicts.calls.count()).toBeGreaterThan(initialCallCount);
-    
+    expect(syncApiService.getConflicts.calls.count()).toBeGreaterThan(
+      initialCallCount,
+    );
+
     component.ngOnDestroy();
     flush();
   }));
@@ -176,39 +192,39 @@ describe('DashboardComponent', () => {
   it('should unsubscribe on destroy', fakeAsync(() => {
     syncApiService.getConflicts.and.returnValue(of([]));
     fixture.detectChanges();
-    
+
     spyOn(component['destroy$'], 'next');
     spyOn(component['destroy$'], 'complete');
-    
+
     component.ngOnDestroy();
-    
+
     expect(component['destroy$'].next).toHaveBeenCalled();
     expect(component['destroy$'].complete).toHaveBeenCalled();
-    
+
     discardPeriodicTasks();
   }));
 
   it('should create alert with correct message for single conflict', fakeAsync(() => {
     const singleConflict: ConflictInfo[] = [mockConflicts[0]];
     syncApiService.getConflicts.and.returnValue(of(singleConflict));
-    
+
     fixture.detectChanges();
     tick();
 
     expect(component.alerts[0].message).toBe('1 conflict needs resolution');
-    
+
     component.ngOnDestroy();
     flush();
   }));
 
   it('should create alert with correct message for multiple conflicts', fakeAsync(() => {
     syncApiService.getConflicts.and.returnValue(of(mockConflicts));
-    
+
     fixture.detectChanges();
     tick();
 
     expect(component.alerts[0].message).toBe('2 conflicts need resolution');
-    
+
     component.ngOnDestroy();
     flush();
   }));
@@ -219,12 +235,12 @@ describe('DashboardComponent', () => {
       { ...mockConflicts[1], status: 'resolved' },
     ];
     syncApiService.getConflicts.and.returnValue(of(mixedConflicts));
-    
+
     fixture.detectChanges();
     tick();
 
     expect(component.conflictsCount).toBe(1);
-    
+
     component.ngOnDestroy();
     flush();
   }));

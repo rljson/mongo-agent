@@ -5,10 +5,11 @@
 
 import { MongoClient } from 'mongodb';
 
+
 async function generateConflicts() {
   const mongoUrl = process.env.MONGO_URI || 'mongodb://mongoa:27017';
   const client = new MongoClient(mongoUrl);
-  
+
   try {
     await client.connect();
     console.log('✅ Connected to MongoDB');
@@ -18,7 +19,9 @@ async function generateConflicts() {
 
     // Clear existing pending conflicts
     const deleted = await conflictsCollection.deleteMany({ status: 'pending' });
-    console.log(`🗑️  Cleared ${deleted.deletedCount} existing pending conflicts`);
+    console.log(
+      `🗑️  Cleared ${deleted.deletedCount} existing pending conflicts`,
+    );
 
     const now = Date.now();
     const conflicts = [
@@ -215,7 +218,8 @@ async function generateConflicts() {
               title: 'The Future of AI in 2024 and Beyond',
               author: 'John Smith',
               co_author: 'Jane Doe',
-              content: 'Artificial intelligence continues to evolve rapidly, with new breakthroughs...',
+              content:
+                'Artificial intelligence continues to evolve rapidly, with new breakthroughs...',
               tags: ['AI', 'Technology', 'Future', 'Machine Learning'],
               published: true,
               views: 1245, // Different view count
@@ -298,7 +302,9 @@ async function generateConflicts() {
     console.log('\n📋 Conflicts created:');
     conflicts.forEach((c, i) => {
       const age = Math.floor((now - c.detectedAt) / 1000);
-      console.log(`  ${i + 1}. ${c.conflictId.split('-').pop()} - ${c.collection}/${c.documentId} (${age}s old)`);
+      console.log(
+        `  ${i + 1}. ${c.conflictId.split('-').pop()} - ${c.collection}/${c.documentId} (${age}s old)`,
+      );
     });
 
     console.log('\n🌐 View them at: http://localhost:4200/conflicts');

@@ -1,9 +1,11 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { RouterLink } from '@angular/router';
+
+import { formatDistanceToNow } from 'date-fns';
 import { interval, Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
-import { formatDistanceToNow } from 'date-fns';
+
 
 type SyncStatus = 'syncing' | 'idle' | 'error' | 'disconnected';
 type CollectionSyncStatus = 'synced' | 'syncing' | 'pending' | 'error';
@@ -65,7 +67,7 @@ interface DatabaseTreeNode {
   standalone: true,
   imports: [CommonModule, RouterLink],
   templateUrl: './sync.component.html',
-  styleUrls: ['./sync.component.scss']
+  styleUrls: ['./sync.component.scss'],
 })
 export class SyncComponent implements OnInit, OnDestroy {
   // MongoDB Agent state
@@ -78,7 +80,7 @@ export class SyncComponent implements OnInit, OnDestroy {
     lastHash: 'abc12ef3456789def',
     lastSyncAt: new Date(Date.now() - 5000),
     collectionCount: 5,
-    databases: ['syncdb', 'rljson-sync']
+    databases: ['syncdb', 'rljson-sync'],
   };
 
   // Sync origins
@@ -91,7 +93,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastSeqApplied: 2072,
       lastHashApplied: 'xyz789abc123def456',
       updatedAt: new Date(Date.now() - 2000),
-      status: 'synced'
+      status: 'synced',
     },
     {
       nodeId: 'node-c7f2-a1',
@@ -101,8 +103,8 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastSeqApplied: 1520,
       lastHashApplied: 'abc123xyz789def456',
       updatedAt: new Date(Date.now() - 15000),
-      status: 'pending'
-    }
+      status: 'pending',
+    },
   ];
 
   // Recent sync operations
@@ -114,7 +116,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       collection: 'conflicts',
       database: 'syncdb',
       timestamp: new Date(Date.now() - 5000),
-      chainHash: 'abc12ef3456789def'
+      chainHash: 'abc12ef3456789def',
     },
     {
       seq: 3069,
@@ -123,7 +125,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       collection: 'users',
       database: 'rljson-sync',
       timestamp: new Date(Date.now() - 12000),
-      chainHash: 'def456789abc123xyz'
+      chainHash: 'def456789abc123xyz',
     },
     {
       seq: 3068,
@@ -132,7 +134,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       collection: 'orders',
       database: 'rljson-sync',
       timestamp: new Date(Date.now() - 18000),
-      chainHash: 'xyz789def456abc123'
+      chainHash: 'xyz789def456abc123',
     },
     {
       seq: 3067,
@@ -141,8 +143,8 @@ export class SyncComponent implements OnInit, OnDestroy {
       collection: 'articles',
       database: 'syncdb',
       timestamp: new Date(Date.now() - 25000),
-      chainHash: '123abc456def789xyz'
-    }
+      chainHash: '123abc456def789xyz',
+    },
   ];
 
   // Collections being synced
@@ -154,7 +156,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastModified: new Date(Date.now() - 5000),
       merkleHash: 'a1b2c3d4e5f6',
       syncStatus: 'synced',
-      lastSyncAt: new Date(Date.now() - 5000)
+      lastSyncAt: new Date(Date.now() - 5000),
     },
     {
       name: 'users',
@@ -163,7 +165,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastModified: new Date(Date.now() - 12000),
       merkleHash: 'f6e5d4c3b2a1',
       syncStatus: 'syncing',
-      lastSyncAt: new Date(Date.now() - 3000)
+      lastSyncAt: new Date(Date.now() - 3000),
     },
     {
       name: 'orders',
@@ -172,7 +174,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastModified: new Date(Date.now() - 18000),
       merkleHash: '9f8e7d6c5b4a',
       syncStatus: 'synced',
-      lastSyncAt: new Date(Date.now() - 18000)
+      lastSyncAt: new Date(Date.now() - 18000),
     },
     {
       name: 'products',
@@ -181,7 +183,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastModified: new Date(Date.now() - 45000),
       merkleHash: '3a2b1c0d9e8f',
       syncStatus: 'synced',
-      lastSyncAt: new Date(Date.now() - 45000)
+      lastSyncAt: new Date(Date.now() - 45000),
     },
     {
       name: 'articles',
@@ -190,7 +192,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastModified: new Date(Date.now() - 120000),
       merkleHash: '7g6h5i4j3k2l',
       syncStatus: 'pending',
-      lastSyncAt: new Date(Date.now() - 120000)
+      lastSyncAt: new Date(Date.now() - 120000),
     },
     {
       name: 'inventory',
@@ -199,15 +201,16 @@ export class SyncComponent implements OnInit, OnDestroy {
       lastModified: new Date(Date.now() - 8000),
       merkleHash: 'x9y8z7w6v5u4',
       syncStatus: 'syncing',
-      lastSyncAt: new Date(Date.now() - 2000)
-    }
+      lastSyncAt: new Date(Date.now() - 2000),
+    },
   ];
 
   // Tree structure for databases and collections
   databaseTree: DatabaseTreeNode[] = [];
 
   // UI state
-  selectedTab: 'overview' | 'origins' | 'operations' | 'collections' = 'overview';
+  selectedTab: 'overview' | 'origins' | 'operations' | 'collections' =
+    'overview';
   expandedAgent = true;
 
   private destroy$ = new Subject<void>();
@@ -223,10 +226,13 @@ export class SyncComponent implements OnInit, OnDestroy {
         // Update last sync time
         this.mongoAgent.lastSyncAt = new Date();
         this.mongoAgent.lastSeq++;
-        
+
         // Randomly update an origin
         if (Math.random() > 0.5 && this.syncOrigins.length > 0) {
-          const origin = this.syncOrigins[Math.floor(Math.random() * this.syncOrigins.length)];
+          const origin =
+            this.syncOrigins[
+              Math.floor(Math.random() * this.syncOrigins.length)
+            ];
           origin.lastSeqPulled++;
           origin.lastSeqApplied = origin.lastSeqPulled;
           origin.updatedAt = new Date();
@@ -297,7 +303,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       syncing: '🔄',
       idle: '⏸️',
       error: '❌',
-      disconnected: '🔌'
+      disconnected: '🔌',
     };
     return icons[status];
   }
@@ -311,13 +317,15 @@ export class SyncComponent implements OnInit, OnDestroy {
       insert: '➕',
       update: '✏️',
       replace: '🔄',
-      delete: '🗑️'
+      delete: '🗑️',
     };
     return icons[type];
   }
 
   shortenHash(hash: string): string {
-    return hash ? `${hash.substring(0, 6)}…${hash.substring(hash.length - 6)}` : 'N/A';
+    return hash
+      ? `${hash.substring(0, 6)}…${hash.substring(hash.length - 6)}`
+      : 'N/A';
   }
 
   formatTimestamp(date: Date): string {
@@ -325,16 +333,16 @@ export class SyncComponent implements OnInit, OnDestroy {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      hour12: false
+      hour12: false,
     });
   }
 
   // Tree structure methods
   buildDatabaseTree(): void {
     const dbMap = new Map<string, CollectionInfo[]>();
-    
+
     // Group collections by database
-    this.collections.forEach(coll => {
+    this.collections.forEach((coll) => {
       if (!dbMap.has(coll.database)) {
         dbMap.set(coll.database, []);
       }
@@ -342,32 +350,40 @@ export class SyncComponent implements OnInit, OnDestroy {
     });
 
     // Build tree nodes
-    this.databaseTree = Array.from(dbMap.entries()).map(([dbName, collections]) => {
-      const totalDocs = collections.reduce((sum, c) => sum + c.documentCount, 0);
-      const lastSync = collections.reduce((latest, c) => {
-        const cSync = c.lastSyncAt || c.lastModified;
-        return !latest || cSync > latest ? cSync : latest;
-      }, null as Date | null);
-      
-      // Determine database status based on collections
-      let dbStatus: CollectionSyncStatus = 'synced';
-      if (collections.some(c => c.syncStatus === 'syncing')) {
-        dbStatus = 'syncing';
-      } else if (collections.some(c => c.syncStatus === 'pending')) {
-        dbStatus = 'pending';
-      } else if (collections.some(c => c.syncStatus === 'error')) {
-        dbStatus = 'error';
-      }
+    this.databaseTree = Array.from(dbMap.entries())
+      .map(([dbName, collections]) => {
+        const totalDocs = collections.reduce(
+          (sum, c) => sum + c.documentCount,
+          0,
+        );
+        const lastSync = collections.reduce(
+          (latest, c) => {
+            const cSync = c.lastSyncAt || c.lastModified;
+            return !latest || cSync > latest ? cSync : latest;
+          },
+          null as Date | null,
+        );
 
-      return {
-        name: dbName,
-        collections: collections.sort((a, b) => a.name.localeCompare(b.name)),
-        expanded: true,
-        syncStatus: dbStatus,
-        totalDocuments: totalDocs,
-        lastSyncAt: lastSync
-      };
-    }).sort((a, b) => a.name.localeCompare(b.name));
+        // Determine database status based on collections
+        let dbStatus: CollectionSyncStatus = 'synced';
+        if (collections.some((c) => c.syncStatus === 'syncing')) {
+          dbStatus = 'syncing';
+        } else if (collections.some((c) => c.syncStatus === 'pending')) {
+          dbStatus = 'pending';
+        } else if (collections.some((c) => c.syncStatus === 'error')) {
+          dbStatus = 'error';
+        }
+
+        return {
+          name: dbName,
+          collections: collections.sort((a, b) => a.name.localeCompare(b.name)),
+          expanded: true,
+          syncStatus: dbStatus,
+          totalDocuments: totalDocs,
+          lastSyncAt: lastSync,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   toggleDatabase(db: DatabaseTreeNode): void {
@@ -377,7 +393,7 @@ export class SyncComponent implements OnInit, OnDestroy {
   syncCollection(collection: CollectionInfo): void {
     console.log('Manually syncing collection:', collection.name);
     collection.syncStatus = 'syncing';
-    
+
     setTimeout(() => {
       collection.syncStatus = 'synced';
       collection.lastSyncAt = new Date();
@@ -388,13 +404,13 @@ export class SyncComponent implements OnInit, OnDestroy {
 
   syncDatabase(db: DatabaseTreeNode): void {
     console.log('Syncing entire database:', db.name);
-    db.collections.forEach(coll => {
+    db.collections.forEach((coll) => {
       coll.syncStatus = 'syncing';
     });
     db.syncStatus = 'syncing';
 
     setTimeout(() => {
-      db.collections.forEach(coll => {
+      db.collections.forEach((coll) => {
         coll.syncStatus = 'synced';
         coll.lastSyncAt = new Date();
       });
@@ -406,8 +422,9 @@ export class SyncComponent implements OnInit, OnDestroy {
     // Randomly pick a collection and change its sync status
     if (this.collections.length === 0) return;
 
-    const randomColl = this.collections[Math.floor(Math.random() * this.collections.length)];
-    
+    const randomColl =
+      this.collections[Math.floor(Math.random() * this.collections.length)];
+
     if (randomColl.syncStatus === 'syncing') {
       // Complete the sync
       randomColl.syncStatus = 'synced';
@@ -425,7 +442,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       synced: '✅',
       syncing: '🔄',
       pending: '⏳',
-      error: '❌'
+      error: '❌',
     };
     return icons[status];
   }

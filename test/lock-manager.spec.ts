@@ -8,9 +8,11 @@
  * Unit tests for LockManager
  */
 
+import { Db, MongoClient } from 'mongodb';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { MongoClient, Db } from 'mongodb';
+
 import { createLockManager, EntityType, LockManager } from '../src/lock-manager.ts';
+
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017';
 const TEST_DB = 'test_lock_manager';
@@ -37,7 +39,7 @@ describe('LockManager', () => {
     } catch (err) {
       // Collection might not exist
     }
-    
+
     lockManager = createLockManager(db);
     await lockManager.initialize();
   });
@@ -49,7 +51,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       expect(acquired).toBe(true);
@@ -67,7 +69,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       // Node B tries to acquire same lock
@@ -76,7 +78,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-b',
         name: 'Node B',
-        compName: 'SERVER-B'
+        compName: 'SERVER-B',
       });
 
       expect(acquired).toBe(false);
@@ -89,7 +91,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       // Second acquisition by same node
@@ -98,7 +100,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       expect(acquired1).toBe(true);
@@ -114,11 +116,15 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       // Release lock
-      const released = await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-a');
+      const released = await lockManager.releaseLock(
+        EntityType.USERS,
+        'user-1',
+        'node-a',
+      );
       expect(released).toBe(true);
 
       // Verify lock is gone
@@ -133,11 +139,15 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       // Node B tries to release
-      const released = await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-b');
+      const released = await lockManager.releaseLock(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+      );
       expect(released).toBe(false);
 
       // Lock should still exist
@@ -160,7 +170,7 @@ describe('LockManager', () => {
         key: 'node-a',
         name: 'Node A',
         compName: 'SERVER-A',
-        eMail: 'nodea@example.com'
+        eMail: 'nodea@example.com',
       });
 
       const lock = await lockManager.isLocked(EntityType.USERS, 'user-1');
@@ -174,7 +184,11 @@ describe('LockManager', () => {
 
   describe('canModify', () => {
     it('should allow modification when no lock exists', async () => {
-      const canModify = await lockManager.canModify(EntityType.USERS, 'user-1', 'node-a');
+      const canModify = await lockManager.canModify(
+        EntityType.USERS,
+        'user-1',
+        'node-a',
+      );
       expect(canModify).toBe(true);
     });
 
@@ -184,10 +198,14 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
-      const canModify = await lockManager.canModify(EntityType.USERS, 'user-1', 'node-a');
+      const canModify = await lockManager.canModify(
+        EntityType.USERS,
+        'user-1',
+        'node-a',
+      );
       expect(canModify).toBe(true);
     });
 
@@ -197,10 +215,14 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
-      const canModify = await lockManager.canModify(EntityType.USERS, 'user-1', 'node-b');
+      const canModify = await lockManager.canModify(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+      );
       expect(canModify).toBe(false);
     });
   });
@@ -212,7 +234,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       await lockManager.acquireLock({
@@ -220,7 +242,7 @@ describe('LockManager', () => {
         value: 'user-2',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       await lockManager.acquireLock({
@@ -228,12 +250,12 @@ describe('LockManager', () => {
         value: 'product-1',
         key: 'node-b',
         name: 'Node B',
-        compName: 'SERVER-B'
+        compName: 'SERVER-B',
       });
 
       const locksA = await lockManager.getLocksBy('node-a');
       expect(locksA).toHaveLength(2);
-      expect(locksA.every(l => l.key === 'node-a')).toBe(true);
+      expect(locksA.every((l) => l.key === 'node-a')).toBe(true);
 
       const locksB = await lockManager.getLocksBy('node-b');
       expect(locksB).toHaveLength(1);
@@ -248,7 +270,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       await lockManager.acquireLock({
@@ -256,7 +278,7 @@ describe('LockManager', () => {
         value: 'user-2',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       const released = await lockManager.releaseAllLocks('node-a');
@@ -274,13 +296,21 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
-      const isLockedByA = await lockManager.isLockedBy(EntityType.USERS, 'user-1', 'node-a');
+      const isLockedByA = await lockManager.isLockedBy(
+        EntityType.USERS,
+        'user-1',
+        'node-a',
+      );
       expect(isLockedByA).toBe(true);
 
-      const isLockedByB = await lockManager.isLockedBy(EntityType.USERS, 'user-1', 'node-b');
+      const isLockedByB = await lockManager.isLockedBy(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+      );
       expect(isLockedByB).toBe(false);
     });
   });
@@ -293,11 +323,11 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       // Wait a bit
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Remove locks older than 50ms (should remove our lock)
       const removed = await lockManager.removeOldLocks(50);
@@ -313,7 +343,7 @@ describe('LockManager', () => {
         value: 'user-1',
         key: 'node-a',
         name: 'Node A',
-        compName: 'SERVER-A'
+        compName: 'SERVER-A',
       });
 
       // Try to remove locks older than 1 hour
