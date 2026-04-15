@@ -6,20 +6,9 @@ import { RouterOutlet } from '@angular/router';
   selector: 'app-root',
   standalone: true,
   imports: [RouterOutlet],
-  template: `
-    <div class="app-container">
-      <router-outlet></router-outlet>
-    </div>
-  `,
-  styles: [
-    `
-      .app-container {
-        min-height: 100vh;
-        background: #f9fafb;
-      }
-    `,
-  ],
+  template: `<router-outlet></router-outlet>`,
+  styles: [],
 })
 export class AppComponent {
-  title = 'RLJSON Conflict Resolver';
+  title = 'RLJSON Node Control Panel';
 }

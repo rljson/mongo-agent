@@ -239,8 +239,28 @@ async function main() {
     const db = client.db('test_comparison_demo');
     const collection = db.collection('users');
 
-    // Clean up
-    await db.dropDatabase();
+    // Clean up - only drop if database is empty (preserve existing data like articles)
+    const existingCollections = await db.listCollections().toArray();
+    const hasData = existingCollections.some(
+      (c) => c.name !== 'users' && !c.name.startsWith('sync_'),
+    );
+
+    if (hasData) {
+      console.log(
+        '⚠️  Skipping database drop - existing data detected (e.g., articles collection)',
+      );
+      console.log(
+        '   Cleaning up only test-specific collections (users, sync_*)...\n',
+      );
+      // Clean up only test collections
+      await collection.deleteMany({});
+      await db.collection('sync_state').deleteMany({});
+      await db.collection('sync_local').deleteMany({});
+      await db.collection('sync_resume').deleteMany({});
+    } else {
+      console.log('🗑️  Dropping empty database for fresh test run...\n');
+      await db.dropDatabase();
+    }
 
     // ========================================================================
     // PART 1: Raw MongoDB Change Stream Event
@@ -254,6 +274,9 @@ async function main() {
     const eventPromise = new Promise((resolve) => {
       rawStream.once('change', (change) => resolve(change));
     });
+
+    // Wait for change stream to be fully initialized
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     // Insert a document
     console.log(

@@ -1,0 +1,191 @@
+<div class="dashboard">
+  <h2>Dashboard</h2>
+
+  <!-- Dashboard Grid -->
+  <div class="dashboard-grid">
+    <!-- Node Status Card -->
+    <div class="card node-status">
+      <div class="card-header">
+        <h3>This Node</h3>
+        <span
+          class="status-indicator"
+          [class.ready]="nodeInfo.transportReady">
+          {{ nodeInfo.transportReady ? '● Ready' : '○ Not Ready' }}
+        </span>
+      </div>
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="label">Role:</span>
+            <span
+              class="value role-badge"
+              [class.role-hub]="nodeInfo.role === 'hub'"
+              [class.role-client]="nodeInfo.role === 'client'">
+              {{ nodeInfo.role }}
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="label">Transport:</span>
+            <span
+              class="value"
+              [class.text-success]="nodeInfo.transportReady"
+              [class.text-error]="!nodeInfo.transportReady">
+              {{ nodeInfo.transportReady ? '✓ Ready' : '✗ Not Ready' }}
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="label">Node ID:</span>
+            <code class="value">{{ nodeInfo.nodeId }}</code>
+          </div>
+          <div class="info-item">
+            <span class="label">Hostname:</span>
+            <span class="value">{{ nodeInfo.hostname }}</span>
+          </div>
+          <div class="info-item">
+            <span class="label">Address:</span>
+            <span class="value"
+              >{{ nodeInfo.address }}:{{ nodeInfo.port }}</span
+            >
+          </div>
+          <div class="info-item">
+            <span class="label">Uptime:</span>
+            <span class="value">{{ getUptime() }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Network Overview Card -->
+    <div class="card network-overview">
+      <div class="card-header">
+        <h3>Network</h3>
+      </div>
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="label">Topology formed by:</span>
+            <span class="value">{{ networkStats.topologyFormedBy }}</span>
+          </div>
+          <div class="info-item">
+            <span class="label">Nodes:</span>
+            <span class="value">
+              {{ networkStats.nodesReachable }}/{{ networkStats.nodesTotal }}
+              reachable
+            </span>
+          </div>
+        </div>
+        <div class="network-actions">
+          <a
+            routerLink="/network"
+            class="btn-link">
+            View Topology →
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sync Agents Card -->
+    <div class="card sync-agents">
+      <div class="card-header">
+        <h3>Sync Agents</h3>
+      </div>
+      <div class="card-body">
+        <div
+          class="agent-list"
+          *ngIf="syncAgents.length > 0; else noAgents">
+          <div
+            class="agent-item"
+            *ngFor="let agent of syncAgents">
+            <div class="agent-info">
+              <span class="agent-icon">{{ agent.icon }}</span>
+              <div class="agent-details">
+                <div class="agent-name">
+                  {{ agent.name }}
+                  <span class="agent-tree">{{ agent.treeKey }}</span>
+                </div>
+                <div class="agent-meta">
+                  <span
+                    class="agent-status"
+                    [ngClass]="getStatusClass(agent.status)">
+                    ● {{ agent.status }}
+                  </span>
+                  <span
+                    class="agent-sync"
+                    *ngIf="agent.lastRef">
+                    ref={{ agent.lastRef }}
+                  </span>
+                  <span
+                    class="agent-time"
+                    *ngIf="agent.lastSyncAt">
+                    {{ getLastSyncTime(agent) }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <ng-template #noAgents>
+          <p class="empty-state">No sync agents configured</p>
+        </ng-template>
+        <div class="sync-actions">
+          <a
+            routerLink="/sync"
+            class="btn-link">
+            View Sync Details →
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alerts Card -->
+    <div
+      class="card alerts"
+      *ngIf="alerts.length > 0">
+      <div class="card-header">
+        <h3>Alerts</h3>
+      </div>
+      <div class="card-body">
+        <div class="alert-list">
+          <div
+            class="alert-item"
+            *ngFor="let alert of alerts"
+            [ngClass]="getAlertClass(alert.type)">
+            <span class="alert-icon">{{ getAlertIcon(alert.type) }}</span>
+            <div class="alert-content">
+              <p class="alert-message">{{ alert.message }}</p>
+              <a
+                *ngIf="alert.action"
+                [routerLink]="alert.action.route"
+                class="alert-action">
+                {{ alert.action.label }} →
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Stats -->
+    <div class="card quick-stats">
+      <div class="card-header">
+        <h3>Quick Stats</h3>
+      </div>
+      <div class="card-body">
+        <div class="stats-grid">
+          <div class="stat-item">
+            <div class="stat-value">{{ conflictsCount }}</div>
+            <div class="stat-label">Pending Conflicts</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">{{ syncAgents.length }}</div>
+            <div class="stat-label">Active Agents</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">{{ networkStats.nodesReachable }}</div>
+            <div class="stat-label">Connected Nodes</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

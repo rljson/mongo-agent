@@ -48,6 +48,16 @@ export {
   type RljsonTreePayload,
 } from './sync/rljson-sync.ts';
 
+// Lock manager exports
+export {
+  createLockManager,
+  EntityType,
+  LockManager,
+  type EntityTypeValue,
+  type LockOptions,
+  type LockRecord,
+} from './lock-manager.ts';
+
 export {
   syncRljsonTreeFromHub,
   type RljsonSyncFromHubResult,

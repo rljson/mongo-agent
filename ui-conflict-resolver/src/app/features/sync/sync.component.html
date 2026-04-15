@@ -1,0 +1,356 @@
+<div class="sync">
+  <div class="sync-header">
+    <h2>Sync Agents</h2>
+    <div class="header-actions">
+      <button class="btn-action" (click)="rescanAgent()">
+        🔄 Re-scan
+      </button>
+    </div>
+  </div>
+
+  <!-- MongoDB Agent Card -->
+  <div class="agent-card" [class.expanded]="expandedAgent">
+    <div class="agent-header" (click)="expandedAgent = !expandedAgent">
+      <div class="agent-title">
+        <span class="agent-icon">🗄️</span>
+        <h3>MongoDB Agent</h3>
+        <span class="status-badge" [class]="getStatusClass(mongoAgent.status)">
+          <span class="status-icon">{{ getStatusIcon(mongoAgent.status) }}</span>
+          {{ mongoAgent.status }}
+        </span>
+      </div>
+      <span class="expand-icon">{{ expandedAgent ? '▼' : '▶' }}</span>
+    </div>
+
+    <div class="agent-body" *ngIf="expandedAgent">
+      <div class="agent-info">
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="label">MongoDB URI:</span>
+            <code class="value">{{ mongoAgent.uri }}</code>
+          </div>
+          <div class="info-item">
+            <span class="label">Tree Key:</span>
+            <code class="value">{{ mongoAgent.treeKey }}</code>
+          </div>
+          <div class="info-item">
+            <span class="label">Connection:</span>
+            <span class="value" [class.text-success]="mongoAgent.connected" [class.text-error]="!mongoAgent.connected">
+              {{ mongoAgent.connected ? '● Connected' : '○ Disconnected' }}
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="label">Last Sync:</span>
+            <span class="value">{{ formatDistanceToNow(mongoAgent.lastSyncAt) }}</span>
+          </div>
+          <div class="info-item">
+            <span class="label">Last Seq:</span>
+            <code class="value">#{{ mongoAgent.lastSeq }}</code>
+          </div>
+          <div class="info-item">
+            <span class="label">Last Hash:</span>
+            <code class="value hash">{{ shortenHash(mongoAgent.lastHash) }}</code>
+          </div>
+          <div class="info-item">
+            <span class="label">Collections:</span>
+            <span class="value">{{ mongoAgent.collectionCount }} synced</span>
+          </div>
+          <div class="info-item">
+            <span class="label">Databases:</span>
+            <span class="value">{{ mongoAgent.databases.join(', ') }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="agent-actions">
+        <button class="btn-secondary" (click)="browseCollections()">
+          📂 Browse Collections
+        </button>
+        <button class="btn-secondary" (click)="rescanAgent()">
+          🔄 Re-scan
+        </button>
+        <button class="btn-danger" (click)="resetAgent()">
+          🗑️ Reset State
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="sync-tabs">
+    <button
+      class="tab-btn"
+      [class.active]="selectedTab === 'overview'"
+      (click)="selectedTab = 'overview'"
+    >
+      📊 Overview
+    </button>
+    <button
+      class="tab-btn"
+      [class.active]="selectedTab === 'origins'"
+      (click)="selectedTab = 'origins'"
+    >
+      🌐 Origins ({{ syncOrigins.length }})
+    </button>
+    <button
+      class="tab-btn"
+      [class.active]="selectedTab === 'operations'"
+      (click)="selectedTab = 'operations'"
+    >
+      📝 Operations
+    </button>
+    <button
+      class="tab-btn"
+      [class.active]="selectedTab === 'collections'"
+      (click)="selectedTab = 'collections'"
+    >
+      📚 Collections ({{ collections.length }})
+    </button>
+  </div>
+
+  <!-- Tab Content -->
+  <div class="tab-content">
+    <!-- Overview Tab -->
+    <div *ngIf="selectedTab === 'overview'" class="overview-tab">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon">🔄</div>
+          <div class="stat-info">
+            <div class="stat-value">{{ mongoAgent.lastSeq }}</div>
+            <div class="stat-label">Operations Synced</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">🌐</div>
+          <div class="stat-info">
+            <div class="stat-value">{{ syncOrigins.length }}</div>
+            <div class="stat-label">Remote Origins</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">📚</div>
+          <div class="stat-info">
+            <div class="stat-value">{{ mongoAgent.collectionCount }}</div>
+            <div class="stat-label">Active Collections</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">
+            {{ mongoAgent.status === 'syncing' ? '✅' : '⏸️' }}
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ mongoAgent.status }}</div>
+            <div class="stat-label">Sync Status</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">Recent Activity</div>
+      <div class="activity-list">
+        <div *ngFor="let op of recentOperations.slice(0, 5)" class="activity-item">
+          <span class="activity-icon">{{ getOperationIcon(op.operationType) }}</span>
+          <span class="activity-time">{{ formatTimestamp(op.timestamp) }}</span>
+          <span class="activity-type">{{ op.operationType }}</span>
+          <span class="activity-collection">
+            {{ op.database }}.{{ op.collection }}
+          </span>
+          <span class="activity-origin">{{ op.origin }}</span>
+          <code class="activity-seq">#{{ op.seq }}</code>
+        </div>
+      </div>
+    </div>
+
+    <!-- Origins Tab -->
+    <div *ngIf="selectedTab === 'origins'" class="origins-tab">
+      <div *ngIf="syncOrigins.length === 0" class="empty-state">
+        <div class="empty-icon">🌐</div>
+        <p>No remote origins configured</p>
+      </div>
+
+      <div class="origin-list">
+        <div *ngFor="let origin of syncOrigins" class="origin-card">
+          <div class="origin-header">
+            <div class="origin-title">
+              <span class="node-icon">🖥️</span>
+              <div>
+                <div class="node-id">{{ origin.nodeId }}</div>
+                <div class="origin-name">Origin: {{ origin.origin }}</div>
+              </div>
+            </div>
+            <span class="status-badge" [class]="getStatusClass(origin.status)">
+              {{ origin.status }}
+            </span>
+          </div>
+
+          <div class="origin-body">
+            <div class="origin-stats">
+              <div class="stat-item">
+                <div class="stat-label">Last Pulled</div>
+                <div class="stat-data">
+                  <code>Seq: {{ origin.lastSeqPulled }}</code>
+                  <code class="hash">{{ shortenHash(origin.lastHashPulled) }}</code>
+                </div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Last Applied</div>
+                <div class="stat-data">
+                  <code>Seq: {{ origin.lastSeqApplied }}</code>
+                  <code class="hash">{{ shortenHash(origin.lastHashApplied) }}</code>
+                </div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Updated</div>
+                <div class="stat-data">
+                  {{ formatDistanceToNow(origin.updatedAt) }}
+                </div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Sync Gap</div>
+                <div class="stat-data" [class.warning]="origin.lastSeqPulled !== origin.lastSeqApplied">
+                  {{ origin.lastSeqPulled - origin.lastSeqApplied }} operations
+                </div>
+              </div>
+            </div>
+
+            <div class="origin-actions">
+              <button class="btn-small" (click)="syncOrigin(origin)">
+                🔄 Sync Now
+              </button>
+              <button class="btn-small" (click)="viewOriginDetails(origin)">
+                👁️ Details
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Operations Tab -->
+    <div *ngIf="selectedTab === 'operations'" class="operations-tab">
+      <div class="section-header">
+        <div class="section-title">Sync Operations Timeline</div>
+        <div class="section-actions">
+          <span class="result-count">Showing {{ recentOperations.length }} operations</span>
+        </div>
+      </div>
+
+      <div class="operations-table">
+        <div class="table-header">
+          <div class="col-seq">Seq</div>
+          <div class="col-time">Time</div>
+          <div class="col-type">Type</div>
+          <div class="col-collection">Collection</div>
+          <div class="col-origin">Origin</div>
+          <div class="col-hash">Chain Hash</div>
+        </div>
+        <div class="table-body">
+          <div *ngFor="let op of recentOperations" class="table-row">
+            <div class="col-seq">#{{ op.seq }}</div>
+            <div class="col-time">{{ formatTimestamp(op.timestamp) }}</div>
+            <div class="col-type">
+              <span class="operation-badge" [class]="'op-' + op.operationType">
+                {{ getOperationIcon(op.operationType) }} {{ op.operationType }}
+              </span>
+            </div>
+            <div class="col-collection">
+              {{ op.database }}.{{ op.collection }}
+            </div>
+            <div class="col-origin">
+              <span class="origin-badge">{{ op.origin }}</span>
+            </div>
+            <div class="col-hash">
+              <code class="hash">{{ shortenHash(op.chainHash) }}</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Collections Tab -->
+    <div *ngIf="selectedTab === 'collections'" class="collections-tab">
+      <div class="section-header">
+        <div class="section-title">Synced Collections Tree</div>
+        <div class="section-actions">
+          <span class="result-count">{{ collections.length }} collections in {{ databaseTree.length }} databases</span>
+        </div>
+      </div>
+
+      <div class="database-tree">
+        <!-- Database Tree Nodes -->
+        <div *ngFor="let db of databaseTree" class="tree-node database-node">
+          <!-- Database Level -->
+          <div class="tree-item database-item" (click)="toggleDatabase(db)">
+            <div class="tree-indent"></div>
+            <span class="tree-expand-icon">{{ db.expanded ? '▼' : '▶' }}</span>
+            <span class="tree-icon folder-icon">📁</span>
+            <span class="tree-label">{{ db.name }}</span>
+            <span class="tree-badge">{{ db.collections.length }} collections</span>
+            <span class="tree-sync-status" [class]="getSyncStatusClass(db.syncStatus)">
+              <span class="status-icon" [class.spinning]="db.syncStatus === 'syncing'">
+                {{ getSyncStatusIcon(db.syncStatus) }}
+              </span>
+            </span>
+            <button 
+              class="tree-action-btn" 
+              (click)="syncDatabase(db); $event.stopPropagation()"
+              [disabled]="db.syncStatus === 'syncing'"
+              title="Sync entire database"
+            >
+              🔄
+            </button>
+          </div>
+
+          <!-- Collection Level (Children) -->
+          <div *ngIf="db.expanded" class="tree-children">
+            <div *ngFor="let coll of db.collections" class="tree-node collection-node">
+              <div class="tree-item collection-item">
+                <div class="tree-indent level-1"></div>
+                <span class="tree-expand-icon-placeholder"></span>
+                <span class="tree-icon file-icon">📄</span>
+                <span class="tree-label">{{ coll.name }}</span>
+                <span class="tree-meta">
+                  <span class="doc-count">{{ coll.documentCount.toLocaleString() }} docs</span>
+                  <span class="last-sync">{{ formatDistanceToNow(coll.lastSyncAt || coll.lastModified) }}</span>
+                </span>
+                <span class="tree-sync-status" [class]="getSyncStatusClass(coll.syncStatus || 'synced')">
+                  <span class="status-icon" [class.spinning]="coll.syncStatus === 'syncing'">
+                    {{ getSyncStatusIcon(coll.syncStatus || 'synced') }}
+                  </span>
+                </span>
+                <button 
+                  class="tree-action-btn" 
+                  (click)="syncCollection(coll)"
+                  [disabled]="coll.syncStatus === 'syncing'"
+                  title="Sync this collection"
+                >
+                  🔄
+                </button>
+              </div>
+
+              <!-- Collection Details (expandable info) -->
+              <div class="collection-details">
+                <div class="tree-indent level-2"></div>
+                <div class="details-content">
+                  <div class="detail-item" *ngIf="coll.merkleHash">
+                    <span class="detail-label">Merkle Hash:</span>
+                    <code class="detail-value">{{ shortenHash(coll.merkleHash) }}</code>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">Last Modified:</span>
+                    <span class="detail-value">{{ coll.lastModified.toLocaleString() }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Empty State -->
+        <div *ngIf="databaseTree.length === 0" class="empty-state">
+          <div class="empty-icon">📂</div>
+          <p>No databases or collections found</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

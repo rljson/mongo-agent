@@ -88,13 +88,13 @@
 
       <div class="conflict-actions">
         <a
-          [routerLink]="['/conflict', conflict.conflictId]"
+          [routerLink]="['/conflicts', conflict.conflictId]"
           class="btn-resolve"
           *ngIf="conflict.status === 'pending'">
           🔍 Resolve Conflict
         </a>
         <a
-          [routerLink]="['/conflict', conflict.conflictId]"
+          [routerLink]="['/conflicts', conflict.conflictId]"
           class="btn-view"
           *ngIf="conflict.status !== 'pending'">
           👁️ View Details

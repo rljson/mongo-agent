@@ -1,5 +1,5 @@
 import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
-import { TestBed } from '@angular/core/testing';
+import { TestBed, fakeAsync, tick, flush } from '@angular/core/testing';
 
 import { ConflictInfo, ConflictResolution } from '../models/conflict.types';
 
@@ -169,4 +169,42 @@ describe('SyncApiService', () => {
     expect(req.request.method).toBe('POST');
     req.flush({ success: true });
   });
+
+  it('should poll conflicts at intervals', fakeAsync(() => {
+    const mockConflicts: ConflictInfo[] = [
+      {
+        conflictId: 'conflict-poll',
+        documentId: 'doc-poll',
+        collection: 'users',
+        database: 'test',
+        detectedAt: Date.now(),
+        status: 'pending',
+        versions: [],
+        conflictType: 'concurrent-update',
+      },
+    ];
+
+    let callCount = 0;
+    const subscription = service.pollConflicts(1000).subscribe((conflicts) => {
+      callCount++;
+      expect(conflicts.length).toBe(1);
+      expect(conflicts[0].conflictId).toBe('conflict-poll');
+    });
+
+    // First request (immediate startWith(0))
+    tick(0);
+    let req = httpMock.expectOne(`${service['apiBaseUrl']}/conflicts`);
+    req.flush(mockConflicts);
+    expect(callCount).toBe(1);
+
+    // Second request (after 1000ms interval)
+    tick(1000);
+    req = httpMock.expectOne(`${service['apiBaseUrl']}/conflicts`);
+    req.flush(mockConflicts);
+    expect(callCount).toBe(2);
+
+    // Clean up
+    subscription.unsubscribe();
+    flush();
+  }));
 });
