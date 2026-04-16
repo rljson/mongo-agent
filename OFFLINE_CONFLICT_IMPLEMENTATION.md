@@ -9,11 +9,13 @@ Implemented a comprehensive offline conflict detection system that tracks change
 ### 1. Enhanced Lock Manager (`src/lock-manager.ts`)
 
 #### New Collections
+
 - **lock_history** - Stores historical records of released locks with acquire/release timestamps
 - **offline_changes** - Tracks changes made by nodes while offline
 - **sync_conflicts** - Stores detected conflicts for resolution
 
 #### New Interfaces
+
 ```typescript
 interface LockHistoryRecord extends LockRecord {
   acquiredAt: Date;
@@ -33,6 +35,7 @@ interface OfflineChange {
 ```
 
 #### New Methods
+
 - **recordOfflineChange()** - Record a change made while offline
 - **detectOfflineConflicts()** - Detect conflicts between offline changes and lock history
 - **createConflictRecords()** - Create conflict records in sync_conflicts collection
@@ -41,12 +44,14 @@ interface OfflineChange {
 - **cleanLockHistory()** - Clean old lock history records
 
 #### Modified Methods
+
 - **releaseLock()** - Now saves lock to history before deletion
 - **initialize()** - Creates indexes for new collections
 
 ### 2. E2E Test Suite (`test/e2e/stable/test-offline-conflicts.ts`)
 
 Comprehensive tests covering:
+
 1. **Offline conflict detection** - Verifies conflicts are detected when offline changes overlap with locks
 2. **No conflict when no overlap** - Ensures no false positives
 3. **Multiple offline conflicts** - Tests batch conflict detection
@@ -55,6 +60,7 @@ Comprehensive tests covering:
 ### 3. Unit Tests (`test/lock-manager.spec.ts`)
 
 Added 8 new test suites:
+
 - recordOfflineChange - 1 test
 - detectOfflineConflicts - 3 tests
 - createConflictRecords - 1 test
@@ -66,6 +72,7 @@ Total: 23 unit tests for lock manager (15 original + 8 new)
 ### 4. Documentation
 
 Created comprehensive documentation:
+
 - **OFFLINE_CONFLICT_DETECTION.md** - Complete system documentation with:
   - Architecture overview
   - Workflow diagrams
@@ -77,6 +84,7 @@ Created comprehensive documentation:
 ### 5. Package Scripts
 
 Added new test scripts to `package.json`:
+
 ```json
 "test:e2e:locking": "tsx test/e2e/stable/test-record-locking.ts"
 "test:e2e:offline": "tsx test/e2e/stable/test-offline-conflicts.ts"
@@ -111,6 +119,7 @@ Added new test scripts to `package.json`:
 ### Conflict Detection Logic
 
 A conflict exists when ALL conditions are true:
+
 - Offline change exists for a record
 - Lock history exists for the same record
 - Lock was held by a **different** node
@@ -147,7 +156,8 @@ pnpm vitest run test/lock-manager.spec.ts
 - `test/lock-manager.spec.ts` - Added 8 new test suites
 - `package.json` - Added test scripts
 
-## Files Created  - `test/e2e/stable/test-offline-conflicts.ts` - E2E test suite
+## Files Created - `test/e2e/stable/test-offline-conflicts.ts` - E2E test suite
+
 - `OFFLINE_CONFLICT_DETECTION.md` - Complete documentation
 
 ## API Example
@@ -161,7 +171,7 @@ await lockManager.acquireLock({
   value: 'user-123',
   key: 'nodeA',
   name: 'Node A',
-  compName: 'SERVER-A'
+  compName: 'SERVER-A',
 });
 
 // Node B goes offline, records change
@@ -171,7 +181,7 @@ await lockManager.recordOfflineChange(
   'nodeB',
   { name: 'Updated Name' },
   'users',
-  'mydb'
+  'mydb',
 );
 
 // Node A releases lock (saved to history)
@@ -272,6 +282,7 @@ To integrate this into your application:
 ## Maintenance
 
 Recommended cleanup schedule:
+
 ```typescript
 // Daily: Clean lock history older than 7 days
 const sevenDays = 7 * 24 * 60 * 60 * 1000;

@@ -16,6 +16,7 @@ The offline conflict detection system tracks changes made by nodes during offlin
 ### Lock History Tracking
 
 When a lock is released, it's not immediately deleted. Instead:
+
 1. The lock record is copied to `lock_history` with timestamps:
    - `acquiredAt` - When the lock was first acquired
    - `releasedAt` - When the lock was released
@@ -47,12 +48,12 @@ When a node is offline and makes a change:
 
 ```typescript
 await lockManager.recordOfflineChange(
-  EntityType.USERS,        // Entity type
-  'user-123',              // Record ID
-  'nodeB',                 // Node making the change
-  { name: 'New Name' },    // Change data
-  'users',                 // Collection name
-  'mydb'                   // Database name
+  EntityType.USERS, // Entity type
+  'user-123', // Record ID
+  'nodeB', // Node making the change
+  { name: 'New Name' }, // Change data
+  'users', // Collection name
+  'mydb', // Database name
 );
 ```
 
@@ -99,6 +100,7 @@ A conflict is detected when ALL of these conditions are true:
    ```
 
 No conflict is detected when:
+
 - The offline change was made **after** the lock was released
 - The offline change was made by the **same node** that held the lock
 - No lock existed for that record during the offline period
@@ -109,14 +111,14 @@ No conflict is detected when:
 
 ```typescript
 interface OfflineChange {
-  _id: string;              // Unique ID
-  typ: number;              // Entity type
-  value: string;            // Record ID
-  key: string;              // Node that made change
-  changeTimestamp: Date;    // When change was made
-  changeData: any;          // The actual change
-  collection: string;       // Collection name
-  database: string;         // Database name
+  _id: string; // Unique ID
+  typ: number; // Entity type
+  value: string; // Record ID
+  key: string; // Node that made change
+  changeTimestamp: Date; // When change was made
+  changeData: any; // The actual change
+  collection: string; // Collection name
+  database: string; // Database name
 }
 ```
 
@@ -124,8 +126,8 @@ interface OfflineChange {
 
 ```typescript
 interface LockHistoryRecord extends LockRecord {
-  acquiredAt: Date;         // When lock was acquired
-  releasedAt: Date;         // When lock was released
+  acquiredAt: Date; // When lock was acquired
+  releasedAt: Date; // When lock was released
 }
 ```
 
@@ -199,7 +201,7 @@ await lockManager.acquireLock({
   value: 'user-123',
   key: 'nodeA',
   name: 'Node A',
-  compName: 'SERVER-A'
+  compName: 'SERVER-A',
 });
 
 // Node B goes offline, makes change
@@ -209,7 +211,7 @@ await lockManager.recordOfflineChange(
   'nodeB',
   { email: 'newemail@example.com' },
   'users',
-  'mydb'
+  'mydb',
 );
 
 // Node A releases lock
@@ -247,6 +249,7 @@ const conflicts = await lockManager.detectOfflineConflicts('nodeB');
 ## Integration with UI
 
 The conflict resolver UI displays offline-lock-conflicts with:
+
 - **Offline Change** - Shows what the offline node tried to change
 - **Lock Info** - Shows which node had the lock and when
 - **Resolution Options** - Allow user to choose offline change or discard it
@@ -267,12 +270,14 @@ See `ui-conflict-resolver` for the conflict resolution interface.
 ### Conflicts not detected
 
 1. Verify lock history is being created:
+
    ```typescript
    const history = await db.collection('lock_history').find().toArray();
    console.log('Lock history:', history);
    ```
 
 2. Check offline change timestamps:
+
    ```typescript
    const changes = await lockManager.getOfflineChanges('nodeId');
    console.log('Offline changes:', changes);
@@ -285,10 +290,14 @@ See `ui-conflict-resolver` for the conflict resolution interface.
 ### Lock history growing too large
 
 Implement regular cleanup:
+
 ```typescript
 // Daily cleanup job
-setInterval(async () => {
-  const sevenDays = 7 * 24 * 60 * 60 * 1000;
-  await lockManager.cleanLockHistory(sevenDays);
-}, 24 * 60 * 60 * 1000); // Run daily
+setInterval(
+  async () => {
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    await lockManager.cleanLockHistory(sevenDays);
+  },
+  24 * 60 * 60 * 1000,
+); // Run daily
 ```

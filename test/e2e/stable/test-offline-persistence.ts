@@ -101,43 +101,43 @@
  *     - Verify lock saved to 'locking' collection
  *     - Display lock metadata (ID, owner, timestamps)
  *     - Verify collection states (1 active lock)
- *   
+ *
  *   Step 2: Node A Modifies Record
  *     - Update user-123 while holding lock
  *     - Changes: name, email, department
  *     - Verify modification in MongoDB
- *   
+ *
  *   Step 3: Node B Goes Offline and Makes Change
  *     - Record offline change to same user-123
  *     - Different changes: name, email, role
  *     - Verify saved to 'offline_changes' collection
  *     - Verify collection states
- *   
+ *
  *   Step 4: Node A Releases Lock
  *     - Release lock on user-123
  *     - Lock moved from 'locking' to 'lock_history'
  *     - Capture timestamps (acquired, released, duration)
  *     - Verify lock history persistence
  *     - Verify collection states (0 active, 1 history)
- *   
+ *
  *   Step 5: Node B Comes Online
  *     - Detect conflicts using lock history
  *     - Find offline change overlapping with lock period
  *     - Display conflict details (timestamps, nodes, data)
- *   
+ *
  *   Step 6: Create Conflict Records
  *     - Generate conflict record in sync_conflicts
  *     - Include offline change data
  *     - Include lock metadata
  *     - Include resolution options
  *     - Verify persistence
- *   
+ *
  *   Step 7: Verify Conflict Data Integrity
  *     - Validate offline change data matches
  *     - Validate lock info correct
  *     - Validate timestamp ordering
  *     - Confirm conflict ready for UI resolution
- *   
+ *
  *   Step 8: Cleanup Offline Changes
  *     - Clear processed offline changes
  *     - Verify cleanup successful
@@ -148,12 +148,12 @@
  *     - Lock user-456
  *     - Record offline change for user-456
  *     - Release lock (creates history)
- *   
+ *
  *   Step 2: Simulate Application Restart
  *     - Create new LockManager instance
  *     - Re-initialize collections
  *     - Verify no data loss
- *   
+ *
  *   Step 3: Verify Persistent Data
  *     - Read lock history from MongoDB
  *     - Read offline changes from MongoDB
@@ -163,11 +163,11 @@
  * PART 3: Lock History Cleanup
  *   Step 1: Count Historical Records
  *     - Display current lock history count
- *   
+ *
  *   Step 2: Clean Old History
  *     - Remove history older than threshold
  *     - Display cleanup results
- *   
+ *
  *   Step 3: Verify Cleanup
  *     - Confirm old records removed
  *     - Verify collection state
@@ -281,12 +281,14 @@ async function setupTestData(db: MongoDb): Promise<void> {
 
   // Drop only test-specific collections (preserve lock_history and sync_conflicts for audit trail)
   const collectionsToClean = [
-    'users',           // Test data - clean each time
-    'locking',         // Active locks - clean to start fresh
+    'users', // Test data - clean each time
+    'locking', // Active locks - clean to start fresh
     'offline_changes', // Pending offline changes - clean to start fresh
   ];
 
-  info('Cleaning test collections (preserving lock_history & sync_conflicts)...');
+  info(
+    'Cleaning test collections (preserving lock_history & sync_conflicts)...',
+  );
   for (const collName of collectionsToClean) {
     try {
       await db.collection(collName).drop();
@@ -306,10 +308,14 @@ async function setupTestData(db: MongoDb): Promise<void> {
   const historyCount = await db.collection('lock_history').countDocuments();
   const conflictCount = await db.collection('sync_conflicts').countDocuments();
   if (historyCount > 0) {
-    info(`  Preserved: lock_history (${historyCount} records from other tests)`);
+    info(
+      `  Preserved: lock_history (${historyCount} records from other tests)`,
+    );
   }
   if (conflictCount > 0) {
-    info(`  Preserved: sync_conflicts (${conflictCount} records from other tests)`);
+    info(
+      `  Preserved: sync_conflicts (${conflictCount} records from other tests)`,
+    );
   }
 
   // Insert test users
@@ -388,7 +394,9 @@ async function testCompleteWorkflow(
   success('Node A acquired lock');
 
   // Verify lock saved to MongoDB 'locking' collection
-  const lockInDb = await db.collection('locking').findOne({ _id: `${userTyp}-${userId}` });
+  const lockInDb = await db
+    .collection('locking')
+    .findOne({ _id: `${userTyp}-${userId}` });
   if (!lockInDb) {
     error('Lock not found in MongoDB locking collection');
     return false;
@@ -403,12 +411,18 @@ async function testCompleteWorkflow(
   highlight('\nCollection State After Lock Acquisition:');
   await verifyCollectionCount(db, 'locking', 1);
   await verifyCollectionCount(db, 'offline_changes', 0);
-  
+
   // Show preserved collections (not part of test expectations)
   let historyCount = await db.collection('lock_history').countDocuments();
-  let syncConflictCount = await db.collection('sync_conflicts').countDocuments();
-  info(`  lock_history: ${historyCount} (includes ${historyCount} preserved audit records)`);
-  info(`  sync_conflicts: ${syncConflictCount} (includes ${syncConflictCount} preserved conflicts)`);
+  let syncConflictCount = await db
+    .collection('sync_conflicts')
+    .countDocuments();
+  info(
+    `  lock_history: ${historyCount} (includes ${historyCount} preserved audit records)`,
+  );
+  info(
+    `  sync_conflicts: ${syncConflictCount} (includes ${syncConflictCount} preserved conflicts)`,
+  );
 
   // ===== STEP 2: Node A makes changes while holding lock =====
   info('\nSTEP 2: Node A making changes to user-123...');
@@ -431,7 +445,7 @@ async function testCompleteWorkflow(
 
   // ===== STEP 3: Node B goes offline and makes conflicting change =====
   info('\nSTEP 3: Node B goes offline and makes conflicting change...');
-  
+
   // Wait a bit to ensure different timestamp
   await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -472,7 +486,7 @@ async function testCompleteWorkflow(
   highlight('\nCollection State After Offline Change:');
   await verifyCollectionCount(db, 'locking', 1);
   await verifyCollectionCount(db, 'offline_changes', 1);
-  
+
   historyCount = await db.collection('lock_history').countDocuments();
   syncConflictCount = await db.collection('sync_conflicts').countDocuments();
   info(`  lock_history: ${historyCount} (preserved audit records)`);
@@ -480,7 +494,11 @@ async function testCompleteWorkflow(
 
   // ===== STEP 4: Node A releases lock =====
   info('\nSTEP 4: Node A releasing lock...');
-  const lockReleased = await lockManager.releaseLock(userTyp, userId, NODE_A.key);
+  const lockReleased = await lockManager.releaseLock(
+    userTyp,
+    userId,
+    NODE_A.key,
+  );
   if (!lockReleased) {
     error('Failed to release lock');
     return false;
@@ -488,7 +506,9 @@ async function testCompleteWorkflow(
   success('Node A released lock');
 
   // Verify lock moved from 'locking' to 'lock_history'
-  const activeLock = await db.collection('locking').findOne({ _id: `${userTyp}-${userId}` });
+  const activeLock = await db
+    .collection('locking')
+    .findOne({ _id: `${userTyp}-${userId}` });
   if (activeLock) {
     error('Lock still exists in locking collection after release');
     return false;
@@ -508,12 +528,14 @@ async function testCompleteWorkflow(
   info(`  Lock ID: ${lockHistory._id}`);
   info(`  Acquired: ${lockHistory.acquiredAt.toISOString()}`);
   info(`  Released: ${lockHistory.releasedAt.toISOString()}`);
-  info(`  Duration: ${lockHistory.releasedAt.getTime() - lockHistory.acquiredAt.getTime()}ms`);
+  info(
+    `  Duration: ${lockHistory.releasedAt.getTime() - lockHistory.acquiredAt.getTime()}ms`,
+  );
 
   highlight('\nCollection State After Lock Release:');
   await verifyCollectionCount(db, 'locking', 0);
   await verifyCollectionCount(db, 'offline_changes', 1);
-  
+
   historyCount = await db.collection('lock_history').countDocuments();
   syncConflictCount = await db.collection('sync_conflicts').countDocuments();
   info(`  lock_history: ${historyCount} (+1 new from this test)`);
@@ -531,11 +553,17 @@ async function testCompleteWorkflow(
 
   const conflict = conflicts[0];
   info(`  Conflict record:`);
-  info(`    - Collection: ${conflict.change.collection}.${conflict.change.value}`);
+  info(
+    `    - Collection: ${conflict.change.collection}.${conflict.change.value}`,
+  );
   info(`    - Offline change by: ${conflict.change.key}`);
   info(`    - Was locked by: ${conflict.lock.key} (${conflict.lock.name})`);
-  info(`    - Change made at: ${conflict.change.changeTimestamp.toISOString()}`);
-  info(`    - Lock held: ${conflict.lock.acquiredAt.toISOString()} - ${conflict.lock.releasedAt.toISOString()}`);
+  info(
+    `    - Change made at: ${conflict.change.changeTimestamp.toISOString()}`,
+  );
+  info(
+    `    - Lock held: ${conflict.lock.acquiredAt.toISOString()} - ${conflict.lock.releasedAt.toISOString()}`,
+  );
 
   // ===== STEP 6: Create conflict records in sync_conflicts =====
   info('\nSTEP 6: Creating conflict records in sync_conflicts collection...');
@@ -561,12 +589,14 @@ async function testCompleteWorkflow(
   info(`  Status: ${syncConflict.status}`);
   info(`  Type: ${syncConflict.conflictType}`);
   info(`  Offline Node: ${syncConflict.offlineChange.nodeId}`);
-  info(`  Locked By: ${syncConflict.lockInfo.lockedBy} (${syncConflict.lockInfo.lockedByName})`);
+  info(
+    `  Locked By: ${syncConflict.lockInfo.lockedBy} (${syncConflict.lockInfo.lockedByName})`,
+  );
 
   highlight('\nFinal Collection State:');
   await verifyCollectionCount(db, 'locking', 0);
   await verifyCollectionCount(db, 'offline_changes', 1);
-  
+
   historyCount = await db.collection('lock_history').countDocuments();
   syncConflictCount = await db.collection('sync_conflicts').countDocuments();
   info(`  lock_history: ${historyCount} (+1 from this test run)`);
@@ -574,7 +604,7 @@ async function testCompleteWorkflow(
 
   // ===== STEP 7: Verify conflict data integrity =====
   info('\nSTEP 7: Verifying conflict data integrity...');
-  
+
   if (syncConflict.offlineChange.data.name !== offlineChangeData.name) {
     error('Offline change data does not match');
     return false;
@@ -670,7 +700,9 @@ async function testPersistenceAcrossRestart(
     error('New instance could not detect conflicts from persistent data');
     return false;
   }
-  success(`✓ New instance detected ${conflicts.length} conflict(s) from persistent data`);
+  success(
+    `✓ New instance detected ${conflicts.length} conflict(s) from persistent data`,
+  );
 
   // Cleanup
   await newLockManager.clearOfflineChanges(NODE_B.key);
@@ -707,8 +739,12 @@ async function testLockHistoryCleanup(
     return false;
   }
 
-  success('✓ Lock history cleanup working correctly (recent records preserved)');
-  info(`  Note: ${beforeCount} lock history record(s) preserved for audit trail`);
+  success(
+    '✓ Lock history cleanup working correctly (recent records preserved)',
+  );
+  info(
+    `  Note: ${beforeCount} lock history record(s) preserved for audit trail`,
+  );
 
   return true;
 }
@@ -726,7 +762,7 @@ async function main() {
   console.log('  ✓ Offline change recording');
   console.log('  ✓ Timestamp-based conflict detection');
   console.log('  ✓ Automatic conflict record generation');
- console.log('  ✓ MongoDB persistence (4 collections)');
+  console.log('  ✓ MongoDB persistence (4 collections)');
   console.log('  ✓ Data integrity across application restart');
   console.log('  ✓ Lock lifecycle management');
   console.log('  ✓ Multi-node scenarios');

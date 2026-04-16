@@ -228,8 +228,12 @@ async function testOfflineConflictDetection(
   info(`  Conflict on: ${conflict.change.collection}.${conflict.change.value}`);
   info(`  Offline change by: ${conflict.change.key}`);
   info(`  Was locked by: ${conflict.lock.key} (${conflict.lock.name})`);
-  info(`  Lock period: ${new Date(conflict.lock.acquiredAt).toISOString()} - ${new Date(conflict.lock.releasedAt).toISOString()}`);
-  info(`  Change made at: ${new Date(conflict.change.changeTimestamp).toISOString()}`);
+  info(
+    `  Lock period: ${new Date(conflict.lock.acquiredAt).toISOString()} - ${new Date(conflict.lock.releasedAt).toISOString()}`,
+  );
+  info(
+    `  Change made at: ${new Date(conflict.change.changeTimestamp).toISOString()}`,
+  );
 
   // Step 6: Create conflict records
   info('Creating conflict records in sync_conflicts collection...');
@@ -270,7 +274,7 @@ async function testNoConflictWhenNoOverlap(
   db: MongoDb,
   lockManager: LockManager,
 ): Promise<boolean> {
-  section('Test 2: No Conflict When Changes Don\'t Overlap');
+  section("Test 2: No Conflict When Changes Don't Overlap");
 
   const userId = 'user-456';
   const userTyp = EntityType.USERS;

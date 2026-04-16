@@ -103,8 +103,10 @@ export class LockManager {
 
   constructor(private db: Db) {
     this.lockCollection = db.collection<LockRecord>('locking');
-    this.lockHistoryCollection = db.collection<LockHistoryRecord>('lock_history');
-    this.offlineChangesCollection = db.collection<OfflineChange>('offline_changes');
+    this.lockHistoryCollection =
+      db.collection<LockHistoryRecord>('lock_history');
+    this.offlineChangesCollection =
+      db.collection<OfflineChange>('offline_changes');
   }
 
   /**
@@ -144,6 +146,8 @@ export class LockManager {
   }
 
   /**
+   * @param typ
+   * @param value
    * Generate lock ID from type and value
    */
   private generateLockId(typ: number, value: string): string {
@@ -152,6 +156,7 @@ export class LockManager {
 
   /**
    * Acquire a lock on a record
+   * @param options
    * Returns true if lock was acquired, false if already locked
    */
   async acquireLock(options: LockOptions): Promise<boolean> {
@@ -218,6 +223,9 @@ export class LockManager {
   /**
    * Release a lock on a record
    * Only the lock owner can release their lock
+   * @param typ
+   * @param value
+   * @param key
    * Also saves to lock history for offline conflict detection
    */
   async releaseLock(typ: number, value: string, key: string): Promise<boolean> {
@@ -252,7 +260,9 @@ export class LockManager {
   }
 
   /**
-   * Check if a record is locked
+   * Check if a record is lockede
+   * @param typ
+   * @param valu
    * Returns the lock record if locked, null otherwise
    */
   async isLocked(typ: number, value: string): Promise<LockRecord | null> {
@@ -260,7 +270,10 @@ export class LockManager {
     return await this.lockCollection.findOne({ _id: lockId });
   }
 
-  /**
+  /** key
+   * @param typ
+   * @param value
+   * @param
    * Check if a record is locked by a specific key
    */
   async isLockedBy(typ: number, value: string, key: string): Promise<boolean> {
@@ -269,6 +282,7 @@ export class LockManager {
   }
 
   /**
+   * @param key
    * Get all locks held by a specific key (node/user)
    */
   async getLocksBy(key: string): Promise<LockRecord[]> {
@@ -277,6 +291,7 @@ export class LockManager {
 
   /**
    * Release all locks held by a specific key
+   * @param key
    * Useful for cleanup when a node disconnects
    */
   async releaseAllLocks(key: string): Promise<number> {
@@ -285,6 +300,7 @@ export class LockManager {
   }
 
   /**
+   * @param maxAgeMs
    * Remove stale locks older than the specified age in milliseconds
    */
   async removeOldLocks(maxAgeMs: number): Promise<number> {
@@ -299,6 +315,9 @@ export class LockManager {
 
   /**
    * Verify if an operation is allowed on a record
+   * @param typ
+   * @param value
+   * @param key
    * Returns true if no lock exists or if locked by the same key
    */
   async canModify(typ: number, value: string, key: string): Promise<boolean> {
@@ -322,7 +341,7 @@ export class LockManager {
   async acquireLockWithRetry(
     options: LockOptions,
     maxRetries = 3,
-    retryDelayMs = 100
+    retryDelayMs = 100,
   ): Promise<boolean> {
     for (let i = 0; i < maxRetries; i++) {
       const acquired = await this.acquireLock(options);
@@ -331,7 +350,7 @@ export class LockManager {
       }
 
       if (i < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       }
     }
 
@@ -340,6 +359,12 @@ export class LockManager {
 
   /**
    * Record an offline change made by a node
+   * @param typ
+   * @param value
+   * @param key
+   * @param changeData
+   * @param collection
+   * @param database
    * This will be checked against lock history when the node comes back online
    */
   async recordOfflineChange(
@@ -367,13 +392,15 @@ export class LockManager {
 
   /**
    * Detect conflicts between offline changes and lock history
-   * Returns list of conflicts where offline changes were made to records
+   * Returns list of conflicts where offline changes were made
+   * @param key to records
    * that were locked by other nodes during the offline period
    */
   async detectOfflineConflicts(
     key: string,
   ): Promise<Array<{ change: OfflineChange; lock: LockHistoryRecord }>> {
-    const conflicts: Array<{ change: OfflineChange; lock: LockHistoryRecord }> = [];
+    const conflicts: Array<{ change: OfflineChange; lock: LockHistoryRecord }> =
+      [];
 
     // Get all offline changes for this node
     const offlineChanges = await this.offlineChangesCollection
@@ -401,7 +428,8 @@ export class LockManager {
 
     return conflicts;
   }
-
+on
+   * @param cflicts
   /**
    * Create conflict records in the sync_conflicts collection
    */
@@ -413,13 +441,15 @@ export class LockManager {
     }
 
     const conflictsCollection = this.db.collection('sync_conflicts');
-    
+
     // Build conflict records with both versions (lock holder + offline change)
     const conflictRecords = await Promise.all(
       conflicts.map(async (conflict) => {
         // Fetch the current document state from the collection (lock holder's version)
         const targetDb = this.db.client.db(conflict.change.database);
-        const targetCollection = targetDb.collection(conflict.change.collection);
+        const targetCollection = targetDb.collection(
+          conflict.change.collection,
+        );
         const currentDoc = await targetCollection.findOne({
           _id: conflict.change.value,
         });
@@ -467,21 +497,24 @@ export class LockManager {
 
     const result = await conflictsCollection.insertMany(conflictRecords);
     return result.insertedCount;
-  }
+  } @param key
+   *
 
   /**
    * Clear offline changes for a node after conflict detection
    */
   async clearOfflineChanges(key: string): Promise<number> {
     const result = await this.offlineChangesCollection.deleteMany({ key });
-    return result.deletedCount;
+    return result.deletedCount;e
+   * @param ky
   }
 
   /**
    * Get all offline changes for a node
    */
   async getOfflineChanges(key: string): Promise<OfflineChange[]> {
-    return await this.offlineChangesCollection.find({ key }).toArray();
+    return await this.offlineChangs
+   * @param maxAgeMesCollection.find({ key }).toArray();
   }
 
   /**

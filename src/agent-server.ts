@@ -337,9 +337,7 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
         const { typ, value } = req.body;
 
         if (typ === undefined || !value) {
-          return reply
-            .code(400)
-            .send({ error: 'typ and value are required' });
+          return reply.code(400).send({ error: 'typ and value are required' });
         }
 
         try {
@@ -458,9 +456,8 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
      */
     app.get('/lock/detect-conflicts', async (req, reply) => {
       try {
-        const conflicts = await options.lockManager!.detectOfflineConflicts(
-          nodeId,
-        );
+        const conflicts =
+          await options.lockManager!.detectOfflineConflicts(nodeId);
 
         const conflictCount =
           await options.lockManager!.createConflictRecords(conflicts);
@@ -656,7 +653,9 @@ async function main(): Promise<void> {
   const db = mongo.db(DB_NAME);
   const lockManager = createLockManager(db);
   await lockManager.initialize();
-  console.log('✓ Lock manager initialized (collections: locking, lock_history, offline_changes)');
+  console.log(
+    '✓ Lock manager initialized (collections: locking, lock_history, offline_changes)',
+  );
 
   const app = createAgentApp({
     mongo,
