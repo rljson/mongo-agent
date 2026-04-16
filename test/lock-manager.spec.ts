@@ -354,4 +354,247 @@ describe('LockManager', () => {
       expect(lock).not.toBeNull();
     });
   });
+
+  describe('recordOfflineChange', () => {
+    it('should record an offline change', async () => {
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+        { name: 'Updated Name' },
+        'users',
+        TEST_DB,
+      );
+
+      const changes = await lockManager.getOfflineChanges('node-b');
+      expect(changes).toHaveLength(1);
+      expect(changes[0].typ).toBe(EntityType.USERS);
+      expect(changes[0].value).toBe('user-1');
+      expect(changes[0].changeData.name).toBe('Updated Name');
+    });
+  });
+
+  describe('detectOfflineConflicts', () => {
+    beforeEach(async () => {
+      // Drop additional collections
+      try {
+        await db.collection('lock_history').drop();
+        await db.collection('offline_changes').drop();
+      } catch (err) {
+        // Collections might not exist
+      }
+    });
+
+    it('should detect conflict when offline change conflicts with lock', async () => {
+      // Node A acquires lock
+      await lockManager.acquireLock({
+        typ: EntityType.USERS,
+        value: 'user-1',
+        key: 'node-a',
+        name: 'Node A',
+        compName: 'SERVER-A',
+      });
+
+      // Wait a bit
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Node B makes offline change
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+        { name: 'Offline Update' },
+        'users',
+        TEST_DB,
+      );
+
+      // Node A releases lock (creates history)
+      await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-a');
+
+      // Detect conflicts
+      const conflicts = await lockManager.detectOfflineConflicts('node-b');
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0].change.value).toBe('user-1');
+      expect(conflicts[0].lock.key).toBe('node-a');
+    });
+
+    it('should not detect conflict when no lock overlap', async () => {
+      // Node A acquires and releases lock
+      await lockManager.acquireLock({
+        typ: EntityType.USERS,
+        value: 'user-1',
+        key: 'node-a',
+        name: 'Node A',
+        compName: 'SERVER-A',
+      });
+      await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-a');
+
+      // Wait to ensure different timestamp
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Node B makes offline change AFTER lock was released
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+        { name: 'Safe Update' },
+        'users',
+        TEST_DB,
+      );
+
+      // Should not detect any conflicts
+      const conflicts = await lockManager.detectOfflineConflicts('node-b');
+      expect(conflicts).toHaveLength(0);
+    });
+
+    it('should not detect conflict when same node had the lock', async () => {
+      // Node B acquires and releases lock
+      await lockManager.acquireLock({
+        typ: EntityType.USERS,
+        value: 'user-1',
+        key: 'node-b',
+        name: 'Node B',
+        compName: 'SERVER-B',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Node B makes offline change while it had the lock
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+        { name: 'Own Update' },
+        'users',
+        TEST_DB,
+      );
+
+      await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-b');
+
+      // Should not detect conflicts (same node)
+      const conflicts = await lockManager.detectOfflineConflicts('node-b');
+      expect(conflicts).toHaveLength(0);
+    });
+  });
+
+  describe('createConflictRecords', () => {
+    beforeEach(async () => {
+      try {
+        await db.collection('sync_conflicts').drop();
+        await db.collection('lock_history').drop();
+        await db.collection('offline_changes').drop();
+      } catch (err) {
+        // Collections might not exist
+      }
+    });
+
+    it('should create conflict records in sync_conflicts collection', async () => {
+      // Simulate a conflict
+      await lockManager.acquireLock({
+        typ: EntityType.USERS,
+        value: 'user-1',
+        key: 'node-a',
+        name: 'Node A',
+        compName: 'SERVER-A',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+        { name: 'Conflict Update' },
+        'users',
+        TEST_DB,
+      );
+
+      await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-a');
+
+      const conflicts = await lockManager.detectOfflineConflicts('node-b');
+      const created = await lockManager.createConflictRecords(conflicts);
+
+      expect(created).toBe(1);
+
+      const syncConflict = await db
+        .collection('sync_conflicts')
+        .findOne({ conflictType: 'offline-lock-conflict' });
+
+      expect(syncConflict).not.toBeNull();
+      expect(syncConflict?.status).toBe('pending');
+      expect(syncConflict?.offlineChange.nodeId).toBe('node-b');
+      expect(syncConflict?.lockInfo.lockedBy).toBe('node-a');
+    });
+  });
+
+  describe('clearOfflineChanges', () => {
+    it('should clear offline changes for a node', async () => {
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-1',
+        'node-b',
+        { name: 'Update 1' },
+        'users',
+        TEST_DB,
+      );
+      await lockManager.recordOfflineChange(
+        EntityType.USERS,
+        'user-2',
+        'node-b',
+        { name: 'Update 2' },
+        'users',
+        TEST_DB,
+      );
+
+      const cleared = await lockManager.clearOfflineChanges('node-b');
+      expect(cleared).toBe(2);
+
+      const remaining = await lockManager.getOfflineChanges('node-b');
+      expect(remaining).toHaveLength(0);
+    });
+  });
+
+  describe('cleanLockHistory', () => {
+    beforeEach(async () => {
+      try {
+        await db.collection('lock_history').drop();
+      } catch (err) {
+        // Collection might not exist
+      }
+    });
+
+    it('should clean old lock history records', async () => {
+      // Create and release a lock (creates history)
+      await lockManager.acquireLock({
+        typ: EntityType.USERS,
+        value: 'user-1',
+        key: 'node-a',
+        name: 'Node A',
+        compName: 'SERVER-A',
+      });
+      await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-a');
+
+      // Wait a bit
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Clean history older than 50ms
+      const cleaned = await lockManager.cleanLockHistory(50);
+      expect(cleaned).toBe(1);
+    });
+
+    it('should not clean recent lock history', async () => {
+      await lockManager.acquireLock({
+        typ: EntityType.USERS,
+        value: 'user-1',
+        key: 'node-a',
+        name: 'Node A',
+        compName: 'SERVER-A',
+      });
+      await lockManager.releaseLock(EntityType.USERS, 'user-1', 'node-a');
+
+      // Try to clean history older than 1 hour
+      const cleaned = await lockManager.cleanLockHistory(3600000);
+      expect(cleaned).toBe(0);
+    });
+  });
 });

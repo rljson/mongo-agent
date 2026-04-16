@@ -22,6 +22,9 @@
   "scripts": {
     "build": "pnpx vite build && tsc && node scripts/copy-readme-to-dist.js",
     "test": "pnpx vitest run --coverage && pnpm run lint",
+    "test:e2e:locking": "tsx test/e2e/stable/test-record-locking.ts",
+    "test:e2e:offline": "tsx test/e2e/stable/test-offline-conflicts.ts",
+    "test:e2e:persistence": "tsx test/e2e/stable/test-offline-persistence.ts",
     "prebuild": "npm run test",
     "prepublishOnly": "npm run build",
     "lint": "pnpm exec eslint",

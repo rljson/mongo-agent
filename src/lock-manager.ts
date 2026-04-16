@@ -45,6 +45,28 @@ export interface LockRecord {
 }
 
 /**
+ * Lock history record - keeps track of released locks
+ */
+export interface LockHistoryRecord extends LockRecord {
+  acquiredAt: Date;
+  releasedAt: Date;
+}
+
+/**
+ * Offline change record
+ */
+export interface OfflineChange {
+  _id: string;
+  typ: number;
+  value: string; // record ID
+  key: string; // who made the change
+  changeTimestamp: Date;
+  changeData: any; // the actual change data
+  collection: string;
+  database: string;
+}
+
+/**
  * Entity type mapping
  */
 export const EntityType = {
@@ -76,9 +98,13 @@ export interface LockOptions {
  */
 export class LockManager {
   private lockCollection: Collection<LockRecord>;
+  private lockHistoryCollection: Collection<LockHistoryRecord>;
+  private offlineChangesCollection: Collection<OfflineChange>;
 
   constructor(private db: Db) {
     this.lockCollection = db.collection<LockRecord>('locking');
+    this.lockHistoryCollection = db.collection<LockHistoryRecord>('lock_history');
+    this.offlineChangesCollection = db.collection<OfflineChange>('offline_changes');
   }
 
   /**
@@ -93,6 +119,26 @@ export class LockManager {
     await this.lockCollection.createIndex({ key: 1 }, { unique: false });
     await this.lockCollection.createIndex(
       { 'commonFields.createdAt': 1 },
+      { unique: false },
+    );
+
+    // Create indexes for lock history
+    await this.lockHistoryCollection.createIndex(
+      { typ: 1, value: 1 },
+      { unique: false },
+    );
+    await this.lockHistoryCollection.createIndex(
+      { acquiredAt: 1, releasedAt: 1 },
+      { unique: false },
+    );
+
+    // Create indexes for offline changes
+    await this.offlineChangesCollection.createIndex(
+      { typ: 1, value: 1 },
+      { unique: false },
+    );
+    await this.offlineChangesCollection.createIndex(
+      { key: 1, changeTimestamp: 1 },
       { unique: false },
     );
   }
@@ -172,13 +218,34 @@ export class LockManager {
   /**
    * Release a lock on a record
    * Only the lock owner can release their lock
+   * Also saves to lock history for offline conflict detection
    */
   async releaseLock(typ: number, value: string, key: string): Promise<boolean> {
     const lockId = this.generateLockId(typ, value);
 
+    // Get the lock before deleting to save history
+    const lock = await this.lockCollection.findOne({
+      _id: lockId,
+      key: key,
+    });
+
+    if (!lock) {
+      return false;
+    }
+
+    // Save to lock history
+    const historyRecord: LockHistoryRecord = {
+      ...lock,
+      acquiredAt: lock.commonFields.createdAt,
+      releasedAt: new Date(),
+    };
+
+    await this.lockHistoryCollection.insertOne(historyRecord);
+
+    // Delete the active lock
     const result = await this.lockCollection.deleteOne({
       _id: lockId,
-      key: key, // Ensure only the owner can release
+      key: key,
     });
 
     return result.deletedCount === 1;
@@ -248,23 +315,6 @@ export class LockManager {
 
   /**
    * Attempt to acquire lock with retry
-   */
-  async acquireLockWithRetry(
-    options: LockOptions,
-    maxRetries = 3,
-    retryDelayMs = 100,
-  ): Promise<boolean> {
-    for (let i = 0; i < maxRetries; i++) {
-      const acquired = await this.acquireLock(options);
-      if (acquired) {
-        return true;
-      }
-
-      if (i < maxRetries - 1) {
-        await new Promise((resolve)
-
-  /**
-   * Attempt to acquire lock with retry
    * @param options
    * @param maxRetries
    * @param retryDelayMs
@@ -286,6 +336,163 @@ export class LockManager {
     }
 
     return false;
+  }
+
+  /**
+   * Record an offline change made by a node
+   * This will be checked against lock history when the node comes back online
+   */
+  async recordOfflineChange(
+    typ: number,
+    value: string,
+    key: string,
+    changeData: any,
+    collection: string,
+    database: string,
+  ): Promise<void> {
+    const changeId = `${typ}-${value}-${Date.now()}`;
+    const offlineChange: OfflineChange = {
+      _id: changeId,
+      typ,
+      value,
+      key,
+      changeTimestamp: new Date(),
+      changeData,
+      collection,
+      database,
+    };
+
+    await this.offlineChangesCollection.insertOne(offlineChange);
+  }
+
+  /**
+   * Detect conflicts between offline changes and lock history
+   * Returns list of conflicts where offline changes were made to records
+   * that were locked by other nodes during the offline period
+   */
+  async detectOfflineConflicts(
+    key: string,
+  ): Promise<Array<{ change: OfflineChange; lock: LockHistoryRecord }>> {
+    const conflicts: Array<{ change: OfflineChange; lock: LockHistoryRecord }> = [];
+
+    // Get all offline changes for this node
+    const offlineChanges = await this.offlineChangesCollection
+      .find({ key })
+      .toArray();
+
+    for (const change of offlineChanges) {
+      // Check if there was a lock on this record during the offline change time
+      // by another node
+      const conflictingLock = await this.lockHistoryCollection.findOne({
+        typ: change.typ,
+        value: change.value,
+        key: { $ne: change.key }, // Different node had the lock
+        acquiredAt: { $lte: change.changeTimestamp },
+        releasedAt: { $gte: change.changeTimestamp },
+      });
+
+      if (conflictingLock) {
+        conflicts.push({
+          change,
+          lock: conflictingLock,
+        });
+      }
+    }
+
+    return conflicts;
+  }
+
+  /**
+   * Create conflict records in the sync_conflicts collection
+   */
+  async createConflictRecords(
+    conflicts: Array<{ change: OfflineChange; lock: LockHistoryRecord }>,
+  ): Promise<number> {
+    if (conflicts.length === 0) {
+      return 0;
+    }
+
+    const conflictsCollection = this.db.collection('sync_conflicts');
+    
+    // Build conflict records with both versions (lock holder + offline change)
+    const conflictRecords = await Promise.all(
+      conflicts.map(async (conflict) => {
+        // Fetch the current document state from the collection (lock holder's version)
+        const targetDb = this.db.client.db(conflict.change.database);
+        const targetCollection = targetDb.collection(conflict.change.collection);
+        const currentDoc = await targetCollection.findOne({
+          _id: conflict.change.value,
+        });
+
+        return {
+          conflictId: `offline-${conflict.change._id}`,
+          documentId: conflict.change.value,
+          collection: conflict.change.collection,
+          database: conflict.change.database,
+          detectedAt: Date.now(),
+          status: 'pending',
+          conflictType: 'offline-lock-conflict',
+          offlineChange: {
+            nodeId: conflict.change.key,
+            timestamp: conflict.change.changeTimestamp.getTime(),
+            data: conflict.change.changeData,
+          },
+          lockInfo: {
+            lockedBy: conflict.lock.key,
+            lockedByName: conflict.lock.name,
+            acquiredAt: conflict.lock.acquiredAt.getTime(),
+            releasedAt: conflict.lock.releasedAt.getTime(),
+          },
+          versions: [
+            // Version 0: Offline node's local changes (what was changed offline)
+            {
+              documentId: conflict.change.value,
+              data: conflict.change.changeData,
+              timestamp: conflict.change.changeTimestamp.getTime(),
+              nodeId: conflict.change.key,
+              operationType: 'offline-update',
+            },
+            // Version 1: Lock holder's remote changes (what changed on the server)
+            {
+              documentId: conflict.change.value,
+              data: currentDoc || {},
+              timestamp: conflict.lock.releasedAt.getTime(),
+              nodeId: conflict.lock.key,
+              operationType: 'locked-update',
+            },
+          ],
+        };
+      }),
+    );
+
+    const result = await conflictsCollection.insertMany(conflictRecords);
+    return result.insertedCount;
+  }
+
+  /**
+   * Clear offline changes for a node after conflict detection
+   */
+  async clearOfflineChanges(key: string): Promise<number> {
+    const result = await this.offlineChangesCollection.deleteMany({ key });
+    return result.deletedCount;
+  }
+
+  /**
+   * Get all offline changes for a node
+   */
+  async getOfflineChanges(key: string): Promise<OfflineChange[]> {
+    return await this.offlineChangesCollection.find({ key }).toArray();
+  }
+
+  /**
+   * Clean old lock history records
+   */
+  async cleanLockHistory(maxAgeMs: number): Promise<number> {
+    const cutoffDate = new Date(Date.now() - maxAgeMs);
+    const result = await this.lockHistoryCollection.deleteMany({
+      releasedAt: { $lt: cutoffDate },
+    });
+    return result.deletedCount;
   }
 }
 

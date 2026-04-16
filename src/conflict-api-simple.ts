@@ -29,7 +29,7 @@ async function initializeMongoDB() {
   mongoClient = new MongoClient(mongoUrl);
   await mongoClient.connect();
 
-  db = mongoClient.db('syncdb');
+  db = mongoClient.db('test_offline_persistence');
 
   console.log('✅ MongoDB connected');
 

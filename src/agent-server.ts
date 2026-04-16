@@ -16,6 +16,7 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import { MongoClient } from 'mongodb';
 
+import { createLockManager } from './lock-manager.ts';
 import { performStartupRecovery } from './startup-recovery.ts';
 import { getState } from './sync-state-store.ts';
 import { syncOriginFromHub } from './sync/pull-from-hub.ts';
@@ -57,6 +58,8 @@ interface AgentAppOptions {
   peers: string[];
   /** Use RLJSON sync mode (hash-based) instead of operation-based sync */
   useRljsonSync?: boolean;
+  /** Lock manager instance (optional) */
+  lockManager?: ReturnType<typeof createLockManager>;
 }
 
 /**
@@ -272,6 +275,241 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
     },
   );
 
+  // =========================================================================
+  // Lock Management Endpoints (Distributed Record Locking)
+  // =========================================================================
+
+  if (options.lockManager) {
+    /**
+     * Acquire a lock on a record
+     *
+     * POST /lock/acquire
+     * Body: { typ: number, value: string, name?: string, email?: string }
+     */
+    app.post<{
+      Body: {
+        typ: number;
+        value: string;
+        name?: string;
+        email?: string;
+      };
+    }>('/lock/acquire', async (req, reply) => {
+      const { typ, value, name, email } = req.body;
+
+      if (typ === undefined || !value) {
+        return reply.code(400).send({ error: 'typ and value are required' });
+      }
+
+      try {
+        const acquired = await options.lockManager!.acquireLock({
+          typ,
+          value,
+          key: nodeId,
+          name: name || nodeId,
+          compName: process.env.HOSTNAME || 'unknown',
+          eMail: email,
+        });
+
+        return {
+          ok: true,
+          acquired,
+          lockId: `${typ}-${value}`,
+          lockedBy: acquired ? nodeId : undefined,
+        };
+      } catch (error) {
+        app.log.error({ error, typ, value }, 'Failed to acquire lock');
+        return reply.code(500).send({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    /**
+     * Release a lock on a record
+     *
+     * POST /lock/release
+     * Body: { typ: number, value: string }
+     */
+    app.post<{ Body: { typ: number; value: string } }>(
+      '/lock/release',
+      async (req, reply) => {
+        const { typ, value } = req.body;
+
+        if (typ === undefined || !value) {
+          return reply
+            .code(400)
+            .send({ error: 'typ and value are required' });
+        }
+
+        try {
+          const released = await options.lockManager!.releaseLock(
+            typ,
+            value,
+            nodeId,
+          );
+
+          return {
+            ok: true,
+            released,
+            lockId: `${typ}-${value}`,
+          };
+        } catch (error) {
+          app.log.error({ error, typ, value }, 'Failed to release lock');
+          return reply.code(500).send({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
+    );
+
+    /**
+     * Check if a record is locked
+     *
+     * GET /lock/status/:typ/:value
+     */
+    app.get<{ Params: { typ: string; value: string } }>(
+      '/lock/status/:typ/:value',
+      async (req, reply) => {
+        const typ = parseInt(req.params.typ, 10);
+        const { value } = req.params;
+
+        if (isNaN(typ) || !value) {
+          return reply.code(400).send({ error: 'Invalid typ or value' });
+        }
+
+        try {
+          const lock = await options.lockManager!.isLocked(typ, value);
+
+          return {
+            ok: true,
+            locked: !!lock,
+            lock: lock
+              ? {
+                  lockId: lock._id,
+                  lockedBy: lock.key,
+                  lockedByName: lock.name,
+                  acquiredAt: lock.commonFields.createdAt,
+                }
+              : null,
+          };
+        } catch (error) {
+          app.log.error({ error, typ, value }, 'Failed to check lock status');
+          return reply.code(500).send({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
+    );
+
+    /**
+     * Record an offline change
+     *
+     * POST /lock/offline-change
+     * Body: { typ: number, value: string, changeData: any, collection: string, database: string }
+     */
+    app.post<{
+      Body: {
+        typ: number;
+        value: string;
+        changeData: any;
+        collection: string;
+        database: string;
+      };
+    }>('/lock/offline-change', async (req, reply) => {
+      const { typ, value, changeData, collection, database } = req.body;
+
+      if (typ === undefined || !value || !changeData || !collection) {
+        return reply.code(400).send({
+          error: 'typ, value, changeData, and collection are required',
+        });
+      }
+
+      try {
+        await options.lockManager!.recordOfflineChange(
+          typ,
+          value,
+          nodeId,
+          changeData,
+          collection,
+          database || dbName,
+        );
+
+        return {
+          ok: true,
+          recorded: true,
+          nodeId,
+        };
+      } catch (error) {
+        app.log.error({ error, typ, value }, 'Failed to record offline change');
+        return reply.code(500).send({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    /**
+     * Detect offline conflicts for this node
+     *
+     * GET /lock/detect-conflicts
+     */
+    app.get('/lock/detect-conflicts', async (req, reply) => {
+      try {
+        const conflicts = await options.lockManager!.detectOfflineConflicts(
+          nodeId,
+        );
+
+        const conflictCount =
+          await options.lockManager!.createConflictRecords(conflicts);
+
+        if (conflictCount > 0) {
+          await options.lockManager!.clearOfflineChanges(nodeId);
+        }
+
+        return {
+          ok: true,
+          conflictsDetected: conflicts.length,
+          conflictsCreated: conflictCount,
+        };
+      } catch (error) {
+        app.log.error({ error }, 'Failed to detect conflicts');
+        return reply.code(500).send({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    /**
+     * Get offline changes for this node
+     *
+     * GET /lock/offline-changes
+     */
+    app.get('/lock/offline-changes', async (req, reply) => {
+      try {
+        const changes = await options.lockManager!.getOfflineChanges(nodeId);
+
+        return {
+          ok: true,
+          nodeId,
+          offlineChanges: changes,
+          count: changes.length,
+        };
+      } catch (error) {
+        app.log.error({ error }, 'Failed to get offline changes');
+        return reply.code(500).send({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    app.log.info('Lock management endpoints registered');
+  }
+
   /**
    * Register this node at the hub.
    */
@@ -414,6 +652,12 @@ async function main(): Promise<void> {
   const mongo = new MongoClient(MONGO_URI);
   await mongo.connect();
 
+  // Initialize lock manager for distributed locking and offline conflict detection
+  const db = mongo.db(DB_NAME);
+  const lockManager = createLockManager(db);
+  await lockManager.initialize();
+  console.log('✓ Lock manager initialized (collections: locking, lock_history, offline_changes)');
+
   const app = createAgentApp({
     mongo,
     dbName: DB_NAME,
@@ -421,6 +665,7 @@ async function main(): Promise<void> {
     hubUrl: HUB_URL,
     peers: PEERS,
     useRljsonSync: USE_RLJSON_SYNC,
+    lockManager,
   });
 
   await app.listen({ host: '0.0.0.0', port: PORT });
