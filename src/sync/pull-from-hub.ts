@@ -265,9 +265,16 @@ export async function applyOneOp(
   // Use _id from fullDocument to preserve correct type.
   // Convert string IDs back to ObjectId if they look like ObjectIds.
   if (op.operationType === 'insert') {
-    const rawId = op.payload?.fullDocument?._id;
-    const docId = maybeObjectId(rawId);
-    const fullDoc = { ...op.payload?.fullDocument, _id: docId };
+    const fd = op.payload?.fullDocument;
+    if (!fd || typeof fd !== 'object' || fd._id === undefined) {
+      fastify.log.warn?.(
+        { opId: op._id, type: op.operationType },
+        'op missing fullDocument payload; skipping (cannot apply insert)',
+      );
+      return { applied: false, reason: 'missing-payload' };
+    }
+    const docId = maybeObjectId(fd._id);
+    const fullDoc = { ...fd, _id: docId };
     await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
       upsert: true,
     });
@@ -276,10 +283,17 @@ export async function applyOneOp(
     if (suppressor) {
       suppressor.add(op.ns, docId);
     }
-  } else if (op.operationType === 'update') {
-    const rawId = op.payload?.fullDocument?._id;
-    const docId = maybeObjectId(rawId);
-    const fullDoc = { ...op.payload?.fullDocument, _id: docId };
+  } else if (op.operationType === 'update' || op.operationType === 'replace') {
+    const fd = op.payload?.fullDocument;
+    if (!fd || typeof fd !== 'object' || fd._id === undefined) {
+      fastify.log.warn?.(
+        { opId: op._id, type: op.operationType },
+        'op missing fullDocument payload; skipping (cannot apply update)',
+      );
+      return { applied: false, reason: 'missing-payload' };
+    }
+    const docId = maybeObjectId(fd._id);
+    const fullDoc = { ...fd, _id: docId };
     await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
       upsert: true,
     });

@@ -622,6 +622,16 @@ export async function startDbChangeStream(
         }
       }
 
+      // Plain-JSON-serialize fullDocument/updateDescription so they survive
+      // the rljson ComponentsTable type checker (which rejects ObjectId, Date,
+      // etc.) and are safely transportable as JSON to peers.
+      const fullDocPlain = fullDoc
+        ? (JSON.parse(JSON.stringify(fullDoc)) as Record<string, unknown>)
+        : undefined;
+      const updateDescPlain = updateDesc
+        ? (JSON.parse(JSON.stringify(updateDesc)) as Record<string, unknown>)
+        : undefined;
+
       const op: SyncOp = {
         ns: { db: ns.db, coll: ns.coll },
         operationType: change.operationType,
@@ -633,10 +643,8 @@ export async function startDbChangeStream(
           fullDocumentBlobId,
           updateDescriptionBlobId,
           // Inline payloads so consumers can apply without access to producer's blob store.
-          fullDocument: fullDoc as Record<string, unknown> | undefined,
-          updateDescription: updateDesc as
-            | Record<string, unknown>
-            | undefined,
+          fullDocument: fullDocPlain,
+          updateDescription: updateDescPlain,
         },
         ts: new Date().toISOString(),
         // Capture change stream metadata (serialize complex MongoDB objects)
