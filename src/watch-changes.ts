@@ -39,8 +39,16 @@ export interface SyncOp {
   operationType: string;
   docId: unknown;
   payload?: {
-    fullDocumentBlobId?: string; // Blob reference (content hash)
-    updateDescriptionBlobId?: string; // Blob reference (content hash)
+    fullDocumentBlobId?: string; // Blob reference (content hash) - producer-local
+    updateDescriptionBlobId?: string; // Blob reference (content hash) - producer-local
+    /**
+     * Inline full document snapshot. Required for cross-process sync because
+     * blob storage (e.g. BsMem) is per-agent; the consumer cannot resolve
+     * fullDocumentBlobId. Populated for insert/update/replace.
+     */
+    fullDocument?: Record<string, unknown>;
+    /** Inline change-stream updateDescription. */
+    updateDescription?: Record<string, unknown>;
   } | null;
   ts?: string;
 
@@ -624,6 +632,11 @@ export async function startDbChangeStream(
         payload: {
           fullDocumentBlobId,
           updateDescriptionBlobId,
+          // Inline payloads so consumers can apply without access to producer's blob store.
+          fullDocument: fullDoc as Record<string, unknown> | undefined,
+          updateDescription: updateDesc as
+            | Record<string, unknown>
+            | undefined,
         },
         ts: new Date().toISOString(),
         // Capture change stream metadata (serialize complex MongoDB objects)
