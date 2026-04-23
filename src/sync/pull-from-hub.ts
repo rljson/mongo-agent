@@ -206,7 +206,20 @@ export async function fetchOpsFromHub(
       ? (payload as { ops: unknown[] }).ops
       : [];
 
-  const ops = rawOps.map((op) => EJSON.deserialize(op) as SyncOp);
+  const ops = rawOps.map((op) => {
+    // Drop fields we don't need to apply but which may carry BSON shapes
+    // (e.g. Timestamp encoded as { $timestamp: "<decimal>" }) that older
+    // EJSON.deserialize versions choke on.
+    const o = op as Record<string, unknown>;
+    delete o.clusterTime;
+    delete o.changeStreamId;
+    try {
+      return EJSON.deserialize(o) as SyncOp;
+    } catch {
+      // Fall back to the raw JSON object — applyOneOp only needs basic fields.
+      return o as unknown as SyncOp;
+    }
+  });
 
   fastify.log.info?.(
     {

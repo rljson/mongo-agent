@@ -13,6 +13,7 @@
  * - HTTP API for sync operations
  */
 
+import { EJSON } from 'bson';
 import Fastify, { FastifyInstance } from 'fastify';
 import { MongoClient } from 'mongodb';
 import { pathToFileURL } from 'node:url';
@@ -136,7 +137,10 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
         .sort({ seq: 1 })
         .toArray();
 
-      return { ops };
+      // Serialize via canonical EJSON so BSON types (Timestamp, ObjectId,
+      // Date, Long) survive JSON transport and can be reconstructed by
+      // EJSON.deserialize on the consuming peer.
+      return { ops: ops.map((op) => EJSON.serialize(op)) };
     },
   );
 
