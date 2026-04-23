@@ -581,6 +581,11 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
     app.log.info({ nodeId, selfUrl }, 'registered at hub');
   }
 
+  // Shared suppressor: change-stream watcher uses it to ignore writes that
+  // came from applyOneOp; pull-from-hub primes it before each apply so the
+  // change-stream callback (which may fire concurrently) sees the entry.
+  const suppressor = createSuppressor();
+
   /**
    * Poll all peer nodes for new data.
    * Uses either RLJSON mode (hash-based tree sync) or legacy mode (operation-based sync).
@@ -623,6 +628,7 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
             hubUrl,
             peerClientId: peer,
             origin: peer,
+            suppressor,
           });
         }
       } catch (err) {
@@ -655,7 +661,6 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
     });
 
     // Start change stream to capture local changes
-    const suppressor = createSuppressor();
     startDbChangeStream({
       db,
       nodeId,

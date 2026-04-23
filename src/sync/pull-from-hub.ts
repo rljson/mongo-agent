@@ -275,14 +275,14 @@ export async function applyOneOp(
     }
     const docId = maybeObjectId(fd._id);
     const fullDoc = { ...fd, _id: docId };
-    await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
-      upsert: true,
-    });
-
-    // Add to suppressor to prevent echo loop
+    // Add to suppressor BEFORE the write so the change-stream callback,
+    // which can fire concurrently with await replaceOne, always sees it.
     if (suppressor) {
       suppressor.add(op.ns, docId);
     }
+    await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
+      upsert: true,
+    });
   } else if (op.operationType === 'update' || op.operationType === 'replace') {
     const fd = op.payload?.fullDocument;
     if (!fd || typeof fd !== 'object' || fd._id === undefined) {
@@ -294,22 +294,18 @@ export async function applyOneOp(
     }
     const docId = maybeObjectId(fd._id);
     const fullDoc = { ...fd, _id: docId };
+    if (suppressor) {
+      suppressor.add(op.ns, docId);
+    }
     await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
       upsert: true,
     });
-
-    // Add to suppressor to prevent echo loop
-    if (suppressor) {
-      suppressor.add(op.ns, docId);
-    }
   } else if (op.operationType === 'delete') {
     const docId = maybeObjectId(op.docId);
-    await coll.deleteOne({ _id: docId } as Record<string, unknown>);
-
-    // Add to suppressor to prevent echo loop
     if (suppressor) {
       suppressor.add(op.ns, docId);
     }
+    await coll.deleteOne({ _id: docId } as Record<string, unknown>);
   } else {
     fastify.log.warn?.(
       { opId: op._id, type: op.operationType },
