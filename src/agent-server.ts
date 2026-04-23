@@ -15,6 +15,7 @@
 
 import Fastify, { FastifyInstance } from 'fastify';
 import { MongoClient } from 'mongodb';
+import { pathToFileURL } from 'node:url';
 
 import { createLockManager } from './lock-manager.ts';
 import { performStartupRecovery } from './startup-recovery.ts';
@@ -516,7 +517,47 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
       return;
     }
 
-    const selfUrl = `http://${nodeId === 'nodeA' ? 'agenta' : 'agentb'}:${PORT}`;
+    // Get the actual network IP address from server addresses
+    const addresses = app.addresses();
+    let selfUrl: string;
+
+    // Explicit overrides first (set in .env when auto-detect picks the wrong NIC,
+    // e.g. when a VPN like Barracuda is enumerated before the real LAN interface).
+    const explicitUrl = process.env.AGENT_URL;
+    const explicitIp = process.env.AGENT_IP;
+
+    if (explicitUrl) {
+      selfUrl = explicitUrl;
+    } else if (explicitIp) {
+      selfUrl = `http://${explicitIp}:${PORT}`;
+    } else {
+      // app.addresses() returns AddressInfo objects ({ address, port, family }),
+      // not URL strings. Find the first non-loopback, non-VPN IPv4 address.
+      const networkAddress = addresses.find((addr) => {
+        if (typeof addr === 'string') return false;
+        const ip = addr.address;
+        return (
+          (ip.startsWith('192.168.') ||
+            ip.startsWith('10.') ||
+            (ip.startsWith('172.') &&
+              (() => {
+                const second = parseInt(ip.split('.')[1] || '0', 10);
+                return second >= 16 && second <= 31;
+              })())) &&
+          ip !== '127.0.0.1'
+        );
+      });
+
+      if (networkAddress && typeof networkAddress !== 'string') {
+        selfUrl = `http://${networkAddress.address}:${networkAddress.port}`;
+      } else {
+        selfUrl = `http://localhost:${PORT}`;
+        app.log.warn(
+          { selfUrl },
+          'auto-detected selfUrl is localhost; set AGENT_URL or AGENT_IP in .env so peers can reach this agent',
+        );
+      }
+    }
 
     const resp = await fetch(`${hubUrl}/hub/register`, {
       method: 'POST',
@@ -692,7 +733,7 @@ async function main(): Promise<void> {
 }
 
 // Only start the server if this module is executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err);
     process.exit(1);

@@ -428,8 +428,7 @@ export class LockManager {
 
     return conflicts;
   }
-on
-   * @param cflicts
+
   /**
    * Create conflict records in the sync_conflicts collection
    */
@@ -497,28 +496,28 @@ on
 
     const result = await conflictsCollection.insertMany(conflictRecords);
     return result.insertedCount;
-  } @param key
-   *
+  }
 
   /**
    * Clear offline changes for a node after conflict detection
+   * @param key - The node key
    */
   async clearOfflineChanges(key: string): Promise<number> {
     const result = await this.offlineChangesCollection.deleteMany({ key });
-    return result.deletedCount;e
-   * @param ky
+    return result.deletedCount;
   }
 
   /**
    * Get all offline changes for a node
+   * @param key - The node key
    */
   async getOfflineChanges(key: string): Promise<OfflineChange[]> {
-    return await this.offlineChangs
-   * @param maxAgeMesCollection.find({ key }).toArray();
+    return await this.offlineChangesCollection.find({ key }).toArray();
   }
 
   /**
    * Clean old lock history records
+   * @param maxAgeMs - Maximum age in milliseconds
    */
   async cleanLockHistory(maxAgeMs: number): Promise<number> {
     const cutoffDate = new Date(Date.now() - maxAgeMs);
