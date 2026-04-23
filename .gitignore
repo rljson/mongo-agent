@@ -10,6 +10,28 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+.env.*
+
+# Local diagnostic / scratch files (per-laptop)
+agent-*.log
+hub-clients.json
+hub-curl.txt
+health-*.txt
+tnc-*.txt
+fw-rules.txt
+ports.txt
+query
+package-lock.json
+
+# Local-only setup scripts and notes (per-laptop)
+COPILOT-LAPTOP2-INSTRUCTIONS.md
+LAPTOP2-SETUP.md
+MESSAGE-FOR-LAPTOP2-ETHERNET.txt
+TESTING_SYNC_GUIDE.md
+setup-laptop2.ps1
+start-laptop2.ps1
+test-agent.js
+test-hub.js
 
 # Build artifacts
 dist/
