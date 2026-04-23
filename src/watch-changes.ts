@@ -247,9 +247,11 @@ async function loadSyncOpsTable(
   }
 
   const blobId = (meta as any).componentsBlobId;
-  const blob = await bs.getBlob(blobId);
+  const blob = await bs.getBlob(blobId).catch(() => null);
 
   if (!blob) {
+    // Stale metadata pointing to a blob that no longer exists
+    // (e.g. in-memory BsMem after agent restart). Treat as fresh table.
     return null;
   }
 
@@ -418,6 +420,16 @@ async function appendOp(
 
       // Save updated table
       await saveSyncOpsTable(db, bs, table);
+
+      // Also persist into raw sync_ops collection so the legacy
+      // /sync/pull endpoint (which queries db.collection('sync_ops'))
+      // can serve ops to peers. Without this, pulls always return empty.
+      await db
+        .collection('sync_ops')
+        .insertOne(doc as unknown as Record<string, unknown>)
+        .catch(() => {
+          /* duplicate _id on retry - ignore */
+        });
 
       // Update local state (still needed for sequence tracking)
       await db.collection('sync_local').updateOne(
