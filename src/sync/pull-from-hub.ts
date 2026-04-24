@@ -314,8 +314,23 @@ export async function applyOneOp(
     return { applied: false, reason: 'unknown-op-type' };
   }
 
-  // Record remote operation locally
-  await syncOps.insertOne(op as unknown as OptionalId<Document>);
+  // Record remote operation locally. Use insertOne but tolerate E11000:
+  // a duplicate-key here means a concurrent pollPeers cycle (or a previous
+  // crash mid-batch) already inserted this op. The doc payload is identical
+  // (deterministic _id = origin_seq), so treat it as success and continue.
+  try {
+    await syncOps.insertOne(op as unknown as OptionalId<Document>);
+  } catch (err) {
+    const code = (err as { code?: number } | null)?.code;
+    if (code === 11000) {
+      fastify.log.debug?.(
+        { opId: op._id, origin: op.origin, seq: op.seq },
+        'sync_ops insert E11000 (already recorded by concurrent batch); continuing',
+      );
+    } else {
+      throw err;
+    }
+  }
 
   await syncState.updateOne(
     { origin: op.origin },

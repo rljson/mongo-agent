@@ -668,14 +668,29 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
       suppressor,
     });
 
-    // Poll peers periodically
+    // Poll peers periodically.
+    // Re-entrancy guard: if the previous tick is still running (large pull
+    // batch can take >SYNC_INTERVAL_MS), skip this tick instead of starting
+    // a second concurrent pollPeers. Without this, two cycles race to insert
+    // the same sync_ops doc -> E11000 -> half-applied batch -> retry storm
+    // -> unbounded memory growth -> agent OOM.
+    let pollInFlight = false;
     setInterval(() => {
-      pollPeers().catch((err) => {
-        app.log.warn(
-          { message: err instanceof Error ? err.message : String(err) },
-          'pollPeers interval failed',
-        );
-      });
+      if (pollInFlight) {
+        app.log.debug?.('pollPeers skipped: previous cycle still running');
+        return;
+      }
+      pollInFlight = true;
+      pollPeers()
+        .catch((err) => {
+          app.log.warn(
+            { message: err instanceof Error ? err.message : String(err) },
+            'pollPeers interval failed',
+          );
+        })
+        .finally(() => {
+          pollInFlight = false;
+        });
     }, SYNC_INTERVAL_MS);
   }
 
