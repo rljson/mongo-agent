@@ -151,6 +151,20 @@ export async function computeStateCheckpoint(
   for (const collName of all) {
     const coll = db.collection<DocWithHash>(collName);
 
+    // Fast-path eligibility: when the first sampled doc already has its
+    // integrity hash stored (collection has been run through the backfill
+    // script), project only `_id` + `__h` from the cursor below. Sample
+    // approach is O(1) — `findOne({ __h: $exists: false })` would scan
+    // the collection looking for a non-match and become the bottleneck on
+    // large backfilled collections. If a later doc unexpectedly lacks
+    // `__h`, `docLeafHash` returns null and the partition root reflects
+    // that — caller should run backfill again.
+    const sample = await coll.findOne(
+      {},
+      { projection: { __h: 1 }, sort: { _id: 1 } },
+    );
+    const useHashProjection = sample !== null && sample.__h != null;
+
     // Check if we can use incremental mode for this collection
     let useIncremental = mode === 'incremental';
     let dirtyPartitions: Set<number> = new Set();
@@ -212,9 +226,16 @@ export async function computeStateCheckpoint(
           const filter: Record<string, unknown> = isLast
             ? { _id: { $gte: cached.minId } }
             : { _id: { $gte: cached.minId, $lte: cached.maxId } };
+          // Fast path: when every doc has __h (collection is backfilled),
+          // project only `{_id, __h}` so the cursor sends ~80 bytes/doc
+          // instead of the full document, and we skip the per-doc
+          // canonical-JSON walk inside docLeafHash.
           const cursor = coll.find(filter, {
             sort: { _id: 1 },
             batchSize: 5000,
+            ...(useHashProjection
+              ? { projection: { _id: 1, __h: 1 } }
+              : {}),
           });
 
           const partLines: string[] = [];
@@ -279,9 +300,17 @@ export async function computeStateCheckpoint(
 
       dbPieces.push(`${collName}:${collRoot}`);
     } else {
-      // FULL MODE: Scan all documents and compute all partitions
-      // Deterministic cursor
-      const cursor = coll.find({}, { sort: { _id: 1 }, batchSize: 5000 });
+      // FULL MODE: Scan all documents and compute all partitions.
+      // Same `{_id, __h}` projection fast path as the incremental branch
+      // when the collection is fully backfilled.
+      const cursor = coll.find(
+        {},
+        {
+          sort: { _id: 1 },
+          batchSize: 5000,
+          ...(useHashProjection ? { projection: { _id: 1, __h: 1 } } : {}),
+        },
+      );
 
       let partIdx = 0;
       let partCount = 0;
