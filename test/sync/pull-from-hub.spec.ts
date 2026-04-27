@@ -8,58 +8,12 @@ import { ObjectId } from 'bson';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  applyOneOp, fetchOpsFromHub, maybeObjectId, SyncOp, syncOriginFromHub
+  applyOneOp, fetchOpsFromHub, SyncOp, syncOriginFromHub
 } from '../../src/sync/pull-from-hub.ts';
 
 
 import type { Db, MongoClient } from 'mongodb';
 describe('pull-from-hub', () => {
-  describe('maybeObjectId', () => {
-    it('converts valid 24-char hex string to ObjectId', () => {
-      const hexString = '507f1f77bcf86cd799439011';
-      const result = maybeObjectId(hexString);
-
-      expect(result).toBeInstanceOf(ObjectId);
-      expect((result as ObjectId).toHexString()).toBe(hexString);
-    });
-
-    it('returns original value for non-24-char strings', () => {
-      const shortString = '123';
-      const result = maybeObjectId(shortString);
-
-      expect(result).toBe(shortString);
-    });
-
-    it('returns original value for non-hex strings', () => {
-      const nonHexString = 'not-a-valid-objectid-x';
-      const result = maybeObjectId(nonHexString);
-
-      expect(result).toBe(nonHexString);
-    });
-
-    it('returns original value for non-string types', () => {
-      expect(maybeObjectId(123)).toBe(123);
-      expect(maybeObjectId(null)).toBe(null);
-      expect(maybeObjectId(undefined)).toBe(undefined);
-      expect(maybeObjectId({ foo: 'bar' })).toEqual({ foo: 'bar' });
-    });
-
-    it('handles uppercase hex strings', () => {
-      const hexString = '507F1F77BCF86CD799439011';
-      const result = maybeObjectId(hexString);
-
-      expect(result).toBeInstanceOf(ObjectId);
-    });
-
-    it('returns original value if ObjectId constructor throws', () => {
-      // Create a string that looks like a hex but might cause issues
-      const invalidHex = 'zzzzzzzzzzzzzzzzzzzzzzzz';
-      const result = maybeObjectId(invalidHex);
-
-      expect(result).toBe(invalidHex);
-    });
-  });
-
   describe('fetchOpsFromHub', () => {
     let mockFetch: ReturnType<typeof vi.fn>;
 
@@ -522,74 +476,6 @@ describe('pull-from-hub', () => {
         { opId: op._id, type: 'unknown' },
         'unknown op type',
       );
-    });
-
-    it('converts string IDs to ObjectId for insert', async () => {
-      const hexId = '507f1f77bcf86cd799439011';
-      const op: SyncOp = {
-        _id: 'nodeA_6',
-        origin: 'nodeA',
-        seq: 6,
-        prevHash: 'chain5',
-        opHash: 'hash6',
-        chainHash: 'chain6',
-        ns: { db: 'testdb', coll: 'users' },
-        operationType: 'insert',
-        docId: hexId,
-        payload: {
-          fullDocument: {
-            _id: hexId,
-            name: 'Charlie',
-          },
-        },
-        ts: '2024-01-06T00:00:00.000Z',
-      };
-
-      const logger = { info: vi.fn(), warn: vi.fn() };
-
-      await applyOneOp({
-        db: mockDb,
-        op,
-        localNodeId: 'nodeB',
-        fastify: { log: logger },
-      });
-
-      const usersColl = mockCollections.get('users');
-      const call = (usersColl?.replaceOne as ReturnType<typeof vi.fn>).mock
-        .calls[0];
-      expect(call[0]._id).toBeInstanceOf(ObjectId);
-      expect(call[1]._id).toBeInstanceOf(ObjectId);
-    });
-
-    it('converts string IDs to ObjectId for delete', async () => {
-      const hexId = '507f1f77bcf86cd799439011';
-      const op: SyncOp = {
-        _id: 'nodeA_7',
-        origin: 'nodeA',
-        seq: 7,
-        prevHash: 'chain6',
-        opHash: 'hash7',
-        chainHash: 'chain7',
-        ns: { db: 'testdb', coll: 'users' },
-        operationType: 'delete',
-        docId: hexId,
-        payload: null,
-        ts: '2024-01-07T00:00:00.000Z',
-      };
-
-      const logger = { info: vi.fn(), warn: vi.fn() };
-
-      await applyOneOp({
-        db: mockDb,
-        op,
-        localNodeId: 'nodeB',
-        fastify: { log: logger },
-      });
-
-      const usersColl = mockCollections.get('users');
-      const call = (usersColl?.deleteOne as ReturnType<typeof vi.fn>).mock
-        .calls[0];
-      expect(call[0]._id).toBeInstanceOf(ObjectId);
     });
 
     it('uses suppressor to prevent echo loops', async () => {

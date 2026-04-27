@@ -380,9 +380,18 @@ async function appendOp(
     const nextSeq = (local.seq || 0) + 1;
     const prevHash = local.headHash || 'GENESIS';
 
-    const opHash = computeOpHash(op);
+    // The hash chain and the rljson ComponentsTable both rely on
+    // `stableStringify`, which can't represent native BSON types (a `Date`
+    // becomes `{}`, an `ObjectId` becomes `{}`, …). Flatten *only* for those
+    // paths via a JSON round-trip. The native-typed `op` keeps Date/ObjectId
+    // instances intact for the raw `sync_ops` insert below — so peers receive
+    // EJSON `$date`/`$oid` over the wire and apply with full type fidelity.
+    const opPlain = JSON.parse(JSON.stringify(op)) as SyncOp;
+
+    const opHash = computeOpHash(opPlain);
     const chainHash = sha256Hex(prevHash + '|' + opHash);
 
+    // Native-typed doc for the raw sync_ops collection.
     const doc: SyncOpDoc = {
       _id: `${nodeId}_${nextSeq}`,
       origin: nodeId,
@@ -402,6 +411,13 @@ async function appendOp(
       currentStateHash: op.currentStateHash,
     };
 
+    // Plain-typed doc for the rljson ComponentsTable hash path only.
+    const docPlain: SyncOpDoc = {
+      ...doc,
+      docId: opPlain.docId,
+      payload: opPlain.payload,
+    };
+
     try {
       // Load existing ComponentsTable or create new one
       let table = await loadSyncOpsTable(db, bs);
@@ -416,8 +432,8 @@ async function appendOp(
         });
       }
 
-      // Add hashed operation to table
-      const hashedDoc = hsh(doc as any);
+      // Add hashed operation to table (rljson can't hash native BSON types).
+      const hashedDoc = hsh(docPlain as any);
       table._data.push(hashedDoc);
 
       // Clear hash before rehashing (required for hip() to recompute)
@@ -432,6 +448,7 @@ async function appendOp(
       // Also persist into raw sync_ops collection so the legacy
       // /sync/pull endpoint (which queries db.collection('sync_ops'))
       // can serve ops to peers. Without this, pulls always return empty.
+      // Uses the native-typed `doc`: types survive EJSON.serialize/deserialize.
       await db
         .collection('sync_ops')
         .insertOne(doc as unknown as Record<string, unknown>)
@@ -622,29 +639,27 @@ export async function startDbChangeStream(
         }
       }
 
-      // Plain-JSON-serialize fullDocument/updateDescription so they survive
-      // the rljson ComponentsTable type checker (which rejects ObjectId, Date,
-      // etc.) and are safely transportable as JSON to peers.
-      const fullDocPlain = fullDoc
-        ? (JSON.parse(JSON.stringify(fullDoc)) as Record<string, unknown>)
-        : undefined;
-      const updateDescPlain = updateDesc
-        ? (JSON.parse(JSON.stringify(updateDesc)) as Record<string, unknown>)
-        : undefined;
-
+      // Keep `fullDocument`, `updateDescription`, and `docId` as native BSON
+      // types (Date, ObjectId, Decimal128, …). The wire-format step in
+      // `agent-server.ts` runs `EJSON.serialize(op)` so they survive the JSON
+      // hop as `$oid`/`$date`/etc., and the consumer's `EJSON.deserialize`
+      // restores them losslessly. Flattening to plain JSON is done *locally*
+      // inside appendOp where the hash chain and the rljson ComponentsTable
+      // need it — not here, where it would silently drop types end-to-end.
       const op: SyncOp = {
         ns: { db: ns.db, coll: ns.coll },
         operationType: change.operationType,
-        docId:
-          typeof docId === 'object' && docId !== null
-            ? JSON.parse(JSON.stringify(docId))
-            : docId, // Serialize ObjectIds
+        docId,
         payload: {
           fullDocumentBlobId,
           updateDescriptionBlobId,
           // Inline payloads so consumers can apply without access to producer's blob store.
-          fullDocument: fullDocPlain,
-          updateDescription: updateDescPlain,
+          fullDocument: fullDoc
+            ? (fullDoc as Record<string, unknown>)
+            : undefined,
+          updateDescription: updateDesc
+            ? (updateDesc as Record<string, unknown>)
+            : undefined,
         },
         ts: new Date().toISOString(),
         // Capture change stream metadata (serialize complex MongoDB objects)

@@ -4,7 +4,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { EJSON, ObjectId } from 'bson';
+import { EJSON } from 'bson';
 
 
 import type { Db, Document, MongoClient, OptionalId } from 'mongodb';
@@ -150,18 +150,6 @@ export interface SyncResult {
   upToDate: boolean;
 }
 
-/**
- * Converts a string to ObjectId if it looks like a valid ObjectId hex string.
- * This is needed because ObjectIds get stringified during JSON serialization.
- * @param value - Value to potentially convert
- * @returns ObjectId if valid hex string, otherwise original value
- */
-export function maybeObjectId(value: unknown): unknown {
-  if (typeof value === 'string' && /^[a-f0-9]{24}$/i.test(value)) {
-    return new ObjectId(value);
-  }
-  return value;
-}
 
 /**
  * Fetches operations from hub for a specific origin.
@@ -262,19 +250,22 @@ export async function applyOneOp(
 
   const coll = db.collection(op.ns.coll);
 
-  // Use _id from fullDocument to preserve correct type.
-  // Convert string IDs back to ObjectId if they look like ObjectIds.
-  if (op.operationType === 'insert') {
+  // Apply operations with native BSON types. The producer stores ops with
+  // native types in `sync_ops`, the wire encoder uses `EJSON.serialize`, and
+  // `fetchOpsFromHub` runs `EJSON.deserialize` on each op before we get here
+  // — so `fd._id`, `fd.createdAt`, etc. already carry their original BSON
+  // types. No per-type restoration needed.
+  if (op.operationType === 'insert' || op.operationType === 'update' || op.operationType === 'replace') {
     const fd = op.payload?.fullDocument;
-    if (!fd || typeof fd !== 'object' || fd._id === undefined) {
+    if (!fd || typeof fd !== 'object' || (fd as Record<string, unknown>)._id === undefined) {
       fastify.log.warn?.(
         { opId: op._id, type: op.operationType },
-        'op missing fullDocument payload; skipping (cannot apply insert)',
+        'op missing fullDocument payload; skipping',
       );
       return { applied: false, reason: 'missing-payload' };
     }
-    const docId = maybeObjectId(fd._id);
-    const fullDoc = { ...fd, _id: docId };
+    const fullDoc = fd as Record<string, unknown>;
+    const docId = fullDoc._id;
     // Add to suppressor BEFORE the write so the change-stream callback,
     // which can fire concurrently with await replaceOne, always sees it.
     if (suppressor) {
@@ -283,25 +274,8 @@ export async function applyOneOp(
     await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
       upsert: true,
     });
-  } else if (op.operationType === 'update' || op.operationType === 'replace') {
-    const fd = op.payload?.fullDocument;
-    if (!fd || typeof fd !== 'object' || fd._id === undefined) {
-      fastify.log.warn?.(
-        { opId: op._id, type: op.operationType },
-        'op missing fullDocument payload; skipping (cannot apply update)',
-      );
-      return { applied: false, reason: 'missing-payload' };
-    }
-    const docId = maybeObjectId(fd._id);
-    const fullDoc = { ...fd, _id: docId };
-    if (suppressor) {
-      suppressor.add(op.ns, docId);
-    }
-    await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
-      upsert: true,
-    });
   } else if (op.operationType === 'delete') {
-    const docId = maybeObjectId(op.docId);
+    const docId = op.docId;
     if (suppressor) {
       suppressor.add(op.ns, docId);
     }
