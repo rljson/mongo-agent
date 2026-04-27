@@ -147,7 +147,48 @@ export async function markDirtyById(
   const dirtyAt = new Date().toISOString();
 
   if (!meta || typeof meta.idx !== 'number') {
-    // Could be: new docs in a gap / no checkpoint yet
+    // No partition covers `docId`. Two cases to distinguish — using Mongo so
+    // BSON type comparison (ObjectId, numeric, string) is correct:
+    //
+    // (a) "After-max" insert: docId is past every cached maxId. Common for
+    //     ObjectIds since they're roughly time-ordered. Mark the LAST
+    //     partition dirty; computeStateCheckpoint rescans it open-ended
+    //     ($gte minId, no upper bound) and refreshes its maxId. Avoids a
+    //     full-collection rescan for every append.
+    //
+    // (b) Gap between partitions, or no cache at all → fall back to FULL.
+    try {
+      const blocking = await db
+        .collection<PartitionMeta>('state_merkle')
+        .findOne(
+          { coll: collName, maxId: { $gte: docId } },
+          { projection: { _id: 1 } },
+        );
+
+      if (!blocking) {
+        const lastPart = await db
+          .collection<PartitionMeta>('state_merkle')
+          .findOne(
+            { coll: collName },
+            { projection: { idx: 1 }, sort: { idx: -1 } },
+          );
+
+        if (lastPart && typeof lastPart.idx === 'number') {
+          await db
+            .collection<DirtyPartitionDoc>('state_dirty')
+            .updateOne(
+              { _id: dirtyPartId(collName, lastPart.idx) },
+              { $set: { coll: collName, partition: lastPart.idx, dirtyAt } },
+              { upsert: true },
+            );
+          return;
+        }
+      }
+    } catch {
+      // state_merkle query failed — fall through to FULL marker below.
+      // Matches the existing tolerance for findPartitionForId errors.
+    }
+
     await db.collection<DirtyFullDoc>('state_dirty').updateOne(
       { _id: dirtyFullId(collName) },
       {

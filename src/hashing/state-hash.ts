@@ -196,16 +196,26 @@ export async function computeStateCheckpoint(
         `   [${collName}] Using incremental mode with ${cachedPartitions.length} cached partitions`,
       );
 
+      // The last partition is allowed to grow on append-after-max — when
+      // `markDirtyById` flags it for an _id past every known maxId, we
+      // recompute open-ended ($gte minId, no upper bound) so the new docs
+      // are included and `maxId` is refreshed.
+      const lastIdx = cachedPartitions[cachedPartitions.length - 1].idx;
+
       for (const cached of cachedPartitions) {
         if (dirtyPartitions.has(cached.idx)) {
           // Recompute this dirty partition
+          const isLast = cached.idx === lastIdx;
           console.log(
-            `   [${collName}] Recomputing dirty partition ${cached.idx}`,
+            `   [${collName}] Recomputing dirty partition ${cached.idx}${isLast ? ' (open-ended, may have grown)' : ''}`,
           );
-          const cursor = coll.find(
-            { _id: { $gte: cached.minId, $lte: cached.maxId } },
-            { sort: { _id: 1 }, batchSize: 5000 },
-          );
+          const filter: Record<string, unknown> = isLast
+            ? { _id: { $gte: cached.minId } }
+            : { _id: { $gte: cached.minId, $lte: cached.maxId } };
+          const cursor = coll.find(filter, {
+            sort: { _id: 1 },
+            batchSize: 5000,
+          });
 
           const partLines: string[] = [];
           let partCount = 0;

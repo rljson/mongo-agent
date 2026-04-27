@@ -11,7 +11,7 @@ import { computeOpHash, sha256Hex } from './hashing/integrity-hash.ts';
 import { markDirtyById } from './hashing/state-dirty.ts';
 import { computeStateCheckpoint } from './hashing/state-hash.ts';
 
-import type { ChangeStream, ChangeStreamDocument, Db } from 'mongodb';
+import type { ChangeStream, ChangeStreamDocument, Db, ObjectId } from 'mongodb';
 
 import type { ComponentsTable, TableCfg } from '@rljson/rljson';
 /**
@@ -505,6 +505,11 @@ export async function startDbChangeStream(
 
   const q = createSerialQueue();
 
+  // Tracks the post-checkpoint dbRoot across change-stream events; only used
+  // when `trackStateHash` is enabled. Persists across the change-stream
+  // callbacks below — declared here so its writes outlive any single tick.
+  let currentDbStateHash: string | undefined;
+
   // Load resume token
   const resumeDoc = await db
     .collection('sync_resume')
@@ -582,7 +587,22 @@ export async function startDbChangeStream(
       // Guard against missing namespace
       if (!ns) return;
 
-      // Suppress echo-loop (from applyOp)
+      // Mark dirty for state hash tracking BEFORE the suppressor check —
+      // remote-applied ops (which the suppressor swallows below) still
+      // mutate the local collection, so their partitions are genuinely
+      // dirty and need recomputing on the next incremental hash.
+      if (trackStateHash && ns) {
+        await markDirtyById(
+          db,
+          ns.coll,
+          docId as ObjectId | string | number,
+          { reason: change.operationType },
+        );
+      }
+
+      // Suppress echo-loop (from applyOp): everything past this point
+      // records the op as locally-originated, which is wrong for ops we
+      // just applied from a peer.
       if (suppressor?.has(ns as Namespace, docId)) return;
 
       // Store fullDocument and updateDescription as blobs (RLJSON pattern)
@@ -606,13 +626,6 @@ export async function startDbChangeStream(
 
       // State tracking: capture state before operation
       const prevStateHash = trackStateHash ? currentDbStateHash : undefined;
-
-      // Mark dirty for state hash tracking
-      if (trackStateHash && ns) {
-        await markDirtyById(db, ns.coll, docId, {
-          reason: change.operationType,
-        });
-      }
 
       // Compute new state hash after operation (if tracking enabled)
       let newStateHash: string | undefined;

@@ -660,12 +660,20 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
       logger: app.log,
     });
 
-    // Start change stream to capture local changes
+    // Start change stream to capture local changes. When TRACK_STATE_HASH=1
+    // (or true), the change-stream callback marks state_dirty partitions on
+    // every write so callers can run mode='incremental' state hashes without
+    // pre-marking. Off by default — it adds a markDirtyById call per change
+    // and a state-hash recompute on every tick, which is expensive.
+    const trackStateHash = /^(1|true|yes)$/i.test(
+      process.env.TRACK_STATE_HASH || '',
+    );
     startDbChangeStream({
       db,
       nodeId,
       logger: app.log,
       suppressor,
+      trackStateHash,
     });
 
     // Poll peers periodically.
