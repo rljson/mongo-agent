@@ -316,3 +316,67 @@
     grid-template-columns: repeat(3, 1fr);
   }
 }
+
+// Service-control card (hub + agents start buttons)
+.service-control {
+  margin-bottom: 1.25rem;
+
+  .service-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #eee;
+  }
+  .service-row:last-child {
+    border-bottom: none;
+  }
+  .service-name {
+    font-weight: 500;
+    code {
+      font-size: 0.85em;
+      color: #666;
+      margin-left: 0.4rem;
+    }
+  }
+  .status-pill {
+    display: inline-block;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    min-width: 4rem;
+    text-align: center;
+    &.up {
+      background: #d4edda;
+      color: #155724;
+    }
+    &.down {
+      background: #f8d7da;
+      color: #721c24;
+    }
+    &.unknown {
+      background: #e2e3e5;
+      color: #6c757d;
+    }
+  }
+  .btn-start {
+    padding: 0.35rem 0.85rem;
+    border: 1px solid #007bff;
+    background: #007bff;
+    color: white;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    &:hover:not(:disabled) {
+      background: #0056b3;
+      border-color: #0056b3;
+    }
+    &:disabled {
+      background: #ccc;
+      border-color: #ccc;
+      cursor: not-allowed;
+    }
+  }
+}

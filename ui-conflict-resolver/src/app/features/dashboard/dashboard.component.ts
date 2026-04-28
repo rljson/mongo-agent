@@ -83,6 +83,19 @@ export class DashboardComponent implements OnInit, OnDestroy {
   alerts: Alert[] = [];
   conflictsCount = 0;
 
+  // Service control (Hub + agents). `null` = not yet probed.
+  services: { hub: boolean | null; l1: boolean | null; l2: boolean | null } = {
+    hub: null,
+    l1: null,
+    l2: null,
+  };
+  // Per-button "starting" state to disable the button while a launch is in flight.
+  starting: { hub: boolean; l1: boolean; l2: boolean } = {
+    hub: false,
+    l1: false,
+    l2: false,
+  };
+
   constructor(private syncApi: SyncApiService) {}
 
   ngOnInit(): void {
@@ -95,11 +108,71 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
     // Load conflicts for alerts
     this.loadConflicts();
+    this.loadServicesStatus();
 
     // Poll for conflicts every 10 seconds
     interval(10000)
       .pipe(takeUntil(this.destroy$))
       .subscribe(() => this.loadConflicts());
+
+    // Poll service liveness every 5 seconds.
+    interval(5000)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.loadServicesStatus());
+  }
+
+  loadServicesStatus(): void {
+    this.syncApi.getServicesStatus().subscribe({
+      next: (s) => {
+        this.services = s;
+      },
+      error: () => {
+        // API unreachable — show all as down.
+        this.services = { hub: false, l1: false, l2: false };
+      },
+    });
+  }
+
+  startHub(): void {
+    this.starting.hub = true;
+    this.syncApi.startHub().subscribe({
+      next: () => {
+        this.starting.hub = false;
+        this.loadServicesStatus();
+      },
+      error: () => {
+        this.starting.hub = false;
+        this.loadServicesStatus();
+      },
+    });
+  }
+
+  startAgentL1(): void {
+    this.starting.l1 = true;
+    this.syncApi.startAgentL1().subscribe({
+      next: () => {
+        this.starting.l1 = false;
+        this.loadServicesStatus();
+      },
+      error: () => {
+        this.starting.l1 = false;
+        this.loadServicesStatus();
+      },
+    });
+  }
+
+  startAgentL2(): void {
+    this.starting.l2 = true;
+    this.syncApi.startAgentL2().subscribe({
+      next: () => {
+        this.starting.l2 = false;
+        this.loadServicesStatus();
+      },
+      error: () => {
+        this.starting.l2 = false;
+        this.loadServicesStatus();
+      },
+    });
   }
 
   ngOnDestroy(): void {

@@ -614,6 +614,282 @@ describe('pull-from-hub', () => {
       expect(result.applied).toBe(false);
       expect(result.reason).toBe('unknown-op-type');
     });
+
+    it('records concurrent-update conflict when local has unsynced edit', async () => {
+      // L2 receiving an update from laptop1 for a doc L2 already edited.
+      const docId = new ObjectId('507f1f77bcf86cd799439011');
+      const op: SyncOp = {
+        _id: 'laptop1_5',
+        origin: 'laptop1',
+        seq: 5,
+        chainHash: 'chain5',
+        ns: { db: 'testdb', coll: 'users' },
+        operationType: 'update',
+        docId,
+        payload: {
+          fullDocument: { _id: docId, name: 'Edited on L1' },
+        },
+        ts: '2024-01-01T00:00:00.000Z',
+      };
+      const localDoc = { _id: docId, name: 'Edited on L2' };
+      const lastLocalEdit = {
+        _id: 'laptop2_3',
+        origin: 'laptop2',
+        seq: 3,
+        operationType: 'update',
+        chainHash: 'chain3',
+        ts: '2024-01-01T00:00:00.000Z',
+        payload: { fullDocument: localDoc },
+        ns: { db: 'testdb', coll: 'users' },
+        docId,
+      };
+
+      const usersReplaceOne = vi.fn();
+      mockCollections.set('users', {
+        findOne: vi.fn().mockResolvedValue(localDoc),
+        replaceOne: usersReplaceOne,
+      } as never);
+      // sync_ops.findOne is called twice: dedupe by _id (returns null), then
+      // for lastLocalEdit lookup (returns the local edit).
+      const syncOpsFindOne = vi
+        .fn()
+        .mockImplementation((filter: { _id?: string }) =>
+          Promise.resolve(filter._id === op._id ? null : lastLocalEdit),
+        );
+      mockCollections.set('sync_ops', {
+        findOne: syncOpsFindOne,
+        insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+      let recorded: { conflictType?: string; versions?: unknown[] } | null = null;
+      mockCollections.set('sync_conflicts', {
+        findOne: vi.fn().mockResolvedValue(null),
+        updateOne: vi.fn(
+          async (
+            _filter: unknown,
+            update: { $setOnInsert?: typeof recorded },
+          ) => {
+            recorded = update.$setOnInsert ?? null;
+            return { acknowledged: true };
+          },
+        ),
+      } as never);
+      mockCollections.set('sync_state', {
+        updateOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+
+      const result = await applyOneOp({
+        db: mockDb,
+        op,
+        localNodeId: 'laptop2',
+        fastify: { log: { info: vi.fn(), warn: vi.fn() } },
+      });
+
+      expect(result.applied).toBe(false);
+      expect(result.reason).toBe('conflict-recorded');
+      // Local doc not overwritten — conflict preserves local state.
+      expect(usersReplaceOne).not.toHaveBeenCalled();
+      expect(recorded).not.toBeNull();
+      expect(recorded!.conflictType).toBe('concurrent-update');
+      expect(recorded!.versions).toHaveLength(2);
+    });
+
+    it('applies remote resolution when pending sync_conflict exists', async () => {
+      // Simulates a UI/API resolution on the peer. The incoming op should
+      // overwrite local AND mark our local conflict resolved.
+      const docId = new ObjectId('507f1f77bcf86cd799439011');
+      const op: SyncOp = {
+        _id: 'laptop1_8',
+        origin: 'laptop1',
+        seq: 8,
+        chainHash: 'chain8',
+        ns: { db: 'testdb', coll: 'users' },
+        operationType: 'update',
+        docId,
+        payload: { fullDocument: { _id: docId, name: 'resolved' } },
+        ts: '2024-01-01T00:00:00.000Z',
+      };
+      const usersReplaceOne = vi.fn().mockResolvedValue({ acknowledged: true });
+      mockCollections.set('users', {
+        findOne: vi.fn().mockResolvedValue({ _id: docId, name: 'old' }),
+        replaceOne: usersReplaceOne,
+      } as never);
+      const conflictsUpdateOne = vi.fn(async () => ({ acknowledged: true }));
+      mockCollections.set('sync_conflicts', {
+        findOne: vi.fn().mockResolvedValue({
+          _id: 'conflict-1',
+          conflictId: 'conflict-1',
+          documentId: String(docId),
+          collection: 'users',
+          status: 'pending',
+        }),
+        updateOne: conflictsUpdateOne,
+      } as never);
+      mockCollections.set('sync_ops', {
+        findOne: vi.fn().mockResolvedValue(null),
+        insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+      mockCollections.set('sync_state', {
+        updateOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+
+      const result = await applyOneOp({
+        db: mockDb,
+        op,
+        localNodeId: 'laptop2',
+        fastify: { log: { info: vi.fn(), warn: vi.fn() } },
+      });
+
+      expect(result.applied).toBe(true);
+      expect(result.reason).toBe('resolution-applied');
+      expect(usersReplaceOne).toHaveBeenCalledWith(
+        { _id: docId },
+        op.payload!.fullDocument,
+        { upsert: true },
+      );
+      expect(conflictsUpdateOne).toHaveBeenCalledWith(
+        { _id: 'conflict-1' },
+        { $set: { status: 'resolved' } },
+      );
+    });
+
+    it('records update-delete conflict (Case A: peer deletes locally-updated doc)', async () => {
+      const docId = new ObjectId('507f1f77bcf86cd799439011');
+      const op: SyncOp = {
+        _id: 'laptop1_9',
+        origin: 'laptop1',
+        seq: 9,
+        chainHash: 'chain9',
+        ns: { db: 'testdb', coll: 'users' },
+        operationType: 'delete',
+        docId,
+        payload: null,
+        ts: '2024-01-01T00:00:00.000Z',
+      };
+      const localDoc = { _id: docId, name: 'L2 still has this updated' };
+      const lastLocalUpdate = {
+        _id: 'laptop2_4',
+        origin: 'laptop2',
+        seq: 4,
+        operationType: 'update',
+        chainHash: 'chain4',
+        ts: '2024-01-01T00:00:00.000Z',
+        payload: { fullDocument: localDoc },
+        ns: { db: 'testdb', coll: 'users' },
+        docId,
+      };
+      const usersDeleteOne = vi.fn();
+      mockCollections.set('users', {
+        findOne: vi.fn().mockResolvedValue(localDoc),
+        deleteOne: usersDeleteOne,
+      } as never);
+      mockCollections.set('sync_ops', {
+        findOne: vi
+          .fn()
+          .mockImplementation((filter: { _id?: string }) =>
+            Promise.resolve(filter._id === op._id ? null : lastLocalUpdate),
+          ),
+        insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+      let recorded: { conflictType?: string } | null = null;
+      mockCollections.set('sync_conflicts', {
+        findOne: vi.fn().mockResolvedValue(null),
+        updateOne: vi.fn(
+          async (
+            _filter: unknown,
+            update: { $setOnInsert?: typeof recorded },
+          ) => {
+            recorded = update.$setOnInsert ?? null;
+            return { acknowledged: true };
+          },
+        ),
+      } as never);
+      mockCollections.set('sync_state', {
+        updateOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+
+      const result = await applyOneOp({
+        db: mockDb,
+        op,
+        localNodeId: 'laptop2',
+        fastify: { log: { info: vi.fn(), warn: vi.fn() } },
+      });
+
+      expect(result.applied).toBe(false);
+      expect(result.reason).toBe('conflict-recorded');
+      // Local doc must NOT be deleted — preserve until resolution.
+      expect(usersDeleteOne).not.toHaveBeenCalled();
+      expect(recorded).not.toBeNull();
+      expect(recorded!.conflictType).toBe('update-delete');
+    });
+
+    it('records update-delete conflict (Case B: peer updates locally-deleted doc)', async () => {
+      const docId = new ObjectId('507f1f77bcf86cd799439011');
+      const op: SyncOp = {
+        _id: 'laptop1_10',
+        origin: 'laptop1',
+        seq: 10,
+        chainHash: 'chain10',
+        ns: { db: 'testdb', coll: 'users' },
+        operationType: 'update',
+        docId,
+        payload: { fullDocument: { _id: docId, name: 'L1 update' } },
+        ts: '2024-01-01T00:00:00.000Z',
+      };
+      const lastLocalDelete = {
+        _id: 'laptop2_5',
+        origin: 'laptop2',
+        seq: 5,
+        operationType: 'delete',
+        chainHash: 'chain5',
+        ts: '2024-01-01T00:00:00.000Z',
+        payload: null,
+        ns: { db: 'testdb', coll: 'users' },
+        docId,
+      };
+      const usersReplaceOne = vi.fn();
+      mockCollections.set('users', {
+        findOne: vi.fn().mockResolvedValue(null), // local was deleted
+        replaceOne: usersReplaceOne,
+      } as never);
+      mockCollections.set('sync_ops', {
+        findOne: vi
+          .fn()
+          .mockImplementation((filter: { _id?: string }) =>
+            Promise.resolve(filter._id === op._id ? null : lastLocalDelete),
+          ),
+        insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+      let recorded: { conflictType?: string } | null = null;
+      mockCollections.set('sync_conflicts', {
+        findOne: vi.fn().mockResolvedValue(null),
+        updateOne: vi.fn(
+          async (
+            _filter: unknown,
+            update: { $setOnInsert?: typeof recorded },
+          ) => {
+            recorded = update.$setOnInsert ?? null;
+            return { acknowledged: true };
+          },
+        ),
+      } as never);
+      mockCollections.set('sync_state', {
+        updateOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      } as never);
+
+      const result = await applyOneOp({
+        db: mockDb,
+        op,
+        localNodeId: 'laptop2',
+        fastify: { log: { info: vi.fn(), warn: vi.fn() } },
+      });
+
+      expect(result.applied).toBe(false);
+      expect(result.reason).toBe('conflict-recorded');
+      // Don't recreate the locally-deleted doc.
+      expect(usersReplaceOne).not.toHaveBeenCalled();
+      expect(recorded).not.toBeNull();
+      expect(recorded!.conflictType).toBe('update-delete');
+    });
   });
 
   describe('syncOriginFromHub', () => {

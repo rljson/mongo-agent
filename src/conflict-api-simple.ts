@@ -3,17 +3,115 @@
  * This is a minimal version for demonstration purposes
  */
 
+import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as http from 'node:http';
+import * as path from 'node:path';
+import * as url from 'node:url';
+
 import cors from 'cors';
 import express from 'express';
-import { Db, MongoClient } from 'mongodb';
+import { Db, MongoClient, ObjectId } from 'mongodb';
+
+/**
+ * Document ids in `sync_conflicts.documentId` are stored as their hex
+ * string. The actual collection's `_id` is typically a BSON ObjectId, so
+ * matching on the raw string never finds the real doc and (with upsert)
+ * inserts a phantom string-keyed copy. Rehydrate to ObjectId when the
+ * value looks like a 24-char hex; pass non-hex ids through unchanged.
+ */
+function resolveDocId(id: unknown): unknown {
+  if (typeof id === 'string' && /^[a-f0-9]{24}$/i.test(id)) {
+    return new ObjectId(id);
+  }
+  return id;
+}
 
 
 const app = express();
 const port = 3000;
 
+/**
+ * Repo root used as cwd when spawning hub/agent processes. Defaults to two
+ * levels above this file (project root) but can be overridden via env for
+ * portability.
+ */
+const REPO_ROOT =
+  process.env.REPO_ROOT ||
+  path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
+
+const HUB_PORT = 3200;
+const L1_AGENT_PORT = 3001;
+const HUB_HOST = '127.0.0.1';
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+/**
+ * Probe a TCP port over HTTP. Returns true if anything answers within
+ * 1 second. Used by the dashboard status endpoint.
+ */
+function probeHttp(host: string, portNum: number, urlPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host, port: portNum, path: urlPath, timeout: 1500 },
+      (res) => {
+        res.resume();
+        resolve((res.statusCode ?? 500) < 500);
+      },
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Spawns a Node process detached from this server with stdout/stderr piped
+ * to a log file. Returns the PID. The child survives this server stopping.
+ */
+function spawnDetachedNode(
+  args: string[],
+  logBasename: string,
+  extraEnv: Record<string, string> = {},
+): { pid: number | undefined } {
+  const outPath = path.join(REPO_ROOT, `${logBasename}.out`);
+  const errPath = path.join(REPO_ROOT, `${logBasename}.err`);
+  const out = fs.openSync(outPath, 'a');
+  const err = fs.openSync(errPath, 'a');
+  const child = spawn('node', args, {
+    cwd: REPO_ROOT,
+    detached: true,
+    stdio: ['ignore', out, err],
+    env: { ...process.env, ...extraEnv },
+    windowsHide: true,
+  });
+  child.unref();
+  return { pid: child.pid };
+}
+
+// Track L2 agent's running state — port 3002 is on the remote laptop, can't
+// be probed locally without WinRM. We rely on the hub's `lastSeenAt` for it.
+async function l2AgentUp(): Promise<boolean> {
+  if (!(await probeHttp(HUB_HOST, HUB_PORT, '/hub/clients'))) return false;
+  try {
+    const resp = await fetch(`http://${HUB_HOST}:${HUB_PORT}/hub/clients`);
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as {
+      clients?: Array<{ clientId: string; lastSeenAt: string }>;
+    };
+    const l2 = (data.clients || []).find((c) => c.clientId === 'laptop2');
+    if (!l2) return false;
+    // Stale-tolerant: hub considers a client live if seen within ~10s.
+    const seen = Date.parse(l2.lastSeenAt);
+    return !Number.isNaN(seen) && Date.now() - seen < 10_000;
+  } catch {
+    return false;
+  }
+}
 
 let mongoClient: MongoClient;
 let db: Db;
@@ -26,12 +124,13 @@ const mockConflicts = new Map();
  */
 async function initializeMongoDB() {
   const mongoUrl = process.env.MONGO_URI || 'mongodb://mongoa:27017';
+  const dbName = process.env.DB_NAME || 'test_offline_persistence';
   mongoClient = new MongoClient(mongoUrl);
   await mongoClient.connect();
 
-  db = mongoClient.db('test_offline_persistence');
+  db = mongoClient.db(dbName);
 
-  console.log('✅ MongoDB connected');
+  console.log(`✅ MongoDB connected (db=${dbName})`);
 
   // Create indexes for better query performance
   await db.collection('sync_conflicts').createIndex({ status: 1 });
@@ -231,17 +330,14 @@ app.post('/api/conflicts/resolve', async (req, res) => {
         const collectionName = dbConflict.collection || 'articles';
         const collection = db.collection(collectionName);
 
-        // Update the document in the collection with the resolved version
+        // Update the document in the collection with the resolved version.
+        // Coerce the documentId back to ObjectId where applicable; without
+        // this, the upsert below would silently insert a phantom doc keyed
+        // by string instead of updating the real ObjectId-keyed one.
+        const matchId = resolveDocId(dbConflict.documentId);
         await collection.updateOne(
-          { _id: dbConflict.documentId },
-          {
-            $set: {
-              ...resolvedDoc,
-              _resolvedFrom: resolution.conflictId,
-              _resolvedAt: new Date(),
-              _resolvedBy: resolution.resolutionType,
-            },
-          },
+          { _id: matchId } as Record<string, unknown>,
+          { $set: { ...resolvedDoc, _id: matchId } },
           { upsert: true },
         );
 
@@ -252,16 +348,12 @@ app.post('/api/conflicts/resolve', async (req, res) => {
         console.warn(`⚠️  No resolved document provided in resolution`);
       }
 
-      // Update conflict status
+      // Update conflict status. Only the status flips here — any audit
+      // trail (who/when/which strategy/etc.) belongs in a separate
+      // collection if/when we add one.
       await db.collection('sync_conflicts').updateOne(
         { conflictId: resolution.conflictId },
-        {
-          $set: {
-            status: 'resolved',
-            resolution: resolution,
-            resolvedAt: Date.now(),
-          },
-        },
+        { $set: { status: 'resolved' } },
       );
 
       console.log(
@@ -422,6 +514,117 @@ app.post('/api/sync/trigger', (req, res) => {
       success: false,
       error: 'Failed to trigger sync',
     });
+  }
+});
+
+// ==================== SERVICE CONTROL ====================
+// Dashboard "Start" buttons hit these. Each start endpoint is idempotent —
+// returns the existing service if it's already up, otherwise spawns it
+// detached and waits ~3s for it to bind its port before reporting back.
+
+/**
+ * GET /api/services/status
+ * Returns liveness of hub, L1 agent, and L2 agent for the dashboard pills.
+ */
+app.get('/api/services/status', async (_req, res) => {
+  try {
+    const [hub, l1, l2] = await Promise.all([
+      probeHttp(HUB_HOST, HUB_PORT, '/hub/clients'),
+      probeHttp(HUB_HOST, L1_AGENT_PORT, '/health'),
+      l2AgentUp(),
+    ]);
+    res.json({ hub, l1, l2 });
+  } catch (error) {
+    console.error('services/status error:', error);
+    res.status(500).json({ error: 'status check failed' });
+  }
+});
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 4000,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+app.post('/api/services/start-hub', async (_req, res) => {
+  try {
+    if (await probeHttp(HUB_HOST, HUB_PORT, '/hub/clients')) {
+      return res.json({ status: 'already-up' });
+    }
+    const { pid } = spawnDetachedNode(
+      ['--import', 'tsx/esm', '_hub-start.mts'],
+      'hub.run',
+    );
+    const up = await waitFor(() =>
+      probeHttp(HUB_HOST, HUB_PORT, '/hub/clients'),
+    );
+    res.json({ pid, status: up ? 'up' : 'starting' });
+  } catch (error) {
+    console.error('start-hub error:', error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post('/api/services/start-agent-l1', async (_req, res) => {
+  try {
+    if (await probeHttp(HUB_HOST, L1_AGENT_PORT, '/health')) {
+      return res.json({ status: 'already-up' });
+    }
+    const { pid } = spawnDetachedNode(
+      [
+        '--max-old-space-size=16384',
+        '--env-file=.env',
+        '--import',
+        'tsx/esm',
+        'src/agent-server.ts',
+      ],
+      'agent-l1.run',
+    );
+    const up = await waitFor(
+      () => probeHttp(HUB_HOST, L1_AGENT_PORT, '/health'),
+      8000,
+    );
+    res.json({ pid, status: up ? 'up' : 'starting' });
+  } catch (error) {
+    console.error('start-agent-l1 error:', error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post('/api/services/start-agent-l2', async (_req, res) => {
+  try {
+    if (await l2AgentUp()) {
+      return res.json({ status: 'already-up' });
+    }
+    // Spawn powershell with the helper script. Detached so this endpoint
+    // returns immediately even if WinRM is slow.
+    const psScript = path.join(REPO_ROOT, 'scripts', 'start-l2-agent.ps1');
+    const out = fs.openSync(path.join(REPO_ROOT, 'agent-l2-launch.out'), 'a');
+    const err = fs.openSync(path.join(REPO_ROOT, 'agent-l2-launch.err'), 'a');
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-File', psScript],
+      {
+        cwd: REPO_ROOT,
+        detached: true,
+        stdio: ['ignore', out, err],
+        windowsHide: true,
+      },
+    );
+    child.unref();
+    // L2 boot is slower (WinRM hop + Win32_Process.Create + node startup +
+    // first poll cycle to register at hub).
+    const up = await waitFor(l2AgentUp, 12000);
+    res.json({ pid: child.pid, status: up ? 'up' : 'starting' });
+  } catch (error) {
+    console.error('start-agent-l2 error:', error);
+    res.status(500).json({ error: String(error) });
   }
 });
 

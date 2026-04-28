@@ -89,4 +89,34 @@ export class SyncApiService {
       {},
     );
   }
+
+  /**
+   * Liveness of hub + agents for the dashboard.
+   */
+  getServicesStatus(): Observable<{ hub: boolean; l1: boolean; l2: boolean }> {
+    return this.http.get<{ hub: boolean; l1: boolean; l2: boolean }>(
+      `${this.apiBaseUrl}/services/status`,
+    );
+  }
+
+  startHub(): Observable<{ pid?: number; status: string }> {
+    return this.http.post<{ pid?: number; status: string }>(
+      `${this.apiBaseUrl}/services/start-hub`,
+      {},
+    );
+  }
+
+  startAgentL1(): Observable<{ pid?: number; status: string }> {
+    return this.http.post<{ pid?: number; status: string }>(
+      `${this.apiBaseUrl}/services/start-agent-l1`,
+      {},
+    );
+  }
+
+  startAgentL2(): Observable<{ pid?: number; status: string }> {
+    return this.http.post<{ pid?: number; status: string }>(
+      `${this.apiBaseUrl}/services/start-agent-l2`,
+      {},
+    );
+  }
 }

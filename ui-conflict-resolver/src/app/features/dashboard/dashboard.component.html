@@ -1,6 +1,81 @@
 <div class="dashboard">
   <h2>Dashboard</h2>
 
+  <!-- Service Control: hub + agents -->
+  <div class="card service-control">
+    <div class="card-header">
+      <h3>Service Control</h3>
+    </div>
+    <div class="card-body">
+      <div class="service-row">
+        <span class="service-name">Hub <code>:3200</code></span>
+        <span
+          class="status-pill"
+          [class.up]="services.hub === true"
+          [class.down]="services.hub === false"
+          [class.unknown]="services.hub === null">
+          {{
+            services.hub === null
+              ? '…'
+              : services.hub
+                ? 'UP'
+                : 'DOWN'
+          }}
+        </span>
+        <button
+          class="btn btn-start"
+          (click)="startHub()"
+          [disabled]="starting.hub || services.hub === true">
+          {{ starting.hub ? 'Starting…' : 'Start' }}
+        </button>
+      </div>
+      <div class="service-row">
+        <span class="service-name">Agent L1 <code>:3001</code></span>
+        <span
+          class="status-pill"
+          [class.up]="services.l1 === true"
+          [class.down]="services.l1 === false"
+          [class.unknown]="services.l1 === null">
+          {{
+            services.l1 === null
+              ? '…'
+              : services.l1
+                ? 'UP'
+                : 'DOWN'
+          }}
+        </span>
+        <button
+          class="btn btn-start"
+          (click)="startAgentL1()"
+          [disabled]="starting.l1 || services.l1 === true">
+          {{ starting.l1 ? 'Starting…' : 'Start' }}
+        </button>
+      </div>
+      <div class="service-row">
+        <span class="service-name">Agent L2 <code>:3002 (remote)</code></span>
+        <span
+          class="status-pill"
+          [class.up]="services.l2 === true"
+          [class.down]="services.l2 === false"
+          [class.unknown]="services.l2 === null">
+          {{
+            services.l2 === null
+              ? '…'
+              : services.l2
+                ? 'UP'
+                : 'DOWN'
+          }}
+        </span>
+        <button
+          class="btn btn-start"
+          (click)="startAgentL2()"
+          [disabled]="starting.l2 || services.l2 === true">
+          {{ starting.l2 ? 'Starting…' : 'Start' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Dashboard Grid -->
   <div class="dashboard-grid">
     <!-- Node Status Card -->

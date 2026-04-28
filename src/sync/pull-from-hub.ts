@@ -273,6 +273,69 @@ export async function applyOneOp(
     const fullDoc = fd as Record<string, unknown>;
     const docId = fullDoc._id;
 
+    // Resolution propagation: if there's already a pending sync_conflicts
+    // entry for this docId, this incoming op IS the resolution (some node's
+    // UI/API picked a winner and wrote the resolved doc, which generated
+    // this op via the change-stream). Apply unconditionally — overriding
+    // local — and mark the local conflict resolved. Without this branch the
+    // standard conflict detection below would re-flag the resolution as a
+    // brand-new conflict and the choice would never propagate.
+    const pendingConflict = await db
+      .collection('sync_conflicts')
+      .findOne({
+        documentId: String(docId),
+        collection: op.ns.coll,
+        status: 'pending',
+      });
+    if (pendingConflict) {
+      if (suppressor) {
+        suppressor.add(op.ns, docId);
+      }
+      await coll.replaceOne(
+        { _id: docId } as Record<string, unknown>,
+        fullDoc,
+        { upsert: true },
+      );
+      await db.collection('sync_conflicts').updateOne(
+        { _id: (pendingConflict as { _id: unknown })._id } as Record<
+          string,
+          unknown
+        >,
+        { $set: { status: 'resolved' } },
+      );
+      fastify.log.info?.(
+        {
+          docId,
+          opId: op._id,
+          conflictId: (pendingConflict as { conflictId?: string })
+            .conflictId,
+        },
+        'remote resolution applied; sync_conflicts marked resolved',
+      );
+      // Skip the rest of the apply branch (we already wrote). Fall through
+      // to the sync_ops insert + sync_state update below.
+      try {
+        await syncOps.insertOne(op as unknown as OptionalId<Document>);
+      } catch (err) {
+        if ((err as { code?: number } | null)?.code !== 11000) throw err;
+      }
+      await syncState.updateOne(
+        { origin: op.origin },
+        {
+          $set: {
+            origin: op.origin,
+            lastSeqSeen: op.seq,
+            lastHashSeen: op.chainHash,
+            applied: { lastSeq: op.seq, lastHash: op.chainHash },
+            updatedAt: new Date().toISOString(),
+            updatedBy: localNodeId,
+          },
+        },
+        { upsert: true },
+      );
+      return { applied: true, reason: 'resolution-applied' };
+    }
+
     // Concurrent-update conflict detection. When (1) the doc already exists
     // locally, (2) its content differs from the peer's payload, and (3) our
     // most recent LOCAL-origin sync_op on this doc still matches the local
@@ -282,7 +345,45 @@ export async function applyOneOp(
     const local = await coll.findOne(
       { _id: docId } as Record<string, unknown>,
     );
-    if (local) {
+    // Update-delete conflict detection (Case B): peer wants to update a doc
+    // that we deleted locally. If our most recent local-origin op on this
+    // docId is a `delete`, both nodes diverged. Preserve the local
+    // "deleted" state and record the conflict.
+    if (!local) {
+      const lastLocalEdit = await syncOps.findOne(
+        {
+          'ns.coll': op.ns.coll,
+          docId,
+          origin: localNodeId,
+        } as Record<string, unknown>,
+        { sort: { seq: -1 } },
+      );
+      if (
+        lastLocalEdit &&
+        (lastLocalEdit as { operationType?: string }).operationType ===
+          'delete'
+      ) {
+        const remoteHash = docLeafHash(fd as DocWithHash);
+        await recordConflict({
+          db,
+          ns: op.ns,
+          docId,
+          local: null,
+          localHash: null,
+          lastLocalEdit: lastLocalEdit as unknown as SyncOp,
+          remoteOp: op,
+          remoteHash,
+          localNodeId,
+          conflictType: 'update-delete',
+        });
+        fastify.log.warn?.(
+          { docId, opId: op._id, peerOrigin: op.origin },
+          'update-delete conflict: peer updated, local deleted; preserving local-deleted',
+        );
+        conflictDetected = true;
+      }
+    }
+    if (!conflictDetected && local) {
       const remoteHash = docLeafHash(fd as DocWithHash);
       const localHash = docLeafHash(local as DocWithHash);
       if (remoteHash !== null && localHash !== null && remoteHash !== localHash) {
@@ -340,10 +441,53 @@ export async function applyOneOp(
     }
   } else if (op.operationType === 'delete') {
     const docId = op.docId;
-    if (suppressor) {
-      suppressor.add(op.ns, docId);
+    // Update-delete conflict detection (Case A): peer wants to delete a
+    // doc that we still have AND that our most recent local-origin op
+    // updated rather than deleted. Both nodes diverged on this doc;
+    // preserve the local update.
+    const local = await coll.findOne(
+      { _id: docId } as Record<string, unknown>,
+    );
+    if (local) {
+      const lastLocalEdit = await syncOps.findOne(
+        {
+          'ns.coll': op.ns.coll,
+          docId,
+          origin: localNodeId,
+        } as Record<string, unknown>,
+        { sort: { seq: -1 } },
+      );
+      if (
+        lastLocalEdit &&
+        (lastLocalEdit as { operationType?: string }).operationType !==
+          'delete'
+      ) {
+        const localHash = docLeafHash(local as DocWithHash);
+        await recordConflict({
+          db,
+          ns: op.ns,
+          docId,
+          local,
+          localHash,
+          lastLocalEdit: lastLocalEdit as unknown as SyncOp,
+          remoteOp: op,
+          remoteHash: null,
+          localNodeId,
+          conflictType: 'update-delete',
+        });
+        fastify.log.warn?.(
+          { docId, opId: op._id, peerOrigin: op.origin },
+          'update-delete conflict: peer deleted, local updated; preserving local',
+        );
+        conflictDetected = true;
+      }
     }
-    await coll.deleteOne({ _id: docId } as Record<string, unknown>);
+    if (!conflictDetected) {
+      if (suppressor) {
+        suppressor.add(op.ns, docId);
+      }
+      await coll.deleteOne({ _id: docId } as Record<string, unknown>);
+    }
   } else {
     fastify.log.warn?.(
       { opId: op._id, type: op.operationType },
@@ -402,12 +546,13 @@ async function recordConflict(opts: {
   db: Db;
   ns: Namespace;
   docId: unknown;
-  local: Record<string, unknown>;
+  local: Record<string, unknown> | null;
   localHash: string | null;
   lastLocalEdit: SyncOp;
   remoteOp: SyncOp;
   remoteHash: string | null;
   localNodeId: string;
+  conflictType?: 'concurrent-update' | 'update-delete' | 'concurrent-insert';
 }): Promise<void> {
   const {
     db,
@@ -419,6 +564,7 @@ async function recordConflict(opts: {
     remoteOp,
     remoteHash,
     localNodeId,
+    conflictType = 'concurrent-update',
   } = opts;
   const conflictId = `conflict-${ns.coll}-${String(docId)}-${lastLocalEdit._id}-${remoteOp._id}`;
   const tsToMs = (ts: unknown): number => {
@@ -436,7 +582,7 @@ async function recordConflict(opts: {
         database: ns.db,
         detectedAt: Date.now(),
         status: 'pending',
-        conflictType: 'concurrent-update',
+        conflictType,
         versions: [
           {
             documentId: String(docId),
@@ -450,7 +596,7 @@ async function recordConflict(opts: {
           },
           {
             documentId: String(docId),
-            data: remoteOp.payload?.fullDocument,
+            data: remoteOp.payload?.fullDocument ?? null,
             timestamp: tsToMs(remoteOp.ts),
             nodeId: remoteOp.origin,
             operationId: remoteOp._id,
