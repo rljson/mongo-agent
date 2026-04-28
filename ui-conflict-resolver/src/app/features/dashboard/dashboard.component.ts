@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnDestroy, OnInit } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 
 import { formatDistanceToNow } from 'date-fns';
@@ -40,7 +41,7 @@ interface Alert {
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [CommonModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink],
   templateUrl: './dashboard.component.html',
   styleUrls: ['./dashboard.component.scss'],
 })
@@ -95,6 +96,43 @@ export class DashboardComponent implements OnInit, OnDestroy {
     l1: false,
     l2: false,
   };
+  stopping: { hub: boolean; l1: boolean; l2: boolean } = {
+    hub: false,
+    l1: false,
+    l2: false,
+  };
+
+  // Repair panel state
+  repair: {
+    running: 'chain' | 'peer' | 'backfill' | null;
+    output: string;
+    exitCode: number | null;
+    chainColl: string;
+    peerColl: string;
+    backfillColl: string;
+  } = {
+    running: null,
+    output: '',
+    exitCode: null,
+    chainColl: '',
+    peerColl: 'customers',
+    backfillColl: 'customers',
+  };
+
+  // Hash status snapshot (read from state_checkpoints)
+  hashStatus: {
+    loading: boolean;
+    dbRoot: string | null;
+    ts: number | null;
+    mode: string | null;
+    perColl: Array<{ name: string; root: string; partitions: number }>;
+  } = {
+    loading: false,
+    dbRoot: null,
+    ts: null,
+    mode: null,
+    perColl: [],
+  };
 
   constructor(private syncApi: SyncApiService) {}
 
@@ -109,6 +147,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
     // Load conflicts for alerts
     this.loadConflicts();
     this.loadServicesStatus();
+    this.loadHashStatus();
 
     // Poll for conflicts every 10 seconds
     interval(10000)
@@ -119,6 +158,11 @@ export class DashboardComponent implements OnInit, OnDestroy {
     interval(5000)
       .pipe(takeUntil(this.destroy$))
       .subscribe(() => this.loadServicesStatus());
+
+    // Hash status changes infrequently — refresh every 30s.
+    interval(30000)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.loadHashStatus());
   }
 
   loadServicesStatus(): void {
@@ -173,6 +217,151 @@ export class DashboardComponent implements OnInit, OnDestroy {
         this.loadServicesStatus();
       },
     });
+  }
+
+  stopHub(): void {
+    this.stopping.hub = true;
+    this.syncApi.stopHub().subscribe({
+      next: () => {
+        this.stopping.hub = false;
+        this.loadServicesStatus();
+      },
+      error: () => {
+        this.stopping.hub = false;
+        this.loadServicesStatus();
+      },
+    });
+  }
+
+  stopAgentL1(): void {
+    this.stopping.l1 = true;
+    this.syncApi.stopAgentL1().subscribe({
+      next: () => {
+        this.stopping.l1 = false;
+        this.loadServicesStatus();
+      },
+      error: () => {
+        this.stopping.l1 = false;
+        this.loadServicesStatus();
+      },
+    });
+  }
+
+  stopAgentL2(): void {
+    this.stopping.l2 = true;
+    this.syncApi.stopAgentL2().subscribe({
+      next: () => {
+        this.stopping.l2 = false;
+        this.loadServicesStatus();
+      },
+      error: () => {
+        this.stopping.l2 = false;
+        this.loadServicesStatus();
+      },
+    });
+  }
+
+  // ---- Repair handlers ---------------------------------------------------
+
+  runRestoreFromChain(dryRun: boolean): void {
+    this.repair.running = 'chain';
+    this.repair.output = dryRun
+      ? 'Running restore-from-chain (DRY_RUN)…'
+      : 'Running restore-from-chain (LIVE)…';
+    this.repair.exitCode = null;
+    this.syncApi.restoreFromChain(dryRun).subscribe({
+      next: (r) => {
+        this.repair.running = null;
+        this.repair.output = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
+        this.repair.exitCode = r.exitCode;
+      },
+      error: (err) => {
+        this.repair.running = null;
+        this.repair.output = 'Error: ' + (err?.message || err);
+        this.repair.exitCode = -1;
+      },
+    });
+  }
+
+  runRestoreFromPeer(): void {
+    this.repair.running = 'peer';
+    this.repair.output = `Running restore-from-peer (coll=${this.repair.peerColl || 'all'})…`;
+    this.repair.exitCode = null;
+    this.syncApi.restoreFromPeer(this.repair.peerColl || undefined).subscribe({
+      next: (r) => {
+        this.repair.running = null;
+        this.repair.output = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
+        this.repair.exitCode = r.exitCode;
+      },
+      error: (err) => {
+        this.repair.running = null;
+        this.repair.output = 'Error: ' + (err?.message || err);
+        this.repair.exitCode = -1;
+      },
+    });
+  }
+
+  runBackfillHashes(): void {
+    this.repair.running = 'backfill';
+    this.repair.output = `Running backfill-hashes (coll=${this.repair.backfillColl || 'all'})…`;
+    this.repair.exitCode = null;
+    this.syncApi.backfillHashes(this.repair.backfillColl || undefined).subscribe({
+      next: (r) => {
+        this.repair.running = null;
+        this.repair.output = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
+        this.repair.exitCode = r.exitCode;
+      },
+      error: (err) => {
+        this.repair.running = null;
+        this.repair.output = 'Error: ' + (err?.message || err);
+        this.repair.exitCode = -1;
+      },
+    });
+  }
+
+  // ---- Hash status -------------------------------------------------------
+
+  loadHashStatus(): void {
+    this.hashStatus.loading = true;
+    this.syncApi.getHashStatus().subscribe({
+      next: (resp) => {
+        const cp = resp.checkpoint as
+          | {
+              dbRoot?: string;
+              ts?: number;
+              mode?: string;
+              collections?: Record<string, { root: string; partitions: number }>;
+            }
+          | null
+          | undefined;
+        if (cp) {
+          this.hashStatus.dbRoot = cp.dbRoot ?? null;
+          this.hashStatus.ts = cp.ts ?? null;
+          this.hashStatus.mode = cp.mode ?? null;
+          this.hashStatus.perColl = Object.entries(cp.collections || {})
+            .map(([name, meta]) => ({
+              name,
+              root: meta.root,
+              partitions: meta.partitions,
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+        } else {
+          this.hashStatus.dbRoot = null;
+          this.hashStatus.ts = null;
+          this.hashStatus.mode = null;
+          this.hashStatus.perColl = [];
+        }
+        this.hashStatus.loading = false;
+      },
+      error: () => {
+        this.hashStatus.loading = false;
+      },
+    });
+  }
+
+  shortHash(h: string | null | undefined): string {
+    if (!h) return '—';
+    return h.length > 16 ? h.slice(0, 12) + '…' : h;
   }
 
   ngOnDestroy(): void {

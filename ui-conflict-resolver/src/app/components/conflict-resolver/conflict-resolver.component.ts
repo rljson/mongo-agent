@@ -60,8 +60,14 @@ export class ConflictResolverComponent implements OnInit {
         this.conflict = conflict;
         this.loading = false;
 
-        // Initialize field conflicts if we have exactly 2 versions
-        if (conflict.versions.length === 2) {
+        // Field-merge only makes sense when both sides actually have data.
+        // For update-delete conflicts one side is null, so leave
+        // fieldConflicts empty — the template hides the field-merge card.
+        if (
+          conflict.versions.length === 2 &&
+          this.versionHasData(conflict.versions[0]) &&
+          this.versionHasData(conflict.versions[1])
+        ) {
           this.fieldConflicts = this.diffService.getFieldConflicts(
             conflict.versions[0].data,
             conflict.versions[1].data,
@@ -73,6 +79,32 @@ export class ConflictResolverComponent implements OnInit {
         this.loading = false;
       },
     });
+  }
+
+  /**
+   * A version has "data" iff its document body is present. The delete side
+   * of an update-delete conflict has `data: null` and `operationType:
+   * 'delete'` — meaning "this node says the doc should be gone."
+   */
+  versionHasData(v: DocumentVersion | undefined): boolean {
+    return !!v && v.data !== null && v.data !== undefined;
+  }
+
+  isDeleteVersion(v: DocumentVersion | undefined): boolean {
+    return !this.versionHasData(v) || v?.operationType === 'delete';
+  }
+
+  /**
+   * field-merge is only available when both versions carry data. For
+   * update-delete you must pick one side or the other (no field merge of
+   * a deleted doc).
+   */
+  canFieldMerge(): boolean {
+    if (!this.conflict || this.conflict.versions.length !== 2) return false;
+    return (
+      this.versionHasData(this.conflict.versions[0]) &&
+      this.versionHasData(this.conflict.versions[1])
+    );
   }
 
   verifyHashChain(conflictId: string): void {
@@ -89,16 +121,24 @@ export class ConflictResolverComponent implements OnInit {
   }
 
   selectResolutionMode(mode: 'use-local' | 'use-remote' | 'field-merge'): void {
+    if (mode === 'field-merge' && !this.canFieldMerge()) {
+      // Defensive: button should already be disabled in the template, but
+      // double-check so we never enter a broken state.
+      return;
+    }
     this.resolutionMode = mode;
 
     if (mode === 'use-local' && this.conflict) {
       this.selectedVersion = this.conflict.versions[0];
+      // null is intentional here for the delete-side of an update-delete
+      // conflict — submitResolution sends it through and the API turns
+      // null mergedDocument into a deleteOne.
       this.mergedDocument = this.selectedVersion.data;
     } else if (mode === 'use-remote' && this.conflict) {
       this.selectedVersion = this.conflict.versions[1];
       this.mergedDocument = this.selectedVersion.data;
     } else if (mode === 'field-merge' && this.conflict) {
-      // Start with local version as base
+      // Both versions guaranteed to have data here (canFieldMerge gated).
       this.mergedDocument = JSON.parse(
         JSON.stringify(this.conflict.versions[0].data),
       );
@@ -153,7 +193,12 @@ export class ConflictResolverComponent implements OnInit {
   }
 
   getDiffForField(field: string): string {
-    if (!this.conflict || this.conflict.versions.length < 2) {
+    if (
+      !this.conflict ||
+      this.conflict.versions.length < 2 ||
+      !this.versionHasData(this.conflict.versions[0]) ||
+      !this.versionHasData(this.conflict.versions[1])
+    ) {
       return '';
     }
 
@@ -165,5 +210,14 @@ export class ConflictResolverComponent implements OnInit {
     );
 
     return this.diffService.generateTextDiff(local, remote);
+  }
+
+  getConflictTypeLabel(type: string | undefined): string {
+    const labels: Record<string, string> = {
+      'concurrent-update': 'Concurrent updates',
+      'update-delete': 'Update vs delete',
+      'concurrent-insert': 'Concurrent inserts',
+    };
+    return labels[type || ''] || type || 'Unknown';
   }
 }

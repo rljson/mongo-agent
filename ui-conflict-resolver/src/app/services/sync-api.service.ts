@@ -119,4 +119,61 @@ export class SyncApiService {
       {},
     );
   }
+
+  stopHub(): Observable<{ stopped: boolean }> {
+    return this.http.post<{ stopped: boolean }>(
+      `${this.apiBaseUrl}/services/stop-hub`,
+      {},
+    );
+  }
+  stopAgentL1(): Observable<{ stopped: boolean }> {
+    return this.http.post<{ stopped: boolean }>(
+      `${this.apiBaseUrl}/services/stop-agent-l1`,
+      {},
+    );
+  }
+  stopAgentL2(): Observable<{ stopped: boolean }> {
+    return this.http.post<{ stopped: boolean }>(
+      `${this.apiBaseUrl}/services/stop-agent-l2`,
+      {},
+    );
+  }
+
+  // Repair operations — wrap the CLI scripts (restore-from-chain,
+  // restore-from-peer, backfill-hashes). Each returns the script's exit
+  // code + captured stdout/stderr so the UI can show the summary.
+  restoreFromChain(
+    dryRun = false,
+  ): Observable<{ exitCode: number | null; stdout: string; stderr: string }> {
+    return this.http.post<{
+      exitCode: number | null;
+      stdout: string;
+      stderr: string;
+    }>(`${this.apiBaseUrl}/repair/restore-from-chain`, { dryRun });
+  }
+  restoreFromPeer(
+    coll?: string,
+  ): Observable<{ exitCode: number | null; stdout: string; stderr: string }> {
+    return this.http.post<{
+      exitCode: number | null;
+      stdout: string;
+      stderr: string;
+    }>(`${this.apiBaseUrl}/repair/restore-from-peer`, { coll });
+  }
+  backfillHashes(
+    coll?: string,
+  ): Observable<{ exitCode: number | null; stdout: string; stderr: string }> {
+    return this.http.post<{
+      exitCode: number | null;
+      stdout: string;
+      stderr: string;
+    }>(`${this.apiBaseUrl}/repair/backfill-hashes`, { coll });
+  }
+
+  // Hash status — last state_checkpoints entry.
+  getHashStatus(): Observable<{ checkpoint: unknown }> {
+    return this.http.get<{ checkpoint: unknown }>(
+      `${this.apiBaseUrl}/hash-status`,
+    );
+  }
 }

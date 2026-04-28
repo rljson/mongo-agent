@@ -361,22 +361,207 @@
       color: #6c757d;
     }
   }
-  .btn-start {
+  .btn-start,
+  .btn-stop {
     padding: 0.35rem 0.85rem;
-    border: 1px solid #007bff;
-    background: #007bff;
-    color: white;
     border-radius: 4px;
     cursor: pointer;
     font-size: 0.85rem;
-    &:hover:not(:disabled) {
-      background: #0056b3;
-      border-color: #0056b3;
-    }
+    border: 1px solid transparent;
+    color: white;
     &:disabled {
       background: #ccc;
       border-color: #ccc;
       cursor: not-allowed;
     }
+  }
+  .btn-start {
+    border-color: #007bff;
+    background: #007bff;
+    &:hover:not(:disabled) {
+      background: #0056b3;
+      border-color: #0056b3;
+    }
+  }
+  .btn-stop {
+    border-color: #d9534f;
+    background: #d9534f;
+    margin-left: 0.4rem;
+    &:hover:not(:disabled) {
+      background: #b83a37;
+      border-color: #b83a37;
+    }
+  }
+  .service-row {
+    grid-template-columns: 1fr auto auto auto;
+  }
+}
+
+// Repair card
+.repair-control {
+  margin-bottom: 1.25rem;
+
+  .repair-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 1rem;
+    align-items: center;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid #eee;
+  }
+  .repair-row:last-of-type {
+    border-bottom: none;
+  }
+  .repair-name {
+    strong {
+      display: block;
+      font-size: 0.95rem;
+    }
+    .text-muted {
+      font-size: 0.8rem;
+      color: #666;
+      margin-top: 0.2rem;
+      max-width: 36rem;
+    }
+  }
+  .repair-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .repair-input {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    width: 12rem;
+  }
+  .btn {
+    padding: 0.4rem 1rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    border: 1px solid transparent;
+    color: white;
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+  .btn-primary {
+    background: #007bff;
+    border-color: #007bff;
+    &:hover:not(:disabled) {
+      background: #0056b3;
+    }
+  }
+  .btn-secondary {
+    background: #6c757d;
+    border-color: #6c757d;
+    &:hover:not(:disabled) {
+      background: #5a6268;
+    }
+  }
+  .repair-output {
+    margin-top: 1rem;
+    border-top: 1px solid #eee;
+    padding-top: 1rem;
+    .repair-output-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-weight: 500;
+      margin-bottom: 0.4rem;
+    }
+    .exit-pill {
+      padding: 0.1rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      background: #f8d7da;
+      color: #721c24;
+      font-family: monospace;
+      &.zero {
+        background: #d4edda;
+        color: #155724;
+      }
+    }
+    pre {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 0.75rem;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      max-height: 24rem;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  }
+}
+
+// Hash status card
+.hash-status {
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .btn-sm {
+    padding: 0.25rem 0.6rem;
+    font-size: 0.75rem;
+    border: 1px solid #6c757d;
+    background: white;
+    color: #6c757d;
+    border-radius: 4px;
+    cursor: pointer;
+    &:hover {
+      background: #6c757d;
+      color: white;
+    }
+  }
+  .hash-summary {
+    display: grid;
+    grid-template-columns: repeat(3, auto);
+    gap: 1.5rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid #eee;
+    margin-bottom: 0.75rem;
+    .label {
+      color: #666;
+      margin-right: 0.3rem;
+      font-size: 0.85rem;
+    }
+    code {
+      background: #f4f4f4;
+      padding: 0.1rem 0.4rem;
+      border-radius: 3px;
+      font-size: 0.85rem;
+    }
+  }
+  .hash-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    th,
+    td {
+      text-align: left;
+      padding: 0.4rem 0.6rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    th {
+      color: #666;
+      font-weight: 500;
+      background: #fafafa;
+    }
+    code {
+      font-size: 0.8rem;
+      background: #f4f4f4;
+      padding: 0.05rem 0.35rem;
+      border-radius: 3px;
+    }
+  }
+  .text-muted {
+    color: #666;
+    font-style: italic;
   }
 }

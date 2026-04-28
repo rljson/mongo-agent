@@ -441,6 +441,63 @@ export async function applyOneOp(
     }
   } else if (op.operationType === 'delete') {
     const docId = op.docId;
+    // Resolution propagation for delete ops: when one side picks the
+    // "use delete-side" of an update-delete conflict, the API issues a
+    // deleteOne locally; the change-stream catches it and the resulting
+    // delete sync_op arrives here. Treat any delete that lands on a doc
+    // with a pending sync_conflicts entry as a resolution — apply
+    // unconditionally and flip the conflict to resolved. Without this,
+    // the update-delete detection branch below would re-flag it as a
+    // brand-new conflict.
+    const pendingConflict = await db
+      .collection('sync_conflicts')
+      .findOne({
+        documentId: String(docId),
+        collection: op.ns.coll,
+        status: 'pending',
+      });
+    if (pendingConflict) {
+      if (suppressor) {
+        suppressor.add(op.ns, docId);
+      }
+      await coll.deleteOne({ _id: docId } as Record<string, unknown>);
+      await db.collection('sync_conflicts').updateOne(
+        { _id: (pendingConflict as { _id: unknown })._id } as Record<
+          string,
+          unknown
+        >,
+        { $set: { status: 'resolved' } },
+      );
+      fastify.log.info?.(
+        {
+          docId,
+          opId: op._id,
+          conflictId: (pendingConflict as { conflictId?: string })
+            .conflictId,
+        },
+        'remote resolution applied (delete); sync_conflicts marked resolved',
+      );
+      try {
+        await syncOps.insertOne(op as unknown as OptionalId<Document>);
+      } catch (err) {
+        if ((err as { code?: number } | null)?.code !== 11000) throw err;
+      }
+      await syncState.updateOne(
+        { origin: op.origin },
+        {
+          $set: {
+            origin: op.origin,
+            lastSeqSeen: op.seq,
+            lastHashSeen: op.chainHash,
+            applied: { lastSeq: op.seq, lastHash: op.chainHash },
+            updatedAt: new Date().toISOString(),
+            updatedBy: localNodeId,
+          },
+        },
+        { upsert: true },
+      );
+      return { applied: true, reason: 'resolution-applied' };
+    }
     // Update-delete conflict detection (Case A): peer wants to delete a
     // doc that we still have AND that our most recent local-origin op
     // updated rather than deleted. Both nodes diverged on this doc;

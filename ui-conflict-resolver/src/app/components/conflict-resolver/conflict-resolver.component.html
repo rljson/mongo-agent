@@ -37,7 +37,7 @@
     </div>
     <div class="metadata-item">
       <span class="label">Type:</span>
-      <span>{{ conflict.conflictType }}</span>
+      <span>{{ getConflictTypeLabel(conflict.conflictType) }}</span>
     </div>
     <div class="metadata-item">
       <span class="label">Detected:</span>
@@ -77,10 +77,19 @@
 
       <div
         class="mode-card"
-        (click)="selectResolutionMode('field-merge')">
+        [class.disabled]="!canFieldMerge()"
+        (click)="canFieldMerge() && selectResolutionMode('field-merge')">
         <div class="mode-icon">🔀</div>
         <h3>Field-by-Field Merge</h3>
-        <p>Choose specific fields from each version</p>
+        <p
+          *ngIf="canFieldMerge(); else noFieldMerge">
+          Choose specific fields from each version
+        </p>
+        <ng-template #noFieldMerge>
+          <p class="text-muted">
+            Not available — one side is a delete.
+          </p>
+        </ng-template>
         <div class="mode-details">
           <span>{{ fieldConflicts.length }} conflicting fields</span>
         </div>
@@ -104,7 +113,8 @@
     <div class="versions-grid">
       <div
         class="version-panel"
-        [class.selected]="resolutionMode === 'use-local'">
+        [class.selected]="resolutionMode === 'use-local'"
+        [class.deleted-version]="isDeleteVersion(conflict.versions[0])">
         <div class="version-header">
           <h3>📍 Local Version</h3>
           <span class="node-id">{{ conflict.versions[0].nodeId }}</span>
@@ -113,14 +123,26 @@
           <span>{{ conflict.versions[0].operationType }}</span>
           <span>{{ getTimeAgo(conflict.versions[0].timestamp) }}</span>
         </div>
-        <pre class="json-viewer">{{
-          formatJson(conflict.versions[0].data)
-        }}</pre>
+        <div
+          *ngIf="isDeleteVersion(conflict.versions[0]); else localData"
+          class="deleted-placeholder">
+          🗑️ <strong>Document deleted on this node</strong>
+          <p class="text-muted">
+            Selecting this version will <em>delete</em> the document
+            everywhere.
+          </p>
+        </div>
+        <ng-template #localData>
+          <pre class="json-viewer">{{
+            formatJson(conflict.versions[0].data)
+          }}</pre>
+        </ng-template>
       </div>
 
       <div
         class="version-panel"
-        [class.selected]="resolutionMode === 'use-remote'">
+        [class.selected]="resolutionMode === 'use-remote'"
+        [class.deleted-version]="isDeleteVersion(conflict.versions[1])">
         <div class="version-header">
           <h3>🌐 Remote Version</h3>
           <span class="node-id">{{ conflict.versions[1].nodeId }}</span>
@@ -129,9 +151,20 @@
           <span>{{ conflict.versions[1].operationType }}</span>
           <span>{{ getTimeAgo(conflict.versions[1].timestamp) }}</span>
         </div>
-        <pre class="json-viewer">{{
-          formatJson(conflict.versions[1].data)
-        }}</pre>
+        <div
+          *ngIf="isDeleteVersion(conflict.versions[1]); else remoteData"
+          class="deleted-placeholder">
+          🗑️ <strong>Document deleted on this node</strong>
+          <p class="text-muted">
+            Selecting this version will <em>delete</em> the document
+            everywhere.
+          </p>
+        </div>
+        <ng-template #remoteData>
+          <pre class="json-viewer">{{
+            formatJson(conflict.versions[1].data)
+          }}</pre>
+        </ng-template>
       </div>
     </div>
   </section>

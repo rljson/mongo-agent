@@ -14,19 +14,19 @@
           [class.up]="services.hub === true"
           [class.down]="services.hub === false"
           [class.unknown]="services.hub === null">
-          {{
-            services.hub === null
-              ? '…'
-              : services.hub
-                ? 'UP'
-                : 'DOWN'
-          }}
+          {{ services.hub === null ? '…' : services.hub ? 'UP' : 'DOWN' }}
         </span>
         <button
           class="btn btn-start"
           (click)="startHub()"
           [disabled]="starting.hub || services.hub === true">
           {{ starting.hub ? 'Starting…' : 'Start' }}
+        </button>
+        <button
+          class="btn btn-stop"
+          (click)="stopHub()"
+          [disabled]="stopping.hub || services.hub !== true">
+          {{ stopping.hub ? 'Stopping…' : 'Stop' }}
         </button>
       </div>
       <div class="service-row">
@@ -36,13 +36,7 @@
           [class.up]="services.l1 === true"
           [class.down]="services.l1 === false"
           [class.unknown]="services.l1 === null">
-          {{
-            services.l1 === null
-              ? '…'
-              : services.l1
-                ? 'UP'
-                : 'DOWN'
-          }}
+          {{ services.l1 === null ? '…' : services.l1 ? 'UP' : 'DOWN' }}
         </span>
         <button
           class="btn btn-start"
@@ -50,21 +44,23 @@
           [disabled]="starting.l1 || services.l1 === true">
           {{ starting.l1 ? 'Starting…' : 'Start' }}
         </button>
+        <button
+          class="btn btn-stop"
+          (click)="stopAgentL1()"
+          [disabled]="stopping.l1 || services.l1 !== true">
+          {{ stopping.l1 ? 'Stopping…' : 'Stop' }}
+        </button>
       </div>
       <div class="service-row">
-        <span class="service-name">Agent L2 <code>:3002 (remote)</code></span>
+        <span class="service-name"
+          >Agent L2 <code>:3002 (remote)</code></span
+        >
         <span
           class="status-pill"
           [class.up]="services.l2 === true"
           [class.down]="services.l2 === false"
           [class.unknown]="services.l2 === null">
-          {{
-            services.l2 === null
-              ? '…'
-              : services.l2
-                ? 'UP'
-                : 'DOWN'
-          }}
+          {{ services.l2 === null ? '…' : services.l2 ? 'UP' : 'DOWN' }}
         </span>
         <button
           class="btn btn-start"
@@ -72,7 +68,153 @@
           [disabled]="starting.l2 || services.l2 === true">
           {{ starting.l2 ? 'Starting…' : 'Start' }}
         </button>
+        <button
+          class="btn btn-stop"
+          (click)="stopAgentL2()"
+          [disabled]="stopping.l2 || services.l2 !== true">
+          {{ stopping.l2 ? 'Stopping…' : 'Stop' }}
+        </button>
       </div>
+    </div>
+  </div>
+
+  <!-- Repair operations -->
+  <div class="card repair-control">
+    <div class="card-header">
+      <h3>Repair</h3>
+    </div>
+    <div class="card-body">
+      <div class="repair-row">
+        <div class="repair-name">
+          <strong>Self-heal from chain</strong>
+          <p class="text-muted">
+            Walk local sync_ops; restore missing or drifted docs from the
+            chain payload.
+          </p>
+        </div>
+        <div class="repair-actions">
+          <button
+            class="btn btn-secondary"
+            (click)="runRestoreFromChain(true)"
+            [disabled]="repair.running !== null">
+            DRY_RUN
+          </button>
+          <button
+            class="btn btn-primary"
+            (click)="runRestoreFromChain(false)"
+            [disabled]="repair.running !== null">
+            Apply
+          </button>
+        </div>
+      </div>
+      <div class="repair-row">
+        <div class="repair-name">
+          <strong>Restore from peer (laptop2)</strong>
+          <p class="text-muted">
+            Diff local _ids against peer; copy missing docs back. Repairs
+            pre-chain (mongorestore'd) data.
+          </p>
+        </div>
+        <div class="repair-actions">
+          <input
+            type="text"
+            placeholder="collection (blank=all)"
+            [(ngModel)]="repair.peerColl"
+            class="repair-input" />
+          <button
+            class="btn btn-primary"
+            (click)="runRestoreFromPeer()"
+            [disabled]="repair.running !== null">
+            Run
+          </button>
+        </div>
+      </div>
+      <div class="repair-row">
+        <div class="repair-name">
+          <strong>Backfill __h hashes</strong>
+          <p class="text-muted">
+            Populate per-doc integrity hash so future state-hash recomputes
+            use the {{'{'}}_id, __h{{'}'}} projection fast path.
+          </p>
+        </div>
+        <div class="repair-actions">
+          <input
+            type="text"
+            placeholder="collection (blank=all)"
+            [(ngModel)]="repair.backfillColl"
+            class="repair-input" />
+          <button
+            class="btn btn-primary"
+            (click)="runBackfillHashes()"
+            [disabled]="repair.running !== null">
+            Run
+          </button>
+        </div>
+      </div>
+      <div *ngIf="repair.output" class="repair-output">
+        <div class="repair-output-header">
+          <span>Output</span>
+          <span
+            *ngIf="repair.exitCode !== null"
+            class="exit-pill"
+            [class.zero]="repair.exitCode === 0">
+            exit {{ repair.exitCode }}
+          </span>
+        </div>
+        <pre>{{ repair.output }}</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hash status -->
+  <div class="card hash-status">
+    <div class="card-header">
+      <h3>Hash Status</h3>
+      <button class="btn btn-secondary btn-sm" (click)="loadHashStatus()">
+        Refresh
+      </button>
+    </div>
+    <div class="card-body">
+      <div *ngIf="hashStatus.dbRoot; else noHash">
+        <div class="hash-summary">
+          <div>
+            <span class="label">dbRoot:</span>
+            <code>{{ shortHash(hashStatus.dbRoot) }}</code>
+          </div>
+          <div>
+            <span class="label">Mode:</span>
+            <code>{{ hashStatus.mode }}</code>
+          </div>
+          <div>
+            <span class="label">Computed:</span>
+            <span>{{
+              hashStatus.ts ? (hashStatus.ts | date: 'short') : '—'
+            }}</span>
+          </div>
+        </div>
+        <table class="hash-table" *ngIf="hashStatus.perColl.length">
+          <thead>
+            <tr>
+              <th>Collection</th>
+              <th>Partitions</th>
+              <th>Root</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let c of hashStatus.perColl">
+              <td>{{ c.name }}</td>
+              <td>{{ c.partitions }}</td>
+              <td><code>{{ shortHash(c.root) }}</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ng-template #noHash>
+        <p class="text-muted">
+          No checkpoint yet — run <code>state-hash</code> on this node to
+          populate.
+        </p>
+      </ng-template>
     </div>
   </div>
 

@@ -322,19 +322,33 @@ app.post('/api/conflicts/resolve', async (req, res) => {
     });
 
     if (dbConflict) {
-      // Apply the resolved document back to the collection
+      // Apply the resolved document back to the collection. The resolution
+      // semantics:
+      //   - mergedDocument is an object  → upsert that doc
+      //   - mergedDocument is null AND user picked the delete-side of an
+      //     update-delete conflict → delete the doc here so the choice
+      //     propagates (change-stream → sync_op → other laptop's
+      //     applyOneOp resolution branch picks it up by `pendingConflict`).
       const resolvedDoc =
-        resolution.mergedDocument || resolution.selectedVersion?.data;
+        resolution.mergedDocument !== undefined
+          ? resolution.mergedDocument
+          : resolution.selectedVersion?.data;
+      const pickedDeleteSide =
+        resolvedDoc === null || resolvedDoc === undefined;
 
-      if (resolvedDoc) {
-        const collectionName = dbConflict.collection || 'articles';
-        const collection = db.collection(collectionName);
+      const collectionName = dbConflict.collection || 'articles';
+      const collection = db.collection(collectionName);
+      const matchId = resolveDocId(dbConflict.documentId);
 
-        // Update the document in the collection with the resolved version.
-        // Coerce the documentId back to ObjectId where applicable; without
-        // this, the upsert below would silently insert a phantom doc keyed
-        // by string instead of updating the real ObjectId-keyed one.
-        const matchId = resolveDocId(dbConflict.documentId);
+      if (pickedDeleteSide) {
+        const r = await collection.deleteOne({ _id: matchId } as Record<
+          string,
+          unknown
+        >);
+        console.log(
+          `🗑️  Resolved by delete: ${collectionName}._id=${dbConflict.documentId} (matched=${r.deletedCount})`,
+        );
+      } else if (resolvedDoc) {
         await collection.updateOne(
           { _id: matchId } as Record<string, unknown>,
           { $set: { ...resolvedDoc, _id: matchId } },
@@ -344,8 +358,6 @@ app.post('/api/conflicts/resolve', async (req, res) => {
         console.log(
           `✅ Applied resolved document to ${collectionName} collection`,
         );
-      } else {
-        console.warn(`⚠️  No resolved document provided in resolution`);
       }
 
       // Update conflict status. Only the status flips here — any audit
@@ -624,6 +636,244 @@ app.post('/api/services/start-agent-l2', async (_req, res) => {
     res.json({ pid: child.pid, status: up ? 'up' : 'starting' });
   } catch (error) {
     console.error('start-agent-l2 error:', error);
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ---- Stop endpoints ------------------------------------------------------
+
+/**
+ * Kills whatever process is listening on the given local TCP port.
+ * Idempotent: returns `running: false` if nothing was listening.
+ */
+function stopLocalByPort(portNum: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const cmd =
+      `$p = Get-NetTCPConnection -LocalPort ${portNum} -State Listen ` +
+      `-ErrorAction SilentlyContinue; ` +
+      `if ($p) { Stop-Process -Id $p.OwningProcess -Force ` +
+      `-ErrorAction SilentlyContinue; exit 0 } else { exit 1 }`;
+    const ps = spawn('powershell.exe', ['-NoProfile', '-Command', cmd], {
+      windowsHide: true,
+    });
+    ps.on('close', (code) => resolve(code === 0));
+    ps.on('error', () => resolve(false));
+  });
+}
+
+/**
+ * Stops the L2 agent over WinRM.
+ */
+function stopRemoteAgentL2(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const cmd =
+      `Invoke-Command -ComputerName 192.168.178.64 -ScriptBlock { ` +
+      `$p = Get-NetTCPConnection -LocalPort 3002 -State Listen ` +
+      `-ErrorAction SilentlyContinue; ` +
+      `if ($p) { Stop-Process -Id $p.OwningProcess -Force ` +
+      `-ErrorAction SilentlyContinue; 'stopped' } else { 'idle' } }`;
+    const ps = spawn('powershell.exe', ['-NoProfile', '-Command', cmd], {
+      windowsHide: true,
+    });
+    ps.on('close', () => resolve(true));
+    ps.on('error', () => resolve(false));
+  });
+}
+
+app.post('/api/services/stop-hub', async (_req, res) => {
+  try {
+    const stopped = await stopLocalByPort(HUB_PORT);
+    res.json({ stopped });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post('/api/services/stop-agent-l1', async (_req, res) => {
+  try {
+    const stopped = await stopLocalByPort(L1_AGENT_PORT);
+    res.json({ stopped });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post('/api/services/stop-agent-l2', async (_req, res) => {
+  try {
+    const stopped = await stopRemoteAgentL2();
+    res.json({ stopped });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ==================== REPAIR ====================
+// Runs the existing CLI scripts (restore-from-chain, restore-from-peer,
+// backfill-hashes) as child processes and streams the resulting summary
+// back to the dashboard. Each script is coverage-excluded by design.
+
+interface RepairResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runScript(
+  scriptRel: string,
+  envOverrides: Record<string, string>,
+  timeoutMs = 60_000,
+): Promise<RepairResult> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'node',
+      ['--import', 'tsx/esm', scriptRel],
+      {
+        cwd: REPO_ROOT,
+        env: { ...process.env, ...envOverrides },
+        windowsHide: true,
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const t = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.stdout?.on('data', (b) => {
+      stdout += b.toString('utf-8');
+      // Keep memory bounded for very long outputs.
+      if (stdout.length > 200_000) stdout = stdout.slice(-200_000);
+    });
+    child.stderr?.on('data', (b) => {
+      stderr += b.toString('utf-8');
+      if (stderr.length > 200_000) stderr = stderr.slice(-200_000);
+    });
+    child.on('close', (code) => {
+      clearTimeout(t);
+      resolve({
+        exitCode: timedOut ? -1 : code,
+        stdout,
+        stderr,
+      });
+    });
+    child.on('error', (err) => {
+      clearTimeout(t);
+      resolve({ exitCode: -1, stdout, stderr: String(err) });
+    });
+  });
+}
+
+const CARATDB_URI =
+  process.env.MONGO_URI ||
+  'mongodb://localhost:27017/?replicaSet=rs0&directConnection=true';
+const CARATDB_DB = process.env.DB_NAME || 'CARATDB';
+
+/**
+ * POST /api/repair/restore-from-chain
+ * body: { dryRun?: boolean }
+ * Walks the local sync_ops chain and re-applies any op whose effect
+ * isn't reflected in the local collection state.
+ */
+app.post<{ Body?: { dryRun?: boolean } }>(
+  '/api/repair/restore-from-chain',
+  async (req, res) => {
+    try {
+      const dry = req.body?.dryRun === true;
+      const env: Record<string, string> = {
+        MONGO_URI: CARATDB_URI,
+        DB_NAME: CARATDB_DB,
+      };
+      if (dry) env.DRY_RUN = '1';
+      const r = await runScript(
+        'src/scripts/restore-from-chain.ts',
+        env,
+        120_000,
+      );
+      res.json(r);
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  },
+);
+
+/**
+ * POST /api/repair/restore-from-peer
+ * body: { coll?: string }
+ * Diffs local _ids vs peer's via the agent's /diff endpoints; copies
+ * back any docs the local node is missing.
+ */
+app.post<{ Body?: { coll?: string } }>(
+  '/api/repair/restore-from-peer',
+  async (req, res) => {
+    try {
+      const coll = req.body?.coll;
+      const env: Record<string, string> = {
+        MONGO_URI: CARATDB_URI,
+        DB_NAME: CARATDB_DB,
+        HUB_URL: `http://${HUB_HOST}:${HUB_PORT}`,
+        PEER_NODE_ID: 'laptop2',
+      };
+      if (coll) env.COLL = coll;
+      const r = await runScript(
+        'src/scripts/restore-from-peer.ts',
+        env,
+        300_000,
+      );
+      res.json(r);
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  },
+);
+
+/**
+ * POST /api/repair/backfill-hashes
+ * body: { coll?: string }
+ * Populates `__h` on docs that don't have one yet so future state-hash
+ * recomputes can use the {_id, __h} projection fast path.
+ */
+app.post<{ Body?: { coll?: string } }>(
+  '/api/repair/backfill-hashes',
+  async (req, res) => {
+    try {
+      const coll = req.body?.coll;
+      const env: Record<string, string> = {
+        MONGO_URI: CARATDB_URI,
+        DB_NAME: CARATDB_DB,
+      };
+      if (coll) env.COLL = coll;
+      const r = await runScript(
+        'src/scripts/backfill-hashes.ts',
+        env,
+        600_000,
+      );
+      res.json(r);
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  },
+);
+
+// ==================== HASH STATUS (Tier 3) ====================
+
+/**
+ * GET /api/hash-status
+ * Returns the most recent state_checkpoints entry from the local DB,
+ * giving the dashboard the current dbRoot + per-collection roots without
+ * forcing a fresh recompute. Use POST /api/hash-status/recompute to
+ * actually run computeStateCheckpoint.
+ */
+app.get('/api/hash-status', async (_req, res) => {
+  try {
+    const cp = await db
+      .collection('state_checkpoints')
+      .find({})
+      .sort({ ts: -1 })
+      .limit(1)
+      .next();
+    res.json({ checkpoint: cp });
+  } catch (error) {
     res.status(500).json({ error: String(error) });
   }
 });
