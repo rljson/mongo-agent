@@ -9,6 +9,7 @@ import { EJSON } from 'bson';
 
 import type { Db, Document, MongoClient, OptionalId } from 'mongodb';
 import type { Logger, Namespace, Suppressor } from '../watch-changes.ts';
+import { docLeafHash, type DocWithHash } from '../hashing/state-hash.ts';
 
 /**
  * Sync operation payload containing document data.
@@ -250,6 +251,11 @@ export async function applyOneOp(
 
   const coll = db.collection(op.ns.coll);
 
+  // Set to true if we detect a concurrent-update conflict and decide NOT to
+  // overwrite the local doc. We still want to advance sync_ops / sync_state
+  // below so the chain stays intact and the UI can resolve.
+  let conflictDetected = false;
+
   // Apply operations with native BSON types. The producer stores ops with
   // native types in `sync_ops`, the wire encoder uses `EJSON.serialize`, and
   // `fetchOpsFromHub` runs `EJSON.deserialize` on each op before we get here
@@ -266,14 +272,72 @@ export async function applyOneOp(
     }
     const fullDoc = fd as Record<string, unknown>;
     const docId = fullDoc._id;
-    // Add to suppressor BEFORE the write so the change-stream callback,
-    // which can fire concurrently with await replaceOne, always sees it.
-    if (suppressor) {
-      suppressor.add(op.ns, docId);
+
+    // Concurrent-update conflict detection. When (1) the doc already exists
+    // locally, (2) its content differs from the peer's payload, and (3) our
+    // most recent LOCAL-origin sync_op on this doc still matches the local
+    // content — both nodes diverged on this doc (the classic "edited offline
+    // on both laptops, then reconnected" case). Record in sync_conflicts and
+    // preserve the local edit; the UI resolves which version wins.
+    const local = await coll.findOne(
+      { _id: docId } as Record<string, unknown>,
+    );
+    if (local) {
+      const remoteHash = docLeafHash(fd as DocWithHash);
+      const localHash = docLeafHash(local as DocWithHash);
+      if (remoteHash !== null && localHash !== null && remoteHash !== localHash) {
+        const lastLocalEdit = await syncOps.findOne(
+          {
+            'ns.coll': op.ns.coll,
+            docId,
+            origin: localNodeId,
+          } as Record<string, unknown>,
+          { sort: { seq: -1 } },
+        );
+        const lastEditFd = (
+          lastLocalEdit as { payload?: SyncOpPayload } | null
+        )?.payload?.fullDocument;
+        const lastEditHash = lastEditFd
+          ? docLeafHash(lastEditFd as DocWithHash)
+          : null;
+        if (lastEditHash !== null && lastEditHash === localHash) {
+          await recordConflict({
+            db,
+            ns: op.ns,
+            docId,
+            local,
+            localHash,
+            lastLocalEdit: lastLocalEdit as unknown as SyncOp,
+            remoteOp: op,
+            remoteHash,
+            localNodeId,
+          });
+          fastify.log.warn?.(
+            {
+              docId,
+              opId: op._id,
+              peerOrigin: op.origin,
+              localOpId: (lastLocalEdit as unknown as { _id: string })._id,
+            },
+            'concurrent-update conflict detected; recorded in sync_conflicts; preserving local',
+          );
+          conflictDetected = true;
+        }
+      }
     }
-    await coll.replaceOne({ _id: docId } as Record<string, unknown>, fullDoc, {
-      upsert: true,
-    });
+
+    if (!conflictDetected) {
+      // Add to suppressor BEFORE the write so the change-stream callback,
+      // which can fire concurrently with await replaceOne, always sees it.
+      if (suppressor) {
+        suppressor.add(op.ns, docId);
+      }
+      await coll.replaceOne(
+        { _id: docId } as Record<string, unknown>,
+        fullDoc,
+        { upsert: true },
+      );
+    }
   } else if (op.operationType === 'delete') {
     const docId = op.docId;
     if (suppressor) {
@@ -324,7 +388,81 @@ export async function applyOneOp(
     { upsert: true },
   );
 
-  return { applied: true };
+  return conflictDetected
+    ? { applied: false, reason: 'conflict-recorded' }
+    : { applied: true };
+}
+
+/**
+ * Records a concurrent-update conflict in `sync_conflicts`. Idempotent on
+ * `conflictId` — re-running the same op detection on a re-pull won't
+ * duplicate. Shape matches what the UI / `conflict-api-simple.ts` expects.
+ */
+async function recordConflict(opts: {
+  db: Db;
+  ns: Namespace;
+  docId: unknown;
+  local: Record<string, unknown>;
+  localHash: string | null;
+  lastLocalEdit: SyncOp;
+  remoteOp: SyncOp;
+  remoteHash: string | null;
+  localNodeId: string;
+}): Promise<void> {
+  const {
+    db,
+    ns,
+    docId,
+    local,
+    localHash,
+    lastLocalEdit,
+    remoteOp,
+    remoteHash,
+    localNodeId,
+  } = opts;
+  const conflictId = `conflict-${ns.coll}-${String(docId)}-${lastLocalEdit._id}-${remoteOp._id}`;
+  const tsToMs = (ts: unknown): number => {
+    if (typeof ts === 'string') return new Date(ts).getTime();
+    if (typeof ts === 'number') return ts;
+    return Date.now();
+  };
+  await db.collection('sync_conflicts').updateOne(
+    { conflictId },
+    {
+      $setOnInsert: {
+        conflictId,
+        documentId: String(docId),
+        collection: ns.coll,
+        database: ns.db,
+        detectedAt: Date.now(),
+        status: 'pending',
+        conflictType: 'concurrent-update',
+        versions: [
+          {
+            documentId: String(docId),
+            data: local,
+            timestamp: tsToMs(lastLocalEdit.ts),
+            nodeId: localNodeId,
+            operationId: lastLocalEdit._id,
+            operationType: lastLocalEdit.operationType,
+            stateHash: localHash,
+            componentsHash: lastLocalEdit.chainHash,
+          },
+          {
+            documentId: String(docId),
+            data: remoteOp.payload?.fullDocument,
+            timestamp: tsToMs(remoteOp.ts),
+            nodeId: remoteOp.origin,
+            operationId: remoteOp._id,
+            operationType: remoteOp.operationType,
+            stateHash: remoteHash,
+            componentsHash: remoteOp.chainHash,
+          },
+        ],
+      },
+    },
+    { upsert: true },
+  );
 }
 
 /**
