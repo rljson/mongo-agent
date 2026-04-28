@@ -129,19 +129,25 @@ async function main(): Promise<void> {
       arr.push(id);
     }
 
-    let prevChain = 'GENESIS';
+    // Each `origin` has its own independent hash chain
+    // (laptop1_1 → laptop1_2 → ..., laptop2_1 → laptop2_2 → ...). Tracking
+    // a single global prevHash while walking sync_ops sorted by `seq`
+    // produces false-positive "chain break" warnings whenever the cursor
+    // hops between origins. Track per-origin instead.
+    const prevChainByOrigin = new Map<string, string>();
     const cursor = syncOps.find({}).sort({ seq: 1 });
     for await (const op of cursor) {
       // Phase 1: chain integrity link check (cheap — string compare).
       if (!skipChainVerify) {
-        if (op.prevHash !== prevChain) {
+        const expected = prevChainByOrigin.get(op.origin) ?? 'GENESIS';
+        if (op.prevHash !== expected) {
           console.error(
-            `  ⚠️ chain break at seq ${op.seq}: expected prevHash=${prevChain}, got ${op.prevHash}`,
+            `  ⚠️ chain break at ${op.origin}_${op.seq}: expected prevHash=${expected}, got ${op.prevHash}`,
           );
           stats.chainOk = false;
           stats.chainBreakAtSeq = stats.chainBreakAtSeq ?? op.seq;
         }
-        prevChain = op.chainHash || 'INVALID';
+        prevChainByOrigin.set(op.origin, op.chainHash || 'INVALID');
       }
 
       const coll = db.collection(op.ns.coll);

@@ -167,6 +167,61 @@ export function createAgentApp(options: AgentAppOptions): FastifyInstance {
   );
 
   // =========================================================================
+  // Diff / Peer-Restore Endpoints
+  // -----------------------------------------------------------------------
+  // Used by `restore-from-peer` to repair pre-chain (mongorestore'd) data
+  // that `restore-from-chain` can't recover — a damaged node compares its
+  // local _id set against a healthy peer's, then fetches missing docs.
+  // =========================================================================
+
+  /**
+   * POST /diff/:coll/ids
+   * Lists every _id in the named collection. Response is EJSON-serialized
+   * so BSON types (ObjectId, Long, etc.) survive the wire.
+   */
+  app.post<{ Params: { coll: string } }>(
+    '/diff/:coll/ids',
+    async (req, reply) => {
+      const collName = req.params.coll;
+      if (!collName || /^system\./i.test(collName)) {
+        return reply.code(400).send({ error: 'invalid collection' });
+      }
+      const db = mongo.db(dbName);
+      const ids = await db
+        .collection(collName)
+        .find({}, { projection: { _id: 1 }, sort: { _id: 1 } })
+        .map((d: { _id: unknown }) => d._id)
+        .toArray();
+      return { ids: ids.map((id) => EJSON.serialize(id as never)) };
+    },
+  );
+
+  /**
+   * POST /diff/:coll/doc
+   * Fetches a single doc by _id. Body: { id: <EJSON> }. Response: { doc: <EJSON> }
+   * or { doc: null } when not found.
+   */
+  app.post<{ Params: { coll: string }; Body: { id?: unknown } }>(
+    '/diff/:coll/doc',
+    async (req, reply) => {
+      const collName = req.params.coll;
+      if (!collName || /^system\./i.test(collName)) {
+        return reply.code(400).send({ error: 'invalid collection' });
+      }
+      const rawId = req.body?.id;
+      if (rawId === undefined) {
+        return reply.code(400).send({ error: 'body.id required' });
+      }
+      const id = EJSON.deserialize(rawId as never);
+      const db = mongo.db(dbName);
+      const doc = await db
+        .collection(collName)
+        .findOne({ _id: id } as Record<string, unknown>);
+      return { doc: doc ? EJSON.serialize(doc) : null };
+    },
+  );
+
+  // =========================================================================
   // RLJSON Sync Endpoints (Hash-based synchronization)
   // =========================================================================
 

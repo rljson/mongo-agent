@@ -49,7 +49,7 @@ describe('state-dirty', () => {
       }> = [];
 
       const mockPartitionMeta: PartitionMeta = {
-        partition: 3,
+        idx: 3,
         minId: 'doc000',
         maxId: 'doc100',
       };
@@ -238,6 +238,135 @@ describe('state-dirty', () => {
       await markDirtyById(mockDb, 'articles', 'doc1');
 
       // Should fall back to marking full collection dirty
+      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
+    });
+
+    // After-max insert: docId is past every cached partition's maxId. Mark
+    // the LAST partition dirty so computeStateCheckpoint rescans it
+    // open-ended and refreshes maxId — instead of FULL-rescanning the
+    // whole collection on every append.
+    it('marks last partition dirty when docId is past every cached maxId', async () => {
+      const updateOneCalls: Array<{ filter: unknown; update: unknown }> = [];
+
+      const mockDb = {
+        collection: vi.fn((name: string) => {
+          if (name === 'state_merkle') {
+            return {
+              findOne: vi
+                .fn()
+                .mockImplementation((filter: Record<string, unknown>) => {
+                  // findPartitionForId: filter has both minId and maxId.
+                  if ('minId' in filter && 'maxId' in filter) {
+                    return Promise.resolve(null);
+                  }
+                  // blocking probe: filter has only `maxId: {$gte}`.
+                  if ('maxId' in filter && !('minId' in filter)) {
+                    return Promise.resolve(null);
+                  }
+                  // last-partition lookup (filter is `{coll}` only).
+                  return Promise.resolve({ idx: 7 });
+                }),
+            } as unknown as Collection<PartitionMeta>;
+          }
+          if (name === 'state_dirty') {
+            return {
+              updateOne: vi.fn(async (filter, update) => {
+                updateOneCalls.push({ filter, update });
+                return { modifiedCount: 1 };
+              }),
+            } as unknown as Collection<DirtyPartitionDoc>;
+          }
+          return {} as Collection;
+        }),
+      } as unknown as Db;
+
+      await markDirtyById(mockDb, 'articles', 'docZZZ');
+
+      expect(updateOneCalls).toHaveLength(1);
+      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::p7' });
+      expect(updateOneCalls[0].update).toMatchObject({
+        $set: { coll: 'articles', partition: 7 },
+      });
+    });
+
+    // Real gap (some partition has maxId >= docId, but none covers it).
+    // Conservative fallback: mark FULL.
+    it('falls back to FULL when there is a real gap between partitions', async () => {
+      const updateOneCalls: Array<{ filter: unknown }> = [];
+
+      const mockDb = {
+        collection: vi.fn((name: string) => {
+          if (name === 'state_merkle') {
+            return {
+              findOne: vi
+                .fn()
+                .mockImplementation((filter: Record<string, unknown>) => {
+                  if ('minId' in filter && 'maxId' in filter) {
+                    return Promise.resolve(null);
+                  }
+                  // blocking probe: another partition exists with maxId>=docId.
+                  if ('maxId' in filter && !('minId' in filter)) {
+                    return Promise.resolve({ _id: 'blocker' });
+                  }
+                  return Promise.resolve(null);
+                }),
+            } as unknown as Collection<PartitionMeta>;
+          }
+          if (name === 'state_dirty') {
+            return {
+              updateOne: vi.fn(async (filter) => {
+                updateOneCalls.push({ filter });
+                return { modifiedCount: 1 };
+              }),
+            } as unknown as Collection<DirtyFullDoc>;
+          }
+          return {} as Collection;
+        }),
+      } as unknown as Db;
+
+      await markDirtyById(mockDb, 'articles', 'docMid');
+
+      expect(updateOneCalls).toHaveLength(1);
+      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
+    });
+
+    // After-max queries on state_merkle can fail mid-flight (rollover,
+    // permission, network). We catch and fall through to FULL rather than
+    // crashing the change-stream callback.
+    it('falls back to FULL when state_merkle queries throw in the after-max path', async () => {
+      const updateOneCalls: Array<{ filter: unknown }> = [];
+
+      const mockDb = {
+        collection: vi.fn((name: string) => {
+          if (name === 'state_merkle') {
+            return {
+              findOne: vi
+                .fn()
+                .mockImplementation((filter: Record<string, unknown>) => {
+                  // findPartitionForId returns null cleanly.
+                  if ('minId' in filter && 'maxId' in filter) {
+                    return Promise.resolve(null);
+                  }
+                  // Subsequent queries (blocking / lastPart) throw.
+                  return Promise.reject(new Error('flaky merkle'));
+                }),
+            } as unknown as Collection<PartitionMeta>;
+          }
+          if (name === 'state_dirty') {
+            return {
+              updateOne: vi.fn(async (filter) => {
+                updateOneCalls.push({ filter });
+                return { modifiedCount: 1 };
+              }),
+            } as unknown as Collection<DirtyFullDoc>;
+          }
+          return {} as Collection;
+        }),
+      } as unknown as Db;
+
+      await markDirtyById(mockDb, 'articles', 'docX');
+
+      expect(updateOneCalls).toHaveLength(1);
       expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
     });
   });

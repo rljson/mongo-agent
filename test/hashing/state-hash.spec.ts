@@ -169,6 +169,9 @@ describe('state-hash', () => {
           if (name === 'testcoll') {
             return {
               find: vi.fn().mockReturnValue(mockCursor),
+              // Sample-eligibility probe added by useHashProjection check.
+              // Returning null forces the unprojected cursor path.
+              findOne: vi.fn().mockResolvedValue(null),
             } as unknown as Collection<DocWithHash>;
           }
           if (name === 'state_merkle') {
@@ -234,6 +237,9 @@ describe('state-hash', () => {
           if (name === 'articles') {
             return {
               find: vi.fn().mockReturnValue(mockCursor),
+              // Sample-eligibility probe added by useHashProjection check.
+              // Returning null forces the unprojected cursor path.
+              findOne: vi.fn().mockResolvedValue(null),
             } as unknown as Collection<DocWithHash>;
           }
           if (name === 'state_merkle') {
@@ -290,6 +296,7 @@ describe('state-hash', () => {
                   // Empty
                 },
               }),
+              findOne: vi.fn().mockResolvedValue(null),
             } as unknown as Collection<DocWithHash>;
           }
           if (name === 'state_merkle') {
@@ -375,6 +382,9 @@ describe('state-hash', () => {
           if (name === 'nocol') {
             return {
               find: vi.fn().mockReturnValue(mockCursor),
+              // Sample-eligibility probe added by useHashProjection check.
+              // Returning null forces the unprojected cursor path.
+              findOne: vi.fn().mockResolvedValue(null),
             } as unknown as Collection<DocWithHash>;
           }
           if (name === 'state_merkle') {
