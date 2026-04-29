@@ -80,7 +80,7 @@ export class SyncComponent implements OnInit, OnDestroy {
     lastHash: 'abc12ef3456789def',
     lastSyncAt: new Date(Date.now() - 5000),
     collectionCount: 5,
-    databases: ['syncdb', 'rljson-sync'],
+    databases: ['syncdb', 'carat-one-client-sync'],
   };
 
   // Sync origins
@@ -123,7 +123,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       origin: 'nodeB',
       operationType: 'update',
       collection: 'users',
-      database: 'rljson-sync',
+      database: 'carat-one-client-sync',
       timestamp: new Date(Date.now() - 12000),
       chainHash: 'def456789abc123xyz',
     },
@@ -132,7 +132,7 @@ export class SyncComponent implements OnInit, OnDestroy {
       origin: 'local',
       operationType: 'replace',
       collection: 'orders',
-      database: 'rljson-sync',
+      database: 'carat-one-client-sync',
       timestamp: new Date(Date.now() - 18000),
       chainHash: 'xyz789def456abc123',
     },
@@ -160,7 +160,7 @@ export class SyncComponent implements OnInit, OnDestroy {
     },
     {
       name: 'users',
-      database: 'rljson-sync',
+      database: 'carat-one-client-sync',
       documentCount: 142,
       lastModified: new Date(Date.now() - 12000),
       merkleHash: 'f6e5d4c3b2a1',
@@ -169,7 +169,7 @@ export class SyncComponent implements OnInit, OnDestroy {
     },
     {
       name: 'orders',
-      database: 'rljson-sync',
+      database: 'carat-one-client-sync',
       documentCount: 2834,
       lastModified: new Date(Date.now() - 18000),
       merkleHash: '9f8e7d6c5b4a',
@@ -178,7 +178,7 @@ export class SyncComponent implements OnInit, OnDestroy {
     },
     {
       name: 'products',
-      database: 'rljson-sync',
+      database: 'carat-one-client-sync',
       documentCount: 567,
       lastModified: new Date(Date.now() - 45000),
       merkleHash: '3a2b1c0d9e8f',
@@ -196,7 +196,7 @@ export class SyncComponent implements OnInit, OnDestroy {
     },
     {
       name: 'inventory',
-      database: 'rljson-sync',
+      database: 'carat-one-client-sync',
       documentCount: 1243,
       lastModified: new Date(Date.now() - 8000),
       merkleHash: 'x9y8z7w6v5u4',

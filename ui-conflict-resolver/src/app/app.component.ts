@@ -10,5 +10,5 @@ import { RouterOutlet } from '@angular/router';
   styles: [],
 })
 export class AppComponent {
-  title = 'RLJSON Node Control Panel';
+  title = 'CARAT one client Node Control Panel';
 }
