@@ -878,6 +878,150 @@ app.get('/api/hash-status', async (_req, res) => {
   }
 });
 
+// ==================== CHAIN INSPECTOR (Tier 3) ====================
+// Read-only views of sync_ops + a per-origin prevHash→chainHash linkcheck.
+// Fields are projected so the dashboard doesn't pull fullDocument blobs.
+
+/**
+ * GET /api/chain/origins
+ * Distinct list of `origin` values present in sync_ops.
+ */
+app.get('/api/chain/origins', async (_req, res) => {
+  try {
+    const origins = await db.collection('sync_ops').distinct('origin');
+    res.json({ origins: (origins as string[]).sort() });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+/**
+ * GET /api/chain?origin=...&limit=...&after=...
+ * Paginated sync_ops list for a single origin. Returns a UI-friendly
+ * projection (no fullDocument).
+ */
+app.get<{
+  Querystring: { origin?: string; limit?: string; after?: string };
+}>('/api/chain', async (req, res) => {
+  try {
+    const origin = req.query.origin;
+    if (!origin) return res.status(400).json({ error: 'origin required' });
+    const limit = Math.min(
+      parseInt(String(req.query.limit ?? '100'), 10) || 100,
+      500,
+    );
+    const after = parseInt(String(req.query.after ?? '0'), 10) || 0;
+    const ops = await db
+      .collection('sync_ops')
+      .find({ origin, seq: { $gt: after } })
+      .sort({ seq: 1 })
+      .limit(limit)
+      .project({
+        _id: 1,
+        origin: 1,
+        seq: 1,
+        operationType: 1,
+        ns: 1,
+        docId: 1,
+        prevHash: 1,
+        opHash: 1,
+        chainHash: 1,
+        ts: 1,
+      })
+      .toArray();
+    res.json({
+      ops: ops.map((o) => ({
+        ...o,
+        docId: o.docId === null || o.docId === undefined ? null : String(o.docId),
+      })),
+      hasMore: ops.length === limit,
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+/**
+ * GET /api/chain/verify?origin=...
+ * Walks the chain (per-origin prevHash linkcheck) and returns the first
+ * break, plus total op count. Origin is optional — empty verifies all.
+ */
+app.get<{ Querystring: { origin?: string } }>(
+  '/api/chain/verify',
+  async (req, res) => {
+    try {
+      const origin = req.query.origin;
+      const filter: Record<string, unknown> = origin ? { origin } : {};
+      const cursor = db
+        .collection('sync_ops')
+        .find(filter, {
+          projection: { origin: 1, seq: 1, prevHash: 1, chainHash: 1 },
+        })
+        .sort({ origin: 1, seq: 1 });
+      const prevByOrigin = new Map<string, string>();
+      let valid = true;
+      let firstBreakAt: { origin: string; seq: number } | null = null;
+      let total = 0;
+      for await (const op of cursor) {
+        total += 1;
+        const expected = prevByOrigin.get(op.origin) ?? 'GENESIS';
+        if (op.prevHash !== expected) {
+          valid = false;
+          if (!firstBreakAt) {
+            firstBreakAt = { origin: op.origin, seq: op.seq };
+          }
+        }
+        prevByOrigin.set(op.origin, op.chainHash || 'INVALID');
+      }
+      res.json({ valid, firstBreakAt, total });
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  },
+);
+
+// ==================== PARTITION MAP (Tier 3) ====================
+
+/**
+ * GET /api/partitions?coll=...
+ * state_merkle entries (the cached partition Merkle nodes), grouped by
+ * collection. Optional `coll` filter; without it, returns every entry.
+ */
+app.get<{ Querystring: { coll?: string } }>(
+  '/api/partitions',
+  async (req, res) => {
+    try {
+      const coll = req.query.coll;
+      const filter: Record<string, unknown> = coll ? { coll } : {};
+      const parts = await db
+        .collection('state_merkle')
+        .find(filter)
+        .sort({ coll: 1, idx: 1 })
+        .toArray();
+      res.json({
+        partitions: parts.map((p) => ({
+          coll: (p as unknown as { coll: string }).coll,
+          idx: (p as unknown as { idx: number }).idx,
+          count: (p as unknown as { count: number }).count,
+          root: (p as unknown as { root: string }).root,
+          minId:
+            (p as unknown as { minId?: unknown }).minId === undefined
+              ? null
+              : String((p as unknown as { minId: unknown }).minId),
+          maxId:
+            (p as unknown as { maxId?: unknown }).maxId === undefined
+              ? null
+              : String((p as unknown as { maxId: unknown }).maxId),
+          updatedAt:
+            (p as unknown as { updatedAt?: string }).updatedAt ?? null,
+        })),
+      });
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  },
+);
+
 // ==================== START SERVER ====================
 
 async function startServer() {

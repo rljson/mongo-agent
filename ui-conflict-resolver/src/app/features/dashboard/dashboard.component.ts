@@ -134,6 +134,59 @@ export class DashboardComponent implements OnInit, OnDestroy {
     perColl: [],
   };
 
+  // Chain inspector state
+  chainState: {
+    loading: boolean;
+    origins: string[];
+    selectedOrigin: string;
+    ops: Array<{
+      _id: string;
+      origin: string;
+      seq: number;
+      operationType: string;
+      ns: { db: string; coll: string };
+      docId: string | null;
+      prevHash: string;
+      opHash: string;
+      chainHash: string;
+      ts: string;
+    }>;
+    verifying: boolean;
+    valid: boolean | null;
+    firstBreakAt: { origin: string; seq: number } | null;
+    total: number;
+  } = {
+    loading: false,
+    origins: [],
+    selectedOrigin: '',
+    ops: [],
+    verifying: false,
+    valid: null,
+    firstBreakAt: null,
+    total: 0,
+  };
+
+  // Partition map state
+  partitionState: {
+    loading: boolean;
+    collFilter: string;
+    byColl: Array<{
+      coll: string;
+      partitions: Array<{
+        idx: number;
+        count: number;
+        root: string;
+        minId: string | null;
+        maxId: string | null;
+        updatedAt: string | null;
+      }>;
+    }>;
+  } = {
+    loading: false,
+    collFilter: '',
+    byColl: [],
+  };
+
   constructor(private syncApi: SyncApiService) {}
 
   ngOnInit(): void {
@@ -148,6 +201,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
     this.loadConflicts();
     this.loadServicesStatus();
     this.loadHashStatus();
+    this.loadChainOrigins();
 
     // Poll for conflicts every 10 seconds
     interval(10000)
@@ -430,5 +484,105 @@ export class DashboardComponent implements OnInit, OnDestroy {
       error: '❌',
     };
     return icons[type] || 'ℹ️';
+  }
+
+  // ---- Chain inspector --------------------------------------------------
+
+  loadChainOrigins(): void {
+    this.syncApi.getChainOrigins().subscribe({
+      next: (resp) => {
+        this.chainState.origins = resp.origins || [];
+        if (
+          !this.chainState.selectedOrigin &&
+          this.chainState.origins.length > 0
+        ) {
+          this.chainState.selectedOrigin = this.chainState.origins[0];
+          this.loadChainOps();
+        }
+      },
+    });
+  }
+
+  loadChainOps(): void {
+    if (!this.chainState.selectedOrigin) return;
+    this.chainState.loading = true;
+    this.syncApi.getChain(this.chainState.selectedOrigin, 50, 0).subscribe({
+      next: (resp) => {
+        this.chainState.ops = resp.ops;
+        this.chainState.loading = false;
+      },
+      error: () => {
+        this.chainState.loading = false;
+      },
+    });
+  }
+
+  /**
+   * Each op's `prevHash` should equal the previous op's `chainHash` for
+   * the SAME origin. Visually we just compute the table-row class —
+   * 'broken' when the link doesn't match. The full verify covers the
+   * whole collection (this is just the visible page).
+   */
+  isChainLinkBroken(idx: number): boolean {
+    if (idx === 0) {
+      return this.chainState.ops[0]?.prevHash !== 'GENESIS';
+    }
+    const prev = this.chainState.ops[idx - 1];
+    const cur = this.chainState.ops[idx];
+    return !!prev && !!cur && cur.prevHash !== prev.chainHash;
+  }
+
+  verifyChainAll(): void {
+    this.chainState.verifying = true;
+    this.syncApi
+      .verifyChainLinks(this.chainState.selectedOrigin || undefined)
+      .subscribe({
+        next: (r) => {
+          this.chainState.valid = r.valid;
+          this.chainState.firstBreakAt = r.firstBreakAt;
+          this.chainState.total = r.total;
+          this.chainState.verifying = false;
+        },
+        error: () => {
+          this.chainState.verifying = false;
+        },
+      });
+  }
+
+  // ---- Partition map ----------------------------------------------------
+
+  loadPartitions(): void {
+    this.partitionState.loading = true;
+    this.syncApi
+      .getPartitions(this.partitionState.collFilter || undefined)
+      .subscribe({
+        next: (resp) => {
+          // Group flat list by collection.
+          type ByCollEntry = (typeof this.partitionState.byColl)[0];
+          const map = new Map<string, ByCollEntry>();
+          for (const p of resp.partitions) {
+            let entry = map.get(p.coll);
+            if (!entry) {
+              entry = { coll: p.coll, partitions: [] };
+              map.set(p.coll, entry);
+            }
+            entry.partitions.push({
+              idx: p.idx,
+              count: p.count,
+              root: p.root,
+              minId: p.minId,
+              maxId: p.maxId,
+              updatedAt: p.updatedAt,
+            });
+          }
+          this.partitionState.byColl = Array.from(map.values()).sort(
+            (a, b) => a.coll.localeCompare(b.coll),
+          );
+          this.partitionState.loading = false;
+        },
+        error: () => {
+          this.partitionState.loading = false;
+        },
+      });
   }
 }

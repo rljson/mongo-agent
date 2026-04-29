@@ -176,4 +176,89 @@ export class SyncApiService {
       `${this.apiBaseUrl}/hash-status`,
     );
   }
+
+  // Chain inspector
+  getChainOrigins(): Observable<{ origins: string[] }> {
+    return this.http.get<{ origins: string[] }>(
+      `${this.apiBaseUrl}/chain/origins`,
+    );
+  }
+  getChain(
+    origin: string,
+    limit = 100,
+    after = 0,
+  ): Observable<{
+    ops: Array<{
+      _id: string;
+      origin: string;
+      seq: number;
+      operationType: string;
+      ns: { db: string; coll: string };
+      docId: string | null;
+      prevHash: string;
+      opHash: string;
+      chainHash: string;
+      ts: string;
+    }>;
+    hasMore: boolean;
+  }> {
+    const params = `origin=${encodeURIComponent(origin)}&limit=${limit}&after=${after}`;
+    return this.http.get<{
+      ops: Array<{
+        _id: string;
+        origin: string;
+        seq: number;
+        operationType: string;
+        ns: { db: string; coll: string };
+        docId: string | null;
+        prevHash: string;
+        opHash: string;
+        chainHash: string;
+        ts: string;
+      }>;
+      hasMore: boolean;
+    }>(`${this.apiBaseUrl}/chain?${params}`);
+  }
+  verifyChainLinks(origin?: string): Observable<{
+    valid: boolean;
+    firstBreakAt: { origin: string; seq: number } | null;
+    total: number;
+  }> {
+    const url = origin
+      ? `${this.apiBaseUrl}/chain/verify?origin=${encodeURIComponent(origin)}`
+      : `${this.apiBaseUrl}/chain/verify`;
+    return this.http.get<{
+      valid: boolean;
+      firstBreakAt: { origin: string; seq: number } | null;
+      total: number;
+    }>(url);
+  }
+
+  // Partition map
+  getPartitions(coll?: string): Observable<{
+    partitions: Array<{
+      coll: string;
+      idx: number;
+      count: number;
+      root: string;
+      minId: string | null;
+      maxId: string | null;
+      updatedAt: string | null;
+    }>;
+  }> {
+    const url = coll
+      ? `${this.apiBaseUrl}/partitions?coll=${encodeURIComponent(coll)}`
+      : `${this.apiBaseUrl}/partitions`;
+    return this.http.get<{
+      partitions: Array<{
+        coll: string;
+        idx: number;
+        count: number;
+        root: string;
+        minId: string | null;
+        maxId: string | null;
+        updatedAt: string | null;
+      }>;
+    }>(url);
+  }
 }

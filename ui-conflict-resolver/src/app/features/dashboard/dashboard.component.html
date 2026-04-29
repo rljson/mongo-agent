@@ -405,4 +405,143 @@
       </div>
     </div>
   </div>
+
+  <!-- Chain inspector -->
+  <div class="card chain-inspector">
+    <div class="card-header">
+      <h3>Chain Inspector</h3>
+      <div class="header-actions">
+        <select
+          *ngIf="chainState.origins.length"
+          [(ngModel)]="chainState.selectedOrigin"
+          (change)="loadChainOps()"
+          class="origin-select">
+          <option *ngFor="let o of chainState.origins" [value]="o">{{ o }}</option>
+        </select>
+        <button class="btn btn-sm btn-secondary" (click)="loadChainOps()">
+          Refresh
+        </button>
+        <button
+          class="btn btn-sm btn-primary"
+          (click)="verifyChainAll()"
+          [disabled]="chainState.verifying">
+          {{ chainState.verifying ? 'Verifying…' : 'Verify chain' }}
+        </button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div *ngIf="chainState.valid !== null" class="chain-verdict">
+        <span
+          class="verdict-pill"
+          [class.valid]="chainState.valid"
+          [class.invalid]="!chainState.valid">
+          {{ chainState.valid ? '✓ chain intact' : '✗ chain broken' }}
+        </span>
+        <span class="text-muted">
+          checked {{ chainState.total }} ops
+          <span *ngIf="chainState.firstBreakAt"
+            >; first break at
+            <code
+              >{{ chainState.firstBreakAt.origin }}_{{ chainState.firstBreakAt.seq }}</code
+            ></span
+          >
+        </span>
+      </div>
+      <table
+        class="chain-table"
+        *ngIf="chainState.ops.length; else noChain">
+        <thead>
+          <tr>
+            <th>seq</th>
+            <th>op</th>
+            <th>coll</th>
+            <th>docId</th>
+            <th>prev → chain</th>
+            <th>ts</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            *ngFor="let o of chainState.ops; let i = index"
+            [class.broken]="isChainLinkBroken(i)">
+            <td><code>{{ o.seq }}</code></td>
+            <td>{{ o.operationType }}</td>
+            <td>{{ o.ns?.coll }}</td>
+            <td><code>{{ o.docId }}</code></td>
+            <td class="hash-cell">
+              <code>{{ shortHash(o.prevHash) }}</code> →
+              <code>{{ shortHash(o.chainHash) }}</code>
+            </td>
+            <td>{{ o.ts }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <ng-template #noChain>
+        <p class="text-muted">No ops to display — pick an origin above.</p>
+      </ng-template>
+    </div>
+  </div>
+
+  <!-- Partition map -->
+  <div class="card partition-map">
+    <div class="card-header">
+      <h3>Partition Map</h3>
+      <div class="header-actions">
+        <input
+          type="text"
+          placeholder="collection (blank=all)"
+          [(ngModel)]="partitionState.collFilter"
+          class="repair-input" />
+        <button
+          class="btn btn-sm btn-primary"
+          (click)="loadPartitions()"
+          [disabled]="partitionState.loading">
+          {{ partitionState.loading ? 'Loading…' : 'Load' }}
+        </button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div
+        *ngIf="partitionState.byColl.length; else noParts"
+        class="parts-collections">
+        <div *ngFor="let c of partitionState.byColl" class="parts-coll">
+          <h4>
+            {{ c.coll }}
+            <span class="text-muted"
+              >· {{ c.partitions.length }} partition{{
+                c.partitions.length === 1 ? '' : 's'
+              }}</span
+            >
+          </h4>
+          <table class="parts-table">
+            <thead>
+              <tr>
+                <th>idx</th>
+                <th>count</th>
+                <th>root</th>
+                <th>min → max</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let p of c.partitions">
+                <td><code>p{{ p.idx }}</code></td>
+                <td>{{ p.count }}</td>
+                <td><code>{{ shortHash(p.root) }}</code></td>
+                <td class="range-cell">
+                  <code>{{ shortHash(p.minId) }}</code> →
+                  <code>{{ shortHash(p.maxId) }}</code>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <ng-template #noParts>
+        <p class="text-muted">
+          No partitions cached yet — run a state-hash compute to populate
+          <code>state_merkle</code>.
+        </p>
+      </ng-template>
+    </div>
+  </div>
 </div>
