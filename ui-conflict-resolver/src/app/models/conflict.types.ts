@@ -1,5 +1,5 @@
 /**
- * Types for CARAT one client MongoDB Synchronization Conflicts
+ * Types for RLJSON MongoDB Synchronization Conflicts
  */
 
 export interface DocumentVersion {
