@@ -137,13 +137,13 @@ export async function extractRljsonTree(
     node,
   }));
 
-  // Collect all blobs
+  // Collect all blobs (legacy per-document blobs + per-collection ComponentsTable blobs + root TablesCfgTable blob)
   const blobIds = new Set<string>();
   for (const node of tree.trees.values()) {
     const meta = node.meta as any;
-    if (meta?.blobId) {
-      blobIds.add(meta.blobId);
-    }
+    if (meta?.blobId) blobIds.add(meta.blobId);
+    if (meta?.componentsBlobId) blobIds.add(meta.componentsBlobId);
+    if (meta?.tableCfgsTableBlobId) blobIds.add(meta.tableCfgsTableBlobId);
   }
 
   const blobs: Array<{ blobId: string; content: string }> = [];
@@ -311,8 +311,36 @@ async function applyTreeNode(
       .collection(collection)
       .replaceOne({ _id: doc._id }, doc, { upsert: true });
     count++;
+  } else if (meta.type === 'collection' && meta.componentsBlobId) {
+    // New schema: collection's documents are packed into a single ComponentsTable blob
+    const collection = meta.collection ?? meta.name;
+    if (!collection) return count;
+
+    const blob = await bs.getBlob(meta.componentsBlobId);
+    const componentsTable = JSON.parse(blob.content.toString('utf-8')) as {
+      _data: Array<Record<string, unknown>>;
+    };
+
+    if (expectedDocsByCollection && !expectedDocsByCollection.has(collection)) {
+      expectedDocsByCollection.set(collection, new Set());
+    }
+
+    for (const row of componentsTable._data ?? []) {
+      // Strip RLJSON-internal hash field; rest is the document
+      const { _hash: _ignored, ...doc } = row as Record<string, unknown>;
+      if ((doc as any)._id === undefined) continue;
+
+      expectedDocsByCollection
+        ?.get(collection)
+        ?.add(String((doc as any)._id));
+
+      await mongoDb
+        .collection(collection)
+        .replaceOne({ _id: (doc as any)._id }, doc as any, { upsert: true });
+      count++;
+    }
   } else if (meta.type === 'collection' && node.children) {
-    // Process all documents in this collection
+    // Legacy schema: per-document children
     for (const childHash of node.children) {
       const childNode = treeMap.get(childHash);
       if (childNode) {

@@ -252,7 +252,20 @@ async function verifySync(mongoA: MongoDb, mongoB: MongoDb): Promise<boolean> {
       .sort({ _id: 1 })
       .toArray();
 
-    if (JSON.stringify(docsA) !== JSON.stringify(docsB)) {
+    // Canonicalize key order before compare (ComponentsTable roundtrip alphabetizes fields)
+    const canon = (docs: any[]) =>
+      JSON.stringify(
+        docs.map((d) =>
+          Object.keys(d)
+            .sort()
+            .reduce<Record<string, unknown>>((o, k) => {
+              o[k] = d[k];
+              return o;
+            }, {}),
+        ),
+      );
+
+    if (canon(docsA) !== canon(docsB)) {
       error(`Collection ${collName}: Documents differ!`);
       allMatch = false;
       continue;
