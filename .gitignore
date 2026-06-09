@@ -14,6 +14,8 @@ yarn-error.log*
 
 # Local diagnostic / scratch files (per-laptop)
 agent-*.log
+agent.log*
+agent.err
 hub-clients.json
 hub-curl.txt
 health-*.txt
@@ -22,16 +24,33 @@ fw-rules.txt
 ports.txt
 query
 package-lock.json
+# Any file/script starting with an underscore is treated as a per-laptop
+# scratch/diagnostic dump (insert scripts, peek tools, hash run logs, …).
+_*
+*.run.out
+*.run.err
+baseline-out.log
+conflict-api.run.*
+hub.run.*
 
 # Local-only setup scripts and notes (per-laptop)
 COPILOT-LAPTOP2-INSTRUCTIONS.md
 LAPTOP2-SETUP.md
 MESSAGE-FOR-LAPTOP2-ETHERNET.txt
 TESTING_SYNC_GUIDE.md
+START-AGENT-LAPTOP1.bat
+START-HUB.bat
+setup-firewall-laptop1.ps1
 setup-laptop2.ps1
 start-laptop2.ps1
 test-agent.js
 test-hub.js
+
+# Claude Code agent settings (per-developer)
+.claude/
+
+# UI install logs (per-laptop)
+ui-conflict-resolver/_install.*
 
 # Build artifacts
 dist/
