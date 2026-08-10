@@ -18,6 +18,7 @@ import type { ComponentsTable, TableCfg } from '@rljson/rljson';
  * Logger interface compatible with Fastify/Pino
  */
 export interface Logger {
+  debug?: (obj?: object | string, msg?: string) => void;
   info?: (obj?: object | string, msg?: string) => void;
   warn?: (obj?: object | string, msg?: string) => void;
   error?: (obj?: object | string, msg?: string) => void;
@@ -510,67 +511,6 @@ export async function startDbChangeStream(
   // callbacks below — declared here so its writes outlive any single tick.
   let currentDbStateHash: string | undefined;
 
-  // ---- State-hash checkpoint: DEBOUNCED off the change hot-path ----
-  // Computing the full dbRoot on every change is O(total-DB): it rolls up
-  // every collection + partition and re-hashes any dirty (50k-doc) partition,
-  // so a single insert into a DB with large catalogs (cd_models 9M) blocked
-  // the serial queue for ~30s. The data sync does NOT need the hash —
-  // `appendOp` ships the delta immediately and the apply/pull path never reads
-  // prev/currentStateHash (they only feed the convergence chain + restore). So
-  // the hot path now just `markDirtyById`s and the checkpoint is recomputed
-  // once changes settle, collapsing a whole burst into a single rollup.
-  // `currentDbStateHash` converges shortly after the last change; on-demand
-  // `/test/hash-recompute` still returns the exact current dbRoot.
-  const CHECKPOINT_DEBOUNCE_MS = 750;
-  const CHECKPOINT_IGNORED = new Set([
-    'state_checkpoints',
-    'state_merkle',
-    'state_dirty',
-    'sync_ops',
-    'sync_state',
-    'sync_local',
-    'sync_resume',
-  ]);
-  let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
-  let checkpointRunning = false;
-  let checkpointPendingAgain = false;
-
-  const recomputeCheckpoint = async (): Promise<void> => {
-    if (checkpointRunning) {
-      // A burst arrived while we were hashing — rerun once we finish so the
-      // final dbRoot reflects the latest dirty partitions.
-      checkpointPendingAgain = true;
-      return;
-    }
-    checkpointRunning = true;
-    try {
-      const newState = await computeStateCheckpoint({
-        db,
-        ignoredColls: CHECKPOINT_IGNORED,
-        partitionSize: 50000,
-        mode: 'incremental',
-      });
-      currentDbStateHash = newState.dbRoot;
-    } catch {
-      logger?.warn?.('Failed to compute state checkpoint (debounced)');
-    } finally {
-      checkpointRunning = false;
-      if (checkpointPendingAgain) {
-        checkpointPendingAgain = false;
-        scheduleCheckpoint();
-      }
-    }
-  };
-
-  function scheduleCheckpoint(): void {
-    if (!trackStateHash) return;
-    if (checkpointTimer) clearTimeout(checkpointTimer);
-    checkpointTimer = setTimeout(() => {
-      checkpointTimer = null;
-      void recomputeCheckpoint();
-    }, CHECKPOINT_DEBOUNCE_MS);
-  }
-
   // Load resume token
   const resumeDoc = await db
     .collection('sync_resume')
@@ -645,8 +585,14 @@ export async function startDbChangeStream(
 
       if (docId === null || docId === undefined) return;
 
-      // Guard against missing namespace
+      // Guard against missing namespace. Defensive only: a falsy `ns` makes
+      // `coll` (= ns?.coll) undefined, which `isInternalCollection` already
+      // treats as internal and returns above — so this is unreachable in
+      // practice, kept as a type-narrowing guard for the `ns.coll`/`ns.db`
+      // accesses below.
+      /* v8 ignore start */
       if (!ns) return;
+      /* v8 ignore stop */
 
       // Mark dirty for state hash tracking BEFORE the suppressor check —
       // remote-applied ops (which the suppressor swallows below) still
@@ -688,15 +634,30 @@ export async function startDbChangeStream(
       // State tracking: capture state before operation
       const prevStateHash = trackStateHash ? currentDbStateHash : undefined;
 
-      // State hash is computed OFF the hot path (debounced) — see
-      // scheduleCheckpoint above. Tag the op with the last-known dbRoot (cheap)
-      // and let the checkpoint converge after the burst settles. The
-      // markDirtyById call above already recorded this change's partition, so
-      // the deferred recompute will include it.
-      const newStateHash: string | undefined = trackStateHash
-        ? currentDbStateHash
-        : undefined;
-      if (trackStateHash) scheduleCheckpoint();
+      // Compute new state hash after operation (if tracking enabled)
+      let newStateHash: string | undefined;
+      if (trackStateHash) {
+        try {
+          const newState = await computeStateCheckpoint({
+            db,
+            ignoredColls: new Set([
+              'state_checkpoints',
+              'state_merkle',
+              'state_dirty',
+              'sync_ops',
+              'sync_state',
+              'sync_local',
+              'sync_resume',
+            ]),
+            partitionSize: 50000,
+            mode: 'incremental',
+          });
+          newStateHash = newState.dbRoot;
+          currentDbStateHash = newStateHash; // Update tracked state
+        } catch {
+          logger?.warn?.('Failed to compute new state hash');
+        }
+      }
 
       // Keep `fullDocument`, `updateDescription`, and `docId` as native BSON
       // types (Date, ObjectId, Decimal128, …). The wire-format step in

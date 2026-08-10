@@ -1,540 +1,323 @@
 // @license
-// Copyright (c) 2025 Rljson
-//
-// Use of this source code is governed by terms that can be
-// found in the LICENSE file in the root of this package.
+// Copyright (c) 2025 CARAT Gesellschaft für Organisation
+// und Softwareentwicklung mbH. All Rights Reserved.
 
 import { describe, expect, it, vi } from 'vitest';
-import type { Db, Collection } from 'mongodb';
+
 import {
   clearDirtyForCollection,
   clearDirtyPartitions,
   ensureDirtyIndexes,
   listDirtyForCollection,
+  markCollectionFullDirty,
   markDirtyById,
-  type DirtyDoc,
-  type DirtyFullDoc,
-  type DirtyPartitionDoc,
-  type PartitionMeta,
 } from '../../src/hashing/state-dirty.ts';
 
-describe('state-dirty', () => {
-  describe('ensureDirtyIndexes', () => {
-    it('creates required indexes on state_dirty collection', async () => {
-      const createIndexMock = vi.fn().mockResolvedValue('index_created');
+/**
+ * Real-logic tests for state-dirty using fake Mongo collections.
+ * No live Mongo / network — every collection is a canned stub that records
+ * the calls made against it so we can assert which marker path was taken.
+ */
 
-      const mockCollection = {
-        createIndex: createIndexMock,
-      } as unknown as Collection;
+interface Recorded {
+  filter?: any;
+  update?: any;
+  options?: any;
+}
 
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
+/**
+ * Build a fake collection. `findOneResults` is consumed in order — each call to
+ * findOne returns (and removes) the next queued result. updateOne / deleteMany /
+ * find calls are recorded on the returned `calls` object.
+ */
+function fakeColl(opts: {
+  findOne?: (filter: any, options: any) => any;
+  findArray?: any[];
+  createIndex?: () => any;
+} = {}) {
+  const calls = {
+    updateOne: [] as Recorded[],
+    deleteMany: [] as Recorded[],
+    createIndex: [] as any[],
+    findProjectArgs: undefined as any,
+  };
+  const coll: any = {
+    createIndex: vi.fn(async (spec: any) => {
+      calls.createIndex.push(spec);
+    }),
+    findOne: vi.fn(async (filter: any, options: any) =>
+      opts.findOne ? opts.findOne(filter, options) : null,
+    ),
+    updateOne: vi.fn(async (filter: any, update: any, options: any) => {
+      calls.updateOne.push({ filter, update, options });
+      return { acknowledged: true };
+    }),
+    deleteMany: vi.fn(async (filter: any) => {
+      calls.deleteMany.push({ filter });
+      return { deletedCount: 0 };
+    }),
+    find: vi.fn(() => ({
+      project: (p: any) => {
+        calls.findProjectArgs = p;
+        return { toArray: async () => opts.findArray ?? [] };
+      },
+    })),
+  };
+  return { coll, calls };
+}
 
-      await ensureDirtyIndexes(mockDb);
+/**
+ * Build a fake Db that dispatches collection(name) to a per-name stub.
+ * `byName` maps the collection name to a { coll, calls } from fakeColl.
+ */
+function fakeDb(byName: Record<string, { coll: any; calls: any }>) {
+  return {
+    collection: vi.fn((name: string) => {
+      const entry = byName[name];
+      if (!entry) throw new Error(`unexpected collection ${name}`);
+      return entry.coll;
+    }),
+  } as any;
+}
 
-      expect(mockDb.collection).toHaveBeenCalledWith('state_dirty');
-      expect(createIndexMock).toHaveBeenCalledTimes(2);
-      expect(createIndexMock).toHaveBeenCalledWith({ coll: 1, partition: 1 });
-      expect(createIndexMock).toHaveBeenCalledWith({ dirtyAt: 1 });
-    });
+describe('ensureDirtyIndexes', () => {
+  it('creates both indexes on state_dirty', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+    await ensureDirtyIndexes(db);
+    expect(dirty.calls.createIndex).toEqual([
+      { coll: 1, partition: 1 },
+      { dirtyAt: 1 },
+    ]);
+  });
+});
+
+describe('markDirtyById', () => {
+  it('returns early (no-op) when collName is null/undefined', async () => {
+    const db = fakeDb({});
+    await markDirtyById(db, null, 'x');
+    await markDirtyById(db, undefined, 'x');
+    expect(db.collection).not.toHaveBeenCalled();
   });
 
-  describe('markDirtyById', () => {
-    it('marks partition dirty when metadata exists', async () => {
-      const updateOneCalls: Array<{
-        filter: unknown;
-        update: unknown;
-        options: unknown;
-      }> = [];
+  it('marks the matching partition dirty when merkle meta is found', async () => {
+    const merkle = fakeColl({ findOne: () => ({ idx: 7 }) });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-      const mockPartitionMeta: PartitionMeta = {
-        idx: 3,
-        minId: 'doc000',
-        maxId: 'doc100',
-      };
+    await markDirtyById(db, 'articles', 'abc');
 
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi.fn().mockResolvedValue(mockPartitionMeta),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter, update, options) => {
-                updateOneCalls.push({ filter, update, options });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyPartitionDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'doc042');
-
-      expect(updateOneCalls).toHaveLength(1);
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::p3' });
-      expect(updateOneCalls[0].update).toMatchObject({
-        $set: {
-          coll: 'articles',
-          partition: 3,
-        },
-      });
-      expect(updateOneCalls[0].options).toEqual({ upsert: true });
-    });
-
-    it('marks full collection dirty when partition not found', async () => {
-      const updateOneCalls: Array<{
-        filter: unknown;
-        update: unknown;
-        options: unknown;
-      }> = [];
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi.fn().mockResolvedValue(null),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter, update, options) => {
-                updateOneCalls.push({ filter, update, options });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyFullDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'newcoll', 'newdoc1');
-
-      expect(updateOneCalls).toHaveLength(1);
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'newcoll::FULL' });
-      expect(updateOneCalls[0].update).toMatchObject({
-        $set: {
-          coll: 'newcoll',
-          full: true,
-          reason: 'partition_not_found',
-        },
-      });
-    });
-
-    it('marks full collection dirty with custom reason', async () => {
-      const updateOneCalls: Array<{ update: unknown }> = [];
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi.fn().mockResolvedValue(null),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter, update) => {
-                updateOneCalls.push({ filter, update });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyFullDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'doc1', {
-        reason: 'manual_invalidation',
-      });
-
-      expect(updateOneCalls[0].update).toMatchObject({
-        $set: {
-          reason: 'manual_invalidation',
-        },
-      });
-    });
-
-    it('does nothing when collName is null', async () => {
-      const mockDb = {
-        collection: vi.fn(),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, null, 'doc1');
-
-      expect(mockDb.collection).not.toHaveBeenCalled();
-    });
-
-    it('does nothing when collName is undefined', async () => {
-      const mockDb = {
-        collection: vi.fn(),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, undefined, 'doc1');
-
-      expect(mockDb.collection).not.toHaveBeenCalled();
-    });
-
-    it('marks full collection dirty when partition field is missing', async () => {
-      const updateOneCalls: Array<{ filter: unknown }> = [];
-
-      const mockPartitionMeta = {
-        minId: 'doc000',
-        maxId: 'doc100',
-        // partition field is missing
-      };
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi.fn().mockResolvedValue(mockPartitionMeta),
-            } as unknown as Collection;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter) => {
-                updateOneCalls.push({ filter });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyFullDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'doc1');
-
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
-    });
-
-    it('handles findPartitionForId errors gracefully', async () => {
-      const updateOneCalls: Array<{ filter: unknown }> = [];
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi
-                .fn()
-                .mockRejectedValue(new Error('Database connection lost')),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter) => {
-                updateOneCalls.push({ filter });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyFullDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'doc1');
-
-      // Should fall back to marking full collection dirty
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
-    });
-
-    // After-max insert: docId is past every cached partition's maxId. Mark
-    // the LAST partition dirty so computeStateCheckpoint rescans it
-    // open-ended and refreshes maxId — instead of FULL-rescanning the
-    // whole collection on every append.
-    it('marks last partition dirty when docId is past every cached maxId', async () => {
-      const updateOneCalls: Array<{ filter: unknown; update: unknown }> = [];
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi
-                .fn()
-                .mockImplementation((filter: Record<string, unknown>) => {
-                  // findPartitionForId: filter has both minId and maxId.
-                  if ('minId' in filter && 'maxId' in filter) {
-                    return Promise.resolve(null);
-                  }
-                  // blocking probe: filter has only `maxId: {$gte}`.
-                  if ('maxId' in filter && !('minId' in filter)) {
-                    return Promise.resolve(null);
-                  }
-                  // last-partition lookup (filter is `{coll}` only).
-                  return Promise.resolve({ idx: 7 });
-                }),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter, update) => {
-                updateOneCalls.push({ filter, update });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyPartitionDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'docZZZ');
-
-      expect(updateOneCalls).toHaveLength(1);
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::p7' });
-      expect(updateOneCalls[0].update).toMatchObject({
-        $set: { coll: 'articles', partition: 7 },
-      });
-    });
-
-    // Real gap (some partition has maxId >= docId, but none covers it).
-    // Conservative fallback: mark FULL.
-    it('falls back to FULL when there is a real gap between partitions', async () => {
-      const updateOneCalls: Array<{ filter: unknown }> = [];
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi
-                .fn()
-                .mockImplementation((filter: Record<string, unknown>) => {
-                  if ('minId' in filter && 'maxId' in filter) {
-                    return Promise.resolve(null);
-                  }
-                  // blocking probe: another partition exists with maxId>=docId.
-                  if ('maxId' in filter && !('minId' in filter)) {
-                    return Promise.resolve({ _id: 'blocker' });
-                  }
-                  return Promise.resolve(null);
-                }),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter) => {
-                updateOneCalls.push({ filter });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyFullDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'docMid');
-
-      expect(updateOneCalls).toHaveLength(1);
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
-    });
-
-    // After-max queries on state_merkle can fail mid-flight (rollover,
-    // permission, network). We catch and fall through to FULL rather than
-    // crashing the change-stream callback.
-    it('falls back to FULL when state_merkle queries throw in the after-max path', async () => {
-      const updateOneCalls: Array<{ filter: unknown }> = [];
-
-      const mockDb = {
-        collection: vi.fn((name: string) => {
-          if (name === 'state_merkle') {
-            return {
-              findOne: vi
-                .fn()
-                .mockImplementation((filter: Record<string, unknown>) => {
-                  // findPartitionForId returns null cleanly.
-                  if ('minId' in filter && 'maxId' in filter) {
-                    return Promise.resolve(null);
-                  }
-                  // Subsequent queries (blocking / lastPart) throw.
-                  return Promise.reject(new Error('flaky merkle'));
-                }),
-            } as unknown as Collection<PartitionMeta>;
-          }
-          if (name === 'state_dirty') {
-            return {
-              updateOne: vi.fn(async (filter) => {
-                updateOneCalls.push({ filter });
-                return { modifiedCount: 1 };
-              }),
-            } as unknown as Collection<DirtyFullDoc>;
-          }
-          return {} as Collection;
-        }),
-      } as unknown as Db;
-
-      await markDirtyById(mockDb, 'articles', 'docX');
-
-      expect(updateOneCalls).toHaveLength(1);
-      expect(updateOneCalls[0].filter).toEqual({ _id: 'articles::FULL' });
-    });
+    expect(dirty.calls.updateOne).toHaveLength(1);
+    const c = dirty.calls.updateOne[0];
+    expect(c.filter).toEqual({ _id: 'articles::p7' });
+    expect(c.update.$set.partition).toBe(7);
+    expect(c.update.$set.coll).toBe('articles');
+    expect(c.options).toEqual({ upsert: true });
   });
 
-  describe('listDirtyForCollection', () => {
-    it('returns empty status when no dirty markers exist', async () => {
-      const mockCollection = {
-        find: vi.fn().mockReturnValue({
-          project: vi.fn().mockReturnValue({
-            toArray: vi.fn().mockResolvedValue([]),
-          }),
-        }),
-      } as unknown as Collection<DirtyDoc>;
+  it('after-max append: no blocking partition → marks the LAST partition dirty', async () => {
+    // findPartitionForId → null (no covering partition)
+    // blocking query → null (nothing has maxId >= docId)
+    // lastPart query → idx 4
+    const responses = [
+      null, // findPartitionForId
+      null, // blocking
+      { idx: 4 }, // lastPart
+    ];
+    const merkle = fakeColl({ findOne: () => responses.shift() });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
+    await markDirtyById(db, 'articles', 'zzz');
 
-      const result = await listDirtyForCollection(mockDb, 'articles');
-
-      expect(result).toEqual({ full: false, partitions: [] });
-    });
-
-    it('returns partition list when partitions are dirty', async () => {
-      const dirtyDocs: DirtyPartitionDoc[] = [
-        { _id: 'articles::p2', coll: 'articles', partition: 2, dirtyAt: '2024-01-01' },
-        { _id: 'articles::p5', coll: 'articles', partition: 5, dirtyAt: '2024-01-01' },
-        { _id: 'articles::p1', coll: 'articles', partition: 1, dirtyAt: '2024-01-01' },
-      ];
-
-      const mockCollection = {
-        find: vi.fn().mockReturnValue({
-          project: vi.fn().mockReturnValue({
-            toArray: vi.fn().mockResolvedValue(dirtyDocs),
-          }),
-        }),
-      } as unknown as Collection<DirtyDoc>;
-
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
-
-      const result = await listDirtyForCollection(mockDb, 'articles');
-
-      expect(result.full).toBe(false);
-      expect(result.partitions).toEqual([1, 2, 5]); // Sorted
-    });
-
-    it('returns full=true when full marker exists', async () => {
-      const dirtyDocs: DirtyDoc[] = [
-        { _id: 'articles::FULL', coll: 'articles', full: true, dirtyAt: '2024-01-01' },
-        { _id: 'articles::p2', coll: 'articles', partition: 2, dirtyAt: '2024-01-01' },
-      ];
-
-      const mockCollection = {
-        find: vi.fn().mockReturnValue({
-          project: vi.fn().mockReturnValue({
-            toArray: vi.fn().mockResolvedValue(dirtyDocs),
-          }),
-        }),
-      } as unknown as Collection<DirtyDoc>;
-
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
-
-      const result = await listDirtyForCollection(mockDb, 'articles');
-
-      expect(result.full).toBe(true);
-      expect(result.partitions).toEqual([2]);
-    });
-
-    it('filters out invalid partition numbers', async () => {
-      const dirtyDocs = [
-        { _id: 'articles::p2', coll: 'articles', partition: 2, dirtyAt: '2024-01-01' },
-        { _id: 'articles::invalid', coll: 'articles', partition: 'invalid', dirtyAt: '2024-01-01' },
-        { _id: 'articles::p5', coll: 'articles', partition: 5, dirtyAt: '2024-01-01' },
-      ];
-
-      const mockCollection = {
-        find: vi.fn().mockReturnValue({
-          project: vi.fn().mockReturnValue({
-            toArray: vi.fn().mockResolvedValue(dirtyDocs),
-          }),
-        }),
-      } as unknown as Collection<DirtyDoc>;
-
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
-
-      const result = await listDirtyForCollection(mockDb, 'articles');
-
-      expect(result.partitions).toEqual([2, 5]);
-    });
+    expect(dirty.calls.updateOne).toHaveLength(1);
+    expect(dirty.calls.updateOne[0].filter).toEqual({ _id: 'articles::p4' });
+    expect(dirty.calls.updateOne[0].update.$set.partition).toBe(4);
   });
 
-  describe('clearDirtyForCollection', () => {
-    it('deletes all dirty markers for collection', async () => {
-      const deleteManyCalls: Array<{ filter: unknown }> = [];
+  it('gap case: blocking partition exists → falls back to FULL marker', async () => {
+    const responses = [
+      null, // findPartitionForId → no cover
+      { _id: 'blockerDoc' }, // blocking exists → gap, not after-max
+    ];
+    const merkle = fakeColl({ findOne: () => responses.shift() });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-      const mockCollection = {
-        deleteMany: vi.fn(async (filter) => {
-          deleteManyCalls.push({ filter });
-          return { deletedCount: 5 };
-        }),
-      } as unknown as Collection;
+    await markDirtyById(db, 'articles', 'mid', { reason: 'gap-test' });
 
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
-
-      await clearDirtyForCollection(mockDb, 'articles');
-
-      expect(deleteManyCalls).toHaveLength(1);
-      expect(deleteManyCalls[0].filter).toEqual({ coll: 'articles' });
-    });
+    expect(dirty.calls.updateOne).toHaveLength(1);
+    const c = dirty.calls.updateOne[0];
+    expect(c.filter).toEqual({ _id: 'articles::FULL' });
+    expect(c.update.$set.full).toBe(true);
+    expect(c.update.$set.reason).toBe('gap-test');
   });
 
-  describe('clearDirtyPartitions', () => {
-    it('deletes specified partition markers', async () => {
-      const deleteManyCalls: Array<{ filter: unknown }> = [];
+  it('no cache: no blocking and no lastPart → FULL with default reason', async () => {
+    const responses = [
+      null, // findPartitionForId
+      null, // blocking
+      null, // lastPart
+    ];
+    const merkle = fakeColl({ findOne: () => responses.shift() });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-      const mockCollection = {
-        deleteMany: vi.fn(async (filter) => {
-          deleteManyCalls.push({ filter });
-          return { deletedCount: 3 };
-        }),
-      } as unknown as Collection;
+    await markDirtyById(db, 'articles', 'x');
 
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
+    const c = dirty.calls.updateOne[0];
+    expect(c.filter).toEqual({ _id: 'articles::FULL' });
+    expect(c.update.$set.reason).toBe('partition_not_found');
+  });
 
-      await clearDirtyPartitions(mockDb, 'articles', [1, 3, 5]);
+  it('lastPart present but idx is not a number → FULL fallback', async () => {
+    const responses = [
+      null, // findPartitionForId
+      null, // blocking
+      { idx: 'oops' }, // lastPart with bad idx
+    ];
+    const merkle = fakeColl({ findOne: () => responses.shift() });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-      expect(deleteManyCalls).toHaveLength(1);
-      expect(deleteManyCalls[0].filter).toEqual({
-        _id: { $in: ['articles::p1', 'articles::p3', 'articles::p5'] },
-      });
+    await markDirtyById(db, 'articles', 'x');
+
+    expect(dirty.calls.updateOne[0].filter).toEqual({ _id: 'articles::FULL' });
+  });
+
+  it('findPartitionForId throws → logs, treats as no meta, continues to FULL', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let call = 0;
+    const merkle = fakeColl({
+      findOne: () => {
+        call++;
+        if (call === 1) throw new Error('boom'); // findPartitionForId
+        return null; // blocking, lastPart
+      },
     });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-    it('does nothing when partition list is empty', async () => {
-      const mockCollection = {
-        deleteMany: vi.fn(),
-      } as unknown as Collection;
+    await markDirtyById(db, 'articles', 'x');
 
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[markDirtyById] ERROR finding partition'),
+    );
+    expect(dirty.calls.updateOne[0].filter).toEqual({ _id: 'articles::FULL' });
+    logSpy.mockRestore();
+  });
 
-      await clearDirtyPartitions(mockDb, 'articles', []);
-
-      expect(mockCollection.deleteMany).not.toHaveBeenCalled();
+  it('after-max branch: state_merkle query throws → swallowed, falls through to FULL', async () => {
+    let call = 0;
+    const merkle = fakeColl({
+      findOne: () => {
+        call++;
+        if (call === 1) return null; // findPartitionForId → no cover
+        throw new Error('merkle down'); // blocking query throws
+      },
     });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-    it('does nothing when partition list is null', async () => {
-      const mockCollection = {
-        deleteMany: vi.fn(),
-      } as unknown as Collection;
+    await markDirtyById(db, 'articles', 'x');
 
-      const mockDb = {
-        collection: vi.fn().mockReturnValue(mockCollection),
-      } as unknown as Db;
+    expect(dirty.calls.updateOne[0].filter).toEqual({ _id: 'articles::FULL' });
+  });
 
-      await clearDirtyPartitions(mockDb, 'articles', null as never);
+  it('uses empty options default and reason falls back to partition_not_found', async () => {
+    const responses = [null, null, null];
+    const merkle = fakeColl({ findOne: () => responses.shift() });
+    const dirty = fakeColl();
+    const db = fakeDb({ state_merkle: merkle, state_dirty: dirty });
 
-      expect(mockCollection.deleteMany).not.toHaveBeenCalled();
+    // call WITHOUT options argument to exercise the default param
+    await markDirtyById(db, 'articles', 'x');
+    expect(dirty.calls.updateOne[0].update.$set.reason).toBe('partition_not_found');
+  });
+});
+
+describe('markCollectionFullDirty', () => {
+  it('upserts a FULL marker with the given reason', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+
+    await markCollectionFullDirty(db, 'articles', 'bulk-import');
+
+    const c = dirty.calls.updateOne[0];
+    expect(c.filter).toEqual({ _id: 'articles::FULL' });
+    expect(c.update.$set).toMatchObject({
+      coll: 'articles',
+      full: true,
+      reason: 'bulk-import',
+    });
+    expect(c.options).toEqual({ upsert: true });
+  });
+
+  it('defaults reason to "bulk"', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+    await markCollectionFullDirty(db, 'articles');
+    expect(dirty.calls.updateOne[0].update.$set.reason).toBe('bulk');
+  });
+});
+
+describe('listDirtyForCollection', () => {
+  it('reports full=true and sorts partition numbers ascending', async () => {
+    const dirty = fakeColl({
+      findArray: [
+        { _id: 'a::p3', partition: 3 },
+        { _id: 'a::FULL', full: true },
+        { _id: 'a::p1', partition: 1 },
+        { _id: 'a::weird' }, // no partition / no full → ignored
+      ],
+    });
+    const db = fakeDb({ state_dirty: dirty });
+
+    const res = await listDirtyForCollection(db, 'a');
+    expect(res).toEqual({ full: true, partitions: [1, 3] });
+  });
+
+  it('reports full=false when no full marker present', async () => {
+    const dirty = fakeColl({
+      findArray: [{ _id: 'a::p2', partition: 2 }],
+    });
+    const db = fakeDb({ state_dirty: dirty });
+
+    const res = await listDirtyForCollection(db, 'a');
+    expect(res).toEqual({ full: false, partitions: [2] });
+  });
+});
+
+describe('clearDirtyForCollection', () => {
+  it('deletes all markers for the collection', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+    await clearDirtyForCollection(db, 'a');
+    expect(dirty.calls.deleteMany[0].filter).toEqual({ coll: 'a' });
+  });
+});
+
+describe('clearDirtyPartitions', () => {
+  it('returns early for empty array (no deleteMany)', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+    await clearDirtyPartitions(db, 'a', []);
+    expect(dirty.calls.deleteMany).toHaveLength(0);
+  });
+
+  it('returns early for undefined partitions', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+    await clearDirtyPartitions(db, 'a', undefined as any);
+    expect(dirty.calls.deleteMany).toHaveLength(0);
+  });
+
+  it('deletes the mapped partition ids', async () => {
+    const dirty = fakeColl();
+    const db = fakeDb({ state_dirty: dirty });
+    await clearDirtyPartitions(db, 'a', [2, 5]);
+    expect(dirty.calls.deleteMany[0].filter).toEqual({
+      _id: { $in: ['a::p2', 'a::p5'] },
     });
   });
 });

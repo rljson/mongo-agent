@@ -214,6 +214,30 @@ export async function markDirtyById(
 }
 
 /**
+ * Marks an ENTIRE collection dirty (forces a full rescan on the next
+ * checkpoint). Used by the agent's batched dirty tracker when a single flush
+ * window saw more changes than the per-id cap (a bulk import) — tracking
+ * millions of individual ids/partitions would be pointless and unbounded, so a
+ * single FULL marker is both cheaper and the correct outcome (the whole new
+ * data set has to be hashed once anyway).
+ * @param db - MongoDB database instance holding the state_dirty collection
+ * @param collName - Name of the collection to mark fully dirty
+ * @param reason - Label recorded on the FULL marker explaining why the full
+ *   rescan was forced (defaults to 'bulk')
+ */
+export async function markCollectionFullDirty(
+  db: Db,
+  collName: string,
+  reason = 'bulk',
+): Promise<void> {
+  await db.collection<DirtyFullDoc>('state_dirty').updateOne(
+    { _id: dirtyFullId(collName) },
+    { $set: { coll: collName, full: true, dirtyAt: new Date().toISOString(), reason } },
+    { upsert: true },
+  );
+}
+
+/**
  * Lists dirty partitions for a collection
  * @param db - MongoDB database instance
  * @param collName - Collection name

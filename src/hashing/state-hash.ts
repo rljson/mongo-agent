@@ -136,12 +136,25 @@ export async function computeStateCheckpoint(
   const nowIso = new Date().toISOString();
   const ts = Date.now();
 
-  // Pick collections deterministically
+  // Pick collections deterministically. Internal bookkeeping collections
+  // (sync_*, state_*, rljson_*, system.*) are NEVER part of the logical data
+  // state — they hold per-node, timing-dependent rows (sync_recentChanges
+  // edit markers, sync_conflicts, merkle/checkpoint scratch) that legitimately
+  // differ between two in-sync nodes. Skipping them by PREFIX (not by an
+  // explicit name list) is what keeps the state-hash convergent: a new
+  // bookkeeping collection like sync_recentChanges must not silently leak into
+  // the hash and make the two laptops look diverged when their real data is
+  // identical.
   const all = (await db.listCollections({}, { nameOnly: true }).toArray())
     .map((x: { name: string }) => x.name)
     .filter(
       (name: string) =>
-        name && !name.startsWith('system.') && !ignoredColls.has(name),
+        name &&
+        !name.startsWith('system.') &&
+        !name.startsWith('sync_') &&
+        !name.startsWith('state_') &&
+        !name.startsWith('rljson_') &&
+        !ignoredColls.has(name),
     )
     .sort((a: string, b: string) => a.localeCompare(b));
 
@@ -226,16 +239,18 @@ export async function computeStateCheckpoint(
           const filter: Record<string, unknown> = isLast
             ? { _id: { $gte: cached.minId } }
             : { _id: { $gte: cached.minId, $lte: cached.maxId } };
-          // Fast path: when every doc has __h (collection is backfilled),
-          // project only `{_id, __h}` so the cursor sends ~80 bytes/doc
-          // instead of the full document, and we skip the per-doc
-          // canonical-JSON walk inside docLeafHash.
+          // A DIRTY partition is read with FULL documents (no `{_id,__h}`
+          // projection): __h is no longer maintained on every write (it would
+          // cripple bulk imports), so freshly-changed docs may lack it. Reading
+          // full docs lets docLeafHash compute the integrity hash directly for
+          // those, identical to the stored __h for the ones that have it — so a
+          // dirty rescan is correct whether or not __h is present, and stays
+          // consistent with the cached (projection-built) roots of the clean
+          // partitions. A single partition is small (≤partitionSize), so the
+          // bounded batchSize keeps memory in check.
           const cursor = coll.find(filter, {
             sort: { _id: 1 },
-            batchSize: 5000,
-            ...(useHashProjection
-              ? { projection: { _id: 1, __h: 1 } }
-              : {}),
+            batchSize: 500,
           });
 
           const partLines: string[] = [];
@@ -307,7 +322,9 @@ export async function computeStateCheckpoint(
         {},
         {
           sort: { _id: 1 },
-          batchSize: 5000,
+          // See the incremental branch above — 5000 OOMs on prod-sized
+          // collections, 500 keeps the driver-side batch buffer bounded.
+          batchSize: 500,
           ...(useHashProjection ? { projection: { _id: 1, __h: 1 } } : {}),
         },
       );
@@ -377,6 +394,16 @@ export async function computeStateCheckpoint(
       collections[collName] = { root: collRoot, partitions: partIdx };
 
       dbPieces.push(`${collName}:${collRoot}`);
+
+      // A full rebuild just authoritatively recomputed EVERY partition, so any
+      // outstanding dirty markers (incl. a `FULL` marker left from before the
+      // cache existed) are stale — clear them, else the next incremental run
+      // would needlessly rescan. Also drop cached partitions beyond the new
+      // count (collection shrank) so they don't leak into the next run.
+      await clearDirtyForCollection(db, collName);
+      await db
+        .collection<MerklePartition>('state_merkle')
+        .deleteMany({ coll: collName, idx: { $gte: partIdx } });
     }
   }
 

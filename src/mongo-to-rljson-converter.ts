@@ -11,88 +11,61 @@ import type { ColumnCfg, ComponentsTable, TableCfg } from '@rljson/rljson';
 
 /**
  * MongoDB to RLJSON Component Converter
- * Converts MongoDB collections to RLJSON ComponentsTable format
+ *
+ * Agnostic mode: Mongo docs are passed through as-is into the ComponentsTable
+ * `_data` rows; only an `_hash` field is appended. We DO NOT do schema-
+ * discovery / type-cast / per-field re-shape anymore. Reasoning:
+ *
+ *   - The previous "discover-then-cast" pipeline mapped BSON Date → number
+ *     etc. so the receiving node ended up with a BSON Number where the
+ *     sender had a BSON Date — same value, different BSON type, different
+ *     state-merkle-hash → phantom conflicts + dbRoot drift.
+ *   - Staying agnostic means whatever a user puts into Mongo travels
+ *     untouched. The downside is BSON-specific types (Date, ObjectId, …)
+ *     still round-trip through plain JSON, so they re-emerge on the other
+ *     side as their JSON representation (ISO string, hex string). If you
+ *     need true BSON-type preservation across the wire, that's a separate
+ *     change to switch the blob serialiser to EJSON.
+ *
+ * The TableCfg returned by `discoverSchema` is kept for API compatibility
+ * but is intentionally minimal — downstream code that iterates over it for
+ * type casting will be a no-op.
  */
 export class MongoToRljsonConverter {
   /**
-   * Discovers schema from MongoDB collection by sampling documents
-   * @param collection - MongoDB collection
-   * @param sampleSize - Number of documents to sample (default: 100)
-   * @returns TableCfg with discovered schema
+   * Discovers schema from a MongoDB collection.
+   *
+   * In agnostic mode this no longer inspects documents; it returns a minimal
+   * `TableCfg` carrying only the `_hash` column, kept for API compatibility.
+   * @param collection - The MongoDB collection whose schema (table key) is read.
+   * @param _sampleSize - Retained for API compatibility; ignored in agnostic
+   *   mode where documents are no longer sampled to infer field types.
+   * @returns A minimal TableCfg with just the `_hash` column.
    */
   async discoverSchema(
     collection: Collection,
-    sampleSize = 100,
+    _sampleSize = 100,
   ): Promise<TableCfg> {
-    // Sample documents to infer schema
-    const docs = await collection.find().limit(sampleSize).toArray();
-
-    if (docs.length === 0) {
-      // Empty collection - create minimal schema
-      return hip<TableCfg>({
-        key: collection.collectionName,
-        type: 'components',
-        columns: [
-          {
-            key: '_hash',
-            type: 'string',
-            titleLong: 'Hash',
-            titleShort: 'Hash',
-          },
-        ],
-        isHead: false,
-        isRoot: false,
-        isShared: true,
-        _hash: '',
-      });
-    }
-
-    // Collect all unique keys and their types
-    const fieldTypes = new Map<string, Set<string>>();
-
-    for (const doc of docs) {
-      this._collectFieldTypes(doc, fieldTypes);
-    }
-
-    // Convert to column definitions
-    const columns: ColumnCfg[] = [
-      {
-        key: '_hash',
-        type: 'string',
-        titleLong: 'Hash',
-        titleShort: 'Hash',
-      },
-    ];
-
-    // Sort keys for consistent schema
-    const sortedKeys = Array.from(fieldTypes.keys()).sort();
-
-    for (const key of sortedKeys) {
-      if (key === '_hash') continue; // Already added
-
-      const types = fieldTypes.get(key)!;
-      const columnType = this._inferColumnType(types);
-
-      columns.push({
-        key,
-        type: columnType as any, // Type assertion for RLJSON JsonValueType
-        titleLong: this._formatTitle(key),
-        titleShort: this._formatTitleShort(key),
-      });
-    }
-
-    // Create and hash TableCfg
-    const tableCfg = hip<TableCfg>({
+    // Agnostic mode: we no longer inspect documents to infer per-field types.
+    // Returns a minimal TableCfg with just the `_hash` column. The whole
+    // doc lives in the ComponentsTable `_data` row unmodified.
+    void _sampleSize;
+    return hip<TableCfg>({
       key: collection.collectionName,
       type: 'components',
-      columns,
+      columns: [
+        {
+          key: '_hash',
+          type: 'string',
+          titleLong: 'Hash',
+          titleShort: 'Hash',
+        },
+      ],
       isHead: false,
       isRoot: false,
       isShared: true,
       _hash: '',
     });
-
-    return tableCfg;
   }
 
   /**
@@ -110,7 +83,21 @@ export class MongoToRljsonConverter {
     const query = limit ? collection.find().limit(limit) : collection.find();
     const docs = await query.toArray();
 
-    const data = docs.map((doc) => this.convertDocument(doc, tableCfg));
+    // Convert in chunks with setImmediate yields between them so the event
+    // loop can answer HTTP requests / process change-stream events while
+    // a big collection (10k+ docs) is being serialised. Without this the
+    // initial scan on startup froze the UI for several seconds.
+    const data: any[] = new Array(docs.length);
+    const CHUNK = 500;
+    for (let i = 0; i < docs.length; i += CHUNK) {
+      const end = Math.min(i + CHUNK, docs.length);
+      for (let j = i; j < end; j++) {
+        data[j] = this.convertDocument(docs[j], tableCfg);
+      }
+      if (end < docs.length) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
 
     const componentsTable = hip<ComponentsTable<any>>({
       _tableCfg: tableCfg._hash as string,
@@ -122,175 +109,136 @@ export class MongoToRljsonConverter {
     return componentsTable;
   }
 
+  /* eslint-disable tsdoc/syntax -- jsdoc/require-yields mandates an @yields tag
+     with a {type}, but the tsdoc parser has no @yields tag defined and rejects
+     the braces; the two configured plugins conflict on this generator. */
   /**
-   * Converts single MongoDB document to RLJSON component row
-   * @param doc - MongoDB document
-   * @param tableCfg - Table configuration
-   * @returns Hashed row object
+   * Cursor-streaming variant of `convertCollection`. Yields chunks of at most
+   * `chunkSize` docs converted to ComponentsTables. The whole point is to
+   * AVOID `cursor.toArray()` (which holds N×~5 KB docs in V8 at once and
+   * OOMs on a 1.4 M-doc `cd_articles`-class collection).
+   *
+   * Caller iterates with `for await`; per-chunk memory is bounded by
+   * `chunkSize` × avg-doc-size. The cursor's own internal buffer is the
+   * driver's `batchSize` (kept small at 500).
+   *
+   * Each emitted ComponentsTable is independently hashable and small enough
+   * to JSON.stringify on a 4 GB heap.
+   * @param collection - The MongoDB collection streamed via a sorted, batched
+   *   cursor (`_id` ascending, driver `batchSize` 500) instead of `toArray()`.
+   * @param tableCfg - Table configuration whose `_hash` identifies the config
+   *   referenced by every emitted ComponentsTable.
+   * @param chunkSize - Maximum number of converted documents per emitted
+   *   ComponentsTable; bounds per-chunk heap usage.
+   * @yields {ComponentsTable} A ComponentsTable holding up to `chunkSize`
+   *   converted documents.
    */
-  convertDocument(doc: Document, tableCfg: TableCfg): any {
-    const row: any = { _hash: '' };
-
-    // Convert each field according to schema
-    for (const column of tableCfg.columns) {
-      if (column.key === '_hash') continue;
-
-      const value = doc[column.key];
-      row[column.key] = this._convertValue(value, column.type);
-    }
-
-    // Hash the row
-    return hsh(row);
-  }
-
-  /**
-   * Collects field types from a document (recursive for nested objects)
-   * @param doc - Document to analyze
-   * @param fieldTypes - Map to store field types
-   * @param prefix - Field name prefix for nested objects
-   */
-  private _collectFieldTypes(
-    doc: any,
-    fieldTypes: Map<string, Set<string>>,
-    prefix = '',
-  ): void {
-    for (const key in doc) {
-      if (!Object.prototype.hasOwnProperty.call(doc, key)) continue;
-
-      const fullKey = prefix ? `${prefix}.${key}` : key;
-      const value = doc[key];
-      const valueType = this._getValueType(value);
-
-      if (!fieldTypes.has(fullKey)) {
-        fieldTypes.set(fullKey, new Set());
+  /* eslint-enable tsdoc/syntax */
+  async *convertCollectionStreaming(
+    collection: Collection,
+    tableCfg: TableCfg,
+    chunkSize: number,
+  ): AsyncGenerator<ComponentsTable<any>, void, void> {
+    const cursor = collection.find({}, { sort: { _id: 1 }, batchSize: 500 });
+    let buf: any[] = [];
+    try {
+      while (await cursor.hasNext()) {
+        const doc = await cursor.next();
+        if (!doc) break;
+        buf.push(this.convertDocument(doc, tableCfg));
+        if (buf.length >= chunkSize) {
+          const out = hip<ComponentsTable<any>>({
+            _tableCfg: tableCfg._hash as string,
+            _type: 'components',
+            _data: buf,
+            _hash: '',
+          });
+          buf = [];
+          // Yield to the event loop so the test API and change-stream
+          // listener can run between chunks.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yield out;
+        }
       }
-      fieldTypes.get(fullKey)!.add(valueType);
-
-      // For nested objects, recurse (but not for arrays)
-      if (valueType === 'object' && value !== null && !Array.isArray(value)) {
-        this._collectFieldTypes(value, fieldTypes, fullKey);
+      if (buf.length > 0) {
+        yield hip<ComponentsTable<any>>({
+          _tableCfg: tableCfg._hash as string,
+          _type: 'components',
+          _data: buf,
+          _hash: '',
+        });
       }
+    } finally {
+      await cursor.close().catch(() => {});
     }
   }
 
   /**
-   * Gets the type of a value
-   * @param value - Value to check
-   * @returns Type string
+   * Agnostic conversion: the row IS the Mongo doc. We only attach a
+   * deterministic `_hash` so downstream rljson code (which expects rows
+   * to be hashed) keeps working. `tableCfg` is intentionally ignored.
+   *
+   * Implementation note: `hsh()` from `@rljson/hash` walks the value with a
+   * strict JSON-only allowlist — it throws `"Unsupported type: object"` on
+   * BSON-specific types (ObjectId, Date, Decimal128, Long, Buffer, …). To
+   * stay agnostic AND keep `hsh()` happy we do a single JSON-roundtrip
+   * before hashing:
+   *
+   *   - `ObjectId.toJSON()` → hex string
+   *   - `Date.toJSON()`     → ISO string
+   *   - `Buffer.toJSON()`   → `{ type: 'Buffer', data: [...] }`
+   *   - any other class with a `toJSON()` collapses to plain JSON
+   *
+   * This is a lossy normalization (types collapse to their JSON shape), but
+   * it is the same on both nodes, so the same payload travels untouched
+   * and the row-hash is deterministic. If you ever need true BSON-type
+   * preservation across the wire, switch the blob serialiser to EJSON.
+   * @param doc - The raw MongoDB document; its existing `_hash` is stripped and
+   *   the rest is JSON-roundtripped before a fresh deterministic hash is added.
+   * @param _tableCfg - Retained for API compatibility; intentionally ignored
+   *   since agnostic conversion does not reshape rows per column config.
+   * @returns The document as a plain JSON object with a deterministic `_hash`.
    */
-  private _getValueType(value: any): string {
-    if (value === null || value === undefined) return 'null';
-    if (Array.isArray(value)) return 'array';
-    if (value instanceof Date) return 'date';
-    if (typeof value === 'object' && value._bsontype === 'ObjectId') {
-      return 'objectid';
-    }
-    if (typeof value === 'object') return 'object';
-    if (typeof value === 'number') {
-      return Number.isInteger(value) ? 'number' : 'number';
-    }
-    if (typeof value === 'boolean') return 'boolean';
-    if (typeof value === 'string') return 'string';
-    return 'unknown';
+  convertDocument(doc: Document, _tableCfg: TableCfg): any {
+    void _tableCfg;
+    const { _hash: _existing, ...rest } = doc as Record<string, unknown>;
+    void _existing;
+    // JSON-roundtrip: forces every BSON-shape into its toJSON() form so
+    // @rljson/hash can walk it without "Unsupported type: object".
+    const plain = JSON.parse(JSON.stringify(rest));
+    return hsh({ ...plain, _hash: '' });
   }
 
   /**
-   * Infers RLJSON column type from MongoDB value types
-   * @param types - Set of obser (JsonValueType)
+   * Merges two TableCfgs into a new one containing the union of columns.
+   * Columns are deduplicated by `key`; the existing column type wins (to
+   * keep historical row hashes stable). Caller is responsible for hashing
+   * the result via `hip()` if needed.
+   * @param existing - The current TableCfg; its column types win on key
+   *   collisions to keep historical row hashes stable.
+   * @param incoming - The TableCfg whose columns are added only for keys not
+   *   already present in `existing`.
+   * @returns A new TableCfg containing the union of columns (`_hash` first,
+   *   the rest sorted by key).
    */
-  private _inferColumnType(types: Set<string>): string {
-    // Remove null from consideration
-    const nonNullTypes = new Set(Array.from(types).filter((t) => t !== 'null'));
-
-    if (nonNullTypes.size === 0) return 'string'; // All null, default to string
-    if (nonNullTypes.size === 1) {
-      const type = Array.from(nonNullTypes)[0];
-      switch (type) {
-        case 'string':
-          return 'string';
-        case 'number':
-          return 'number';
-        case 'boolean':
-          return 'boolean';
-        case 'date':
-          return 'number'; // Store as timestamp
-        case 'objectid':
-          return 'string'; // Convert ObjectId to string
-        case 'array':
-          return 'jsonArray'; // Arrays stored as jsonArray
-        case 'object':
-          return 'json'; // Nested objects stored as json
-          return 'json'; // Nested objects stored as JSON
-        default:
-          return 'string';
-      }
+  mergeTableCfg(existing: TableCfg, incoming: TableCfg): TableCfg {
+    const byKey = new Map<string, ColumnCfg>();
+    for (const c of existing.columns) byKey.set(c.key, c);
+    for (const c of incoming.columns) {
+      if (!byKey.has(c.key)) byKey.set(c.key, c);
     }
-
-    // Mixed types - use json
-    return 'json';
+    const columns = Array.from(byKey.values()).sort((a, b) =>
+      a.key === '_hash' ? -1 : b.key === '_hash' ? 1 : a.key.localeCompare(b.key),
+    );
+    return hip<TableCfg>({
+      key: existing.key,
+      type: 'components',
+      columns,
+      isHead: existing.isHead,
+      isRoot: existing.isRoot,
+      isShared: existing.isShared,
+      _hash: '',
+    });
   }
 
-  /**
-   * Converts a value to the appropriate RLJSON type
-   * @param value - Value to convert
-   * @param columnType - Target column type
-   * @returns Converted value
-   */
-  private _convertValue(value: any, columnType: string): any {
-    if (value === null || value === undefined) return null;
-
-    switch (columnType) {
-      case 'string':
-        if (typeof value === 'object' && value._bsontype === 'ObjectId') {
-          return value.toString();
-        }
-        return String(value);
-
-      case 'number':
-        if (value instanceof Date) {
-          return value.getTime();
-        }
-        return Number(value);
-
-      case 'boolean':
-        return Boolean(value);
-
-      case 'json':
-        if (typeof value === 'object' && value._bsontype === 'ObjectId') {
-          return value.toString();
-        }
-        if (value instanceof Date) {
-          return value.toISOString();
-        }
-        return value;
-
-      default:
-        return value;
-    }
-  }
-
-  /**
-   * Formats a field key into a human-readable title
-   * @param key - Field key
-   * @returns Formatted title
-   */
-  private _formatTitle(key: string): string {
-    // Split on dots and underscores, capitalize each word
-    return key
-      .split(/[._]/)
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
-  }
-
-  /**
-   * Formats a field key into a short title
-   * @param key - Field key
-   * @returns Short title
-   */
-  private _formatTitleShort(key: string): string {
-    // Use last part after dot/underscore for short title
-    const parts = key.split(/[._]/);
-    const lastPart = parts[parts.length - 1];
-    return lastPart.charAt(0).toUpperCase() + lastPart.slice(1);
-  }
 }

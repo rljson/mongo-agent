@@ -1,335 +1,262 @@
 // @license
-// Copyright (c) 2025 Rljson
-//
-// Use of this source code is governed by terms that can be
-// found in the LICENSE file in the root of this package.
+// Copyright (c) 2025 CARAT Gesellschaft für Organisation
+// und Softwareentwicklung mbH. All Rights Reserved.
 
-import { MongoClient, ObjectId } from 'mongodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { MongoToRljsonConverter } from '../src/mongo-to-rljson-converter';
+import type { TableCfg } from '@rljson/rljson';
 
-describe('MongoToRljsonConverter', () => {
-  let client: MongoClient;
-  let converter: MongoToRljsonConverter;
+import { MongoToRljsonConverter } from '../src/mongo-to-rljson-converter.ts';
 
-  beforeAll(async () => {
-    const mongoUri =
-      process.env.MONGO_URI ||
-      'mongodb://localhost:27017/?directConnection=true';
-    client = new MongoClient(mongoUri);
-    await client.connect();
-    converter = new MongoToRljsonConverter();
-  }, 30000); // 30 second timeout
+/**
+ * Coverage spec for MongoToRljsonConverter. No live MongoDB: we feed the
+ * converter lightweight fake `Collection` objects whose `find()` returns a
+ * canned cursor. All four metrics on the source file are exercised with real
+ * assertions (no behavioural change to the source).
+ */
 
-  afterAll(async () => {
-    await client.close();
+// A minimal TableCfg the converter only reads `_hash`/`columns`/flags off of.
+const makeCfg = (overrides: Partial<TableCfg> = {}): TableCfg =>
+  ({
+    key: 'things',
+    type: 'components',
+    columns: [{ key: '_hash', type: 'string', titleLong: 'Hash', titleShort: 'Hash' }],
+    isHead: false,
+    isRoot: false,
+    isShared: true,
+    _hash: 'cfg-hash',
+    ...overrides,
+  } as TableCfg);
+
+// Fake cursor for the `find().limit().toArray()` (convertCollection) path.
+const makeArrayCollection = (docs: any[], collectionName = 'things') => {
+  let limited: number | undefined;
+  const cursor = {
+    limit(n: number) {
+      limited = n;
+      return cursor;
+    },
+    async toArray() {
+      return limited === undefined ? docs : docs.slice(0, limited);
+    },
+  };
+  return {
+    collectionName,
+    find: vi.fn(() => cursor),
+  } as any;
+};
+
+// Fake streaming cursor for convertCollectionStreaming (hasNext/next/close).
+const makeStreamCollection = (docs: any[], opts: { closeThrows?: boolean } = {}) => {
+  let i = 0;
+  let closed = false;
+  const cursor = {
+    async hasNext() {
+      return i < docs.length;
+    },
+    async next() {
+      return docs[i++];
+    },
+    async close() {
+      closed = true;
+      if (opts.closeThrows) throw new Error('close failed');
+    },
+    get _closed() {
+      return closed;
+    },
+  };
+  return {
+    collection: {
+      collectionName: 'things',
+      find: vi.fn(() => cursor),
+    } as any,
+    cursor,
+  };
+};
+
+describe('MongoToRljsonConverter.discoverSchema', () => {
+  it('returns a minimal hashed TableCfg keyed by the collection name', async () => {
+    const conv = new MongoToRljsonConverter();
+    const cfg = await conv.discoverSchema({ collectionName: 'widgets' } as any, 7);
+    expect(cfg.key).toBe('widgets');
+    expect(cfg.type).toBe('components');
+    expect(cfg.columns).toHaveLength(1);
+    expect(cfg.columns[0].key).toBe('_hash');
+    expect(cfg.isShared).toBe(true);
+    expect(typeof cfg._hash).toBe('string');
+    expect(cfg._hash).not.toBe(''); // hip() filled it
+  });
+});
+
+describe('MongoToRljsonConverter.convertCollection', () => {
+  it('converts all docs without a limit (single chunk, no yield)', async () => {
+    const conv = new MongoToRljsonConverter();
+    const coll = makeArrayCollection([{ _id: 'a', n: 1 }, { _id: 'b', n: 2 }]);
+    const table = await conv.convertCollection(coll, makeCfg());
+    expect(coll.find).toHaveBeenCalledTimes(1);
+    expect(table._type).toBe('components');
+    expect(table._tableCfg).toBe('cfg-hash');
+    expect(table._data).toHaveLength(2);
+    expect(table._data[0]._id).toBe('a');
+    expect(typeof table._data[0]._hash).toBe('string');
+    expect(table._hash).not.toBe('');
   });
 
-  describe('discoverSchema', () => {
-    it('should discover schema from simple collection', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('users');
-
-      // Clean and insert test data
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: 'user1', name: 'Alice', age: 30, email: 'alice@example.com' },
-        { _id: 'user2', name: 'Bob', age: 25, email: 'bob@example.com' },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-
-      expect(tableCfg.key).toBe('users');
-      expect(tableCfg.type).toBe('components');
-      expect(tableCfg._hash).toBeTruthy();
-      expect(tableCfg.columns).toBeDefined();
-
-      // Should have _hash, _id, name, age, email columns
-      const columnKeys = tableCfg.columns.map((c) => c.key);
-      expect(columnKeys).toContain('_hash');
-      expect(columnKeys).toContain('_id');
-      expect(columnKeys).toContain('name');
-      expect(columnKeys).toContain('age');
-      expect(columnKeys).toContain('email');
-
-      // Check column types
-      const nameCol = tableCfg.columns.find((c) => c.key === 'name');
-      expect(nameCol?.type).toBe('string');
-
-      const ageCol = tableCfg.columns.find((c) => c.key === 'age');
-      expect(ageCol?.type).toBe('number');
-    });
-
-    it('should handle ObjectId fields', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('posts');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: new ObjectId(), title: 'Post 1', authorId: new ObjectId() },
-        { _id: new ObjectId(), title: 'Post 2', authorId: new ObjectId() },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-
-      const idCol = tableCfg.columns.find((c) => c.key === '_id');
-      expect(idCol?.type).toBe('string'); // ObjectId converted to string
-
-      const authorIdCol = tableCfg.columns.find((c) => c.key === 'authorId');
-      expect(authorIdCol?.type).toBe('string');
-    });
-
-    it('should handle Date fields', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('events');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: 'event1', name: 'Event 1', date: new Date('2026-01-01') },
-        { _id: 'event2', name: 'Event 2', date: new Date('2026-02-01') },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-
-      const dateCol = tableCfg.columns.find((c) => c.key === 'date');
-      expect(dateCol?.type).toBe('number'); // Dates stored as timestamps
-    });
-
-    it('should handle nested objects', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('profiles');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        {
-          _id: 'profile1',
-          name: 'Alice',
-          address: { city: 'NYC', zip: '10001' },
-        },
-        {
-          _id: 'profile2',
-          name: 'Bob',
-          address: { city: 'LA', zip: '90001' },
-        },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-
-      // Nested objects should be flattened with dot notation
-      const cityCol = tableCfg.columns.find((c) => c.key === 'address.city');
-      expect(cityCol).toBeDefined();
-      expect(cityCol?.type).toBe('string');
-
-      const zipCol = tableCfg.columns.find((c) => c.key === 'address.zip');
-      expect(zipCol).toBeDefined();
-    });
-
-    it('should handle arrays as json type', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('tags');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: 'item1', name: 'Item 1', tags: ['tag1', 'tag2'] },
-        { _id: 'item2', name: 'Item 2', tags: ['tag3'] },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-
-      const tagsCol = tableCfg.columns.find((c) => c.key === 'tags');
-      expect(tagsCol?.type).toBe('jsonArray'); // Arrays stored as jsonArray
-    });
-
-    it('should handle empty collection', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('empty');
-
-      await collection.deleteMany({});
-
-      const tableCfg = await converter.discoverSchema(collection);
-
-      expect(tableCfg.key).toBe('empty');
-      expect(tableCfg.columns).toHaveLength(1); // Only _hash column
-      expect(tableCfg.columns[0].key).toBe('_hash');
-    });
+  it('applies the limit via cursor.limit()', async () => {
+    const conv = new MongoToRljsonConverter();
+    const coll = makeArrayCollection([{ _id: 'a' }, { _id: 'b' }, { _id: 'c' }]);
+    const table = await conv.convertCollection(coll, makeCfg(), 2);
+    expect(table._data).toHaveLength(2);
+    expect(table._data.map((d: any) => d._id)).toEqual(['a', 'b']);
   });
 
-  describe('convertDocument', () => {
-    it('should convert document with all field types', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('mixed');
+  it('chunks large collections and yields to the event loop between chunks', async () => {
+    const conv = new MongoToRljsonConverter();
+    // 1001 docs forces the CHUNK=500 loop to run >1 iteration and hit the
+    // `end < docs.length` setImmediate yield branch (twice).
+    const docs = Array.from({ length: 1001 }, (_, k) => ({ _id: `x${k}`, n: k }));
+    const coll = makeArrayCollection(docs);
+    const setImmediateSpy = vi.spyOn(global, 'setImmediate');
+    try {
+      const table = await conv.convertCollection(coll, makeCfg());
+      expect(table._data).toHaveLength(1001);
+      expect(table._data[1000]._id).toBe('x1000');
+      // 1001 docs => chunks at 0, 500, 1000; yields after first two only.
+      expect(setImmediateSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      setImmediateSpy.mockRestore();
+    }
+  });
+});
 
-      await collection.deleteMany({});
-      await collection.insertOne({
-        _id: 'doc1',
-        name: 'Test',
-        count: 42,
-        active: true,
-        createdAt: new Date('2026-01-01'),
-        objectId: new ObjectId(),
-        tags: ['a', 'b'],
-        meta: { key: 'value' },
-      });
-
-      const tableCfg = await converter.discoverSchema(collection);
-      const doc = await collection.findOne({ _id: 'doc1' });
-
-      const converted = converter.convertDocument(doc!, tableCfg);
-
-      expect(converted._hash).toBeTruthy();
-      expect(converted._id).toBe('doc1');
-      expect(converted.name).toBe('Test');
-      expect(converted.count).toBe(42);
-      expect(converted.active).toBe(true);
-      expect(typeof converted.createdAt).toBe('number'); // Converted to timestamp
-      expect(typeof converted.objectId).toBe('string'); // Converted to string
-      expect(Array.isArray(converted.tags)).toBe(true);
-      expect(typeof converted.meta).toBe('object');
-    });
-
-    it('should handle null values', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('nulls');
-
-      await collection.deleteMany({});
-      await collection.insertOne({
-        _id: 'doc1',
-        name: 'Test',
-        optional: null,
-      });
-
-      const tableCfg = await converter.discoverSchema(collection);
-      const doc = await collection.findOne({ _id: 'doc1' });
-
-      const converted = converter.convertDocument(doc!, tableCfg);
-
-      expect(converted.optional).toBeNull();
-    });
+describe('MongoToRljsonConverter.convertCollectionStreaming', () => {
+  it('yields a chunk once the buffer fills and a final partial chunk', async () => {
+    const conv = new MongoToRljsonConverter();
+    const docs = Array.from({ length: 5 }, (_, k) => ({ _id: `d${k}` }));
+    const { collection, cursor } = makeStreamCollection(docs);
+    const out: any[] = [];
+    for await (const t of conv.convertCollectionStreaming(collection, makeCfg(), 2)) {
+      out.push(t);
+    }
+    // chunkSize 2 over 5 docs => [2][2] full chunks + [1] remainder.
+    expect(out).toHaveLength(3);
+    expect(out[0]._data).toHaveLength(2);
+    expect(out[1]._data).toHaveLength(2);
+    expect(out[2]._data).toHaveLength(1);
+    expect(out[0]._type).toBe('components');
+    expect(out[0]._tableCfg).toBe('cfg-hash');
+    expect(cursor._closed).toBe(true); // finally ran
   });
 
-  describe('convertCollection', () => {
-    it('should convert entire collection to ComponentsTable', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('products');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: 'p1', name: 'Product 1', price: 10.99 },
-        { _id: 'p2', name: 'Product 2', price: 20.99 },
-        { _id: 'p3', name: 'Product 3', price: 30.99 },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-      const componentsTable = await converter.convertCollection(
-        collection,
-        tableCfg,
-      );
-
-      expect(componentsTable._type).toBe('components');
-      expect(componentsTable._tableCfg).toBe(tableCfg._hash);
-      expect(componentsTable._hash).toBeTruthy();
-      expect(componentsTable._data).toHaveLength(3);
-
-      // Each row should be hashed
-      for (const row of componentsTable._data) {
-        expect(row._hash).toBeTruthy();
-        expect(row._id).toBeTruthy();
-        expect(row.name).toBeTruthy();
-        expect(typeof row.price).toBe('number');
-      }
-    });
-
-    it('should respect limit parameter', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('limited');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: '1', value: 1 },
-        { _id: '2', value: 2 },
-        { _id: '3', value: 3 },
-        { _id: '4', value: 4 },
-        { _id: '5', value: 5 },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-      const componentsTable = await converter.convertCollection(
-        collection,
-        tableCfg,
-        3, // Limit to 3 documents
-      );
-
-      expect(componentsTable._data).toHaveLength(3);
-    });
-
-    it('should produce valid ComponentsTable structure', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('orders');
-
-      await collection.deleteMany({});
-      await collection.insertMany([
-        { _id: 'order1', total: 100, status: 'pending' },
-        { _id: 'order2', total: 200, status: 'completed' },
-      ]);
-
-      const tableCfg = await converter.discoverSchema(collection);
-      const componentsTable = await converter.convertCollection(
-        collection,
-        tableCfg,
-      );
-
-      // Verify structure matches ComponentsTable interface
-      expect(componentsTable).toHaveProperty('_tableCfg');
-      expect(componentsTable).toHaveProperty('_type');
-      expect(componentsTable).toHaveProperty('_data');
-      expect(componentsTable).toHaveProperty('_hash');
-
-      expect(typeof componentsTable._tableCfg).toBe('string');
-      expect(componentsTable._type).toBe('components');
-      expect(Array.isArray(componentsTable._data)).toBe(true);
-      expect(typeof componentsTable._hash).toBe('string');
-    });
+  it('emits nothing for an empty collection but still closes the cursor', async () => {
+    const conv = new MongoToRljsonConverter();
+    const { collection, cursor } = makeStreamCollection([]);
+    const out: any[] = [];
+    for await (const t of conv.convertCollectionStreaming(collection, makeCfg(), 3)) {
+      out.push(t);
+    }
+    expect(out).toHaveLength(0);
+    expect(cursor._closed).toBe(true);
   });
 
-  describe('integration test with real MongoDB data', () => {
-    it('should handle complex real-world document structure', async () => {
-      const db = client.db('test_converter');
-      const collection = db.collection('articles');
+  it('breaks when next() returns a falsy doc', async () => {
+    const conv = new MongoToRljsonConverter();
+    // hasNext() is true but next() yields null -> the `if (!doc) break` path.
+    const cursor = {
+      _calls: 0,
+      async hasNext() {
+        return true;
+      },
+      async next() {
+        return null;
+      },
+      _closed: false,
+      async close() {
+        (this as any)._closed = true;
+      },
+    };
+    const collection = { collectionName: 'things', find: vi.fn(() => cursor) } as any;
+    const out: any[] = [];
+    for await (const t of conv.convertCollectionStreaming(collection, makeCfg(), 2)) {
+      out.push(t);
+    }
+    expect(out).toHaveLength(0);
+    expect(cursor._closed).toBe(true);
+  });
 
-      await collection.deleteMany({});
-      await collection.insertOne({
-        _id: new ObjectId(),
-        title: 'Sample Article',
-        author: {
-          name: 'John Doe',
-          email: 'john@example.com',
-        },
-        tags: ['tech', 'nodejs', 'mongodb'],
-        metadata: {
-          views: 1000,
-          likes: 50,
-        },
-        publishedAt: new Date('2026-03-20'),
-        draft: false,
-      });
+  it('swallows an error thrown by cursor.close() in the finally block', async () => {
+    const conv = new MongoToRljsonConverter();
+    const { collection } = makeStreamCollection([{ _id: 'a' }], { closeThrows: true });
+    const out: any[] = [];
+    // The .catch(() => {}) on cursor.close() must absorb the throw.
+    await expect(
+      (async () => {
+        for await (const t of conv.convertCollectionStreaming(collection, makeCfg(), 5)) {
+          out.push(t);
+        }
+      })(),
+    ).resolves.toBeUndefined();
+    expect(out).toHaveLength(1);
+  });
+});
 
-      const tableCfg = await converter.discoverSchema(collection);
-      const componentsTable = await converter.convertCollection(
-        collection,
-        tableCfg,
-      );
+describe('MongoToRljsonConverter.convertDocument', () => {
+  it('strips an existing `_hash`, re-hashes, and is order-independent', () => {
+    const conv = new MongoToRljsonConverter();
+    const a = conv.convertDocument({ _id: 'x', a: 1, b: 2, _hash: 'stale' } as any, makeCfg());
+    const b = conv.convertDocument({ b: 2, a: 1, _id: 'x' } as any, makeCfg());
+    expect(a._hash).toBe(b._hash); // stale hash ignored, key order ignored
+    expect(a._id).toBe('x');
+    expect(typeof a._hash).toBe('string');
+  });
 
-      expect(componentsTable._data).toHaveLength(1);
+  it('JSON-roundtrips BSON-ish values (toJSON) so @rljson/hash can walk them', () => {
+    const conv = new MongoToRljsonConverter();
+    const objectIdLike = { toJSON: () => 'deadbeefdeadbeefdeadbeef' };
+    const date = new Date('2026-05-15T10:00:00.000Z');
+    const row = conv.convertDocument({ _id: objectIdLike, t: date } as any, makeCfg());
+    expect(row._id).toBe('deadbeefdeadbeefdeadbeef'); // collapsed to JSON form
+    expect(row.t).toBe('2026-05-15T10:00:00.000Z'); // Date -> ISO string
+    expect(typeof row._hash).toBe('string');
+  });
+});
 
-      const row = componentsTable._data[0];
-      expect(row._hash).toBeTruthy();
-      expect(row.title).toBe('Sample Article');
-      expect(row['author.name']).toBe('John Doe');
-      expect(row['author.email']).toBe('john@example.com');
-      expect(row.tags).toEqual(['tech', 'nodejs', 'mongodb']);
-      expect(typeof row.publishedAt).toBe('number');
-      expect(row.draft).toBe(false);
+describe('MongoToRljsonConverter.mergeTableCfg', () => {
+  const col = (key: string) =>
+    ({ key, type: 'string', titleLong: key, titleShort: key } as any);
+
+  it('unions columns, keeps existing on key clash, and sorts with _hash first', () => {
+    const conv = new MongoToRljsonConverter();
+    const existing = makeCfg({
+      columns: [col('_hash'), { ...col('name'), type: 'string', _existing: true } as any],
+      isHead: true,
+      isRoot: false,
+      isShared: true,
     });
+    const incoming = makeCfg({
+      // `name` clashes (existing wins); `age` and `addr` are new.
+      columns: [{ ...col('name'), type: 'number' } as any, col('age'), col('addr')],
+    });
+    const merged = conv.mergeTableCfg(existing, incoming);
+    const keys = merged.columns.map((c) => c.key);
+    expect(keys[0]).toBe('_hash'); // _hash sorts first
+    expect(keys).toEqual(['_hash', 'addr', 'age', 'name']); // rest alphabetical
+    // existing `name` column type wins over incoming's number type.
+    const name = merged.columns.find((c) => c.key === 'name')!;
+    expect(name.type).toBe('string');
+    // flags carried over from `existing`.
+    expect(merged.isHead).toBe(true);
+    expect(merged.key).toBe('things');
+    expect(merged._hash).not.toBe('');
+  });
+
+  it('handles the b._hash branch of the sort comparator', () => {
+    const conv = new MongoToRljsonConverter();
+    // Put a non-_hash column first and _hash later in `existing` so the
+    // comparator must return +1 for the `b.key === '_hash'` case.
+    const existing = makeCfg({ columns: [col('zeta'), col('_hash')] });
+    const incoming = makeCfg({ columns: [] as any });
+    const merged = conv.mergeTableCfg(existing, incoming);
+    expect(merged.columns.map((c) => c.key)).toEqual(['_hash', 'zeta']);
   });
 });
