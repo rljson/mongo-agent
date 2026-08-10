@@ -154,6 +154,10 @@ async function main() {
       'sync_state', // ComponentsTable metadata
       'sync_resume', // Resume tokens
       'sync_local', // Local sync state
+      'sync_ops', // Per-node op-log — legitimately differs per node (each node
+      //             captured its OWN offline ops); the convergence check must
+      //             cover USER data only, not the local op-log, else identical
+      //             merged users still hash differently.
       'state_merkle', // Merkle tree cache
       'state_dirty', // Dirty partition tracking
       'state_checkpoints', // State checkpoints

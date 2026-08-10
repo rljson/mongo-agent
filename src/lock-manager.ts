@@ -12,7 +12,7 @@
  * node, other nodes cannot modify it until the lock is released.
  */
 
-import { Collection, Db } from 'mongodb';
+import { Collection, Db, ObjectId } from 'mongodb';
 
 
 /**
@@ -241,9 +241,14 @@ export class LockManager {
       return false;
     }
 
-    // Save to lock history
+    // Save to lock history. The same record can be locked+released repeatedly,
+    // so the history `_id` must be UNIQUE per release episode — reusing the
+    // lock's own `_id` (the `typ-value` lockId) collided on the second release
+    // (E11000). Conflict detection queries by typ/value/key/time, never by _id,
+    // so a synthetic unique id is safe.
     const historyRecord: LockHistoryRecord = {
       ...lock,
+      _id: `${lock._id}-${new ObjectId().toHexString()}`,
       acquiredAt: lock.commonFields.createdAt,
       releasedAt: new Date(),
     };
