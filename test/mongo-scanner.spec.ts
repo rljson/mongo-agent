@@ -1,398 +1,571 @@
 // @license
-// Copyright (c) 2025 Rljson
-//
-// Use of this source code is governed by terms that can be
-// found in the LICENSE file in the root of this package.
+// Copyright (c) 2025 CARAT Gesellschaft für Organisation
+// und Softwareentwicklung mbH. All Rights Reserved.
 
-import { BsMem } from '@rljson/bs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MongoClient, Db as MongoDb } from 'mongodb';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MongoScanner } from '../src/mongo-scanner.ts';
 
-import { MongoScanner } from '../src/mongo-scanner';
+/**
+ * Coverage spec for `MongoScanner`.
+ *
+ * All tests run against a lightweight fake `Db` and a stubbed `_converter` /
+ * `_bs` so no real MongoDB, network, or filesystem is touched. Private
+ * methods are reached via an `(instance as any)` cast, matching the style of
+ * the existing scanner / agent specs.
+ */
+describe('MongoScanner (coverage)', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
 
-const MONGO_URI =
-  process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
-const TEST_DB_NAME = 'test_mongo_scanner';
-
-describe('MongoScanner', () => {
-  let client: MongoClient;
-  let mongoDb: MongoDb;
-  let bs: BsMem;
-
-  beforeEach(async () => {
-    client = new MongoClient(MONGO_URI);
-    await client.connect();
-    mongoDb = client.db(TEST_DB_NAME);
-    await mongoDb.dropDatabase();
-    bs = new BsMem();
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Reset the once-per-process GC log guard so every test that hits
+    // `_scanCollection` exercises the logging branch deterministically.
+    (MongoScanner as any)._gcLogged = false;
   });
 
-  afterEach(async () => {
-    if (client) {
-      await client.close();
-    }
+  afterEach(() => {
+    warnSpy.mockRestore();
+    logSpy.mockRestore();
+    delete (globalThis as any).gc;
   });
 
-  describe('constructor', () => {
-    it('should create scanner with default options', () => {
-      const scanner = new MongoScanner(mongoDb);
-      expect(scanner).toBeDefined();
-      expect(scanner.bs).toBeDefined();
-    });
+  // ---------------------------------------------------------------------------
+  // Fakes
+  // ---------------------------------------------------------------------------
 
-    it('should create scanner with custom blob storage', () => {
-      const customBs = new BsMem();
-      const scanner = new MongoScanner(mongoDb, { bs: customBs });
-      expect(scanner.bs).toBe(customBs);
-    });
+  /** Minimal fake Mongo Db. `collFactory` builds per-collection stubs. */
+  const makeDb = (
+    collFactory: (name: string) => any = () => ({}),
+    listed: Array<{ name: string }> = [],
+  ) =>
+    ({
+      databaseName: 'caratdb',
+      collection: (n: string) => collFactory(n),
+      listCollections: () => ({ toArray: async () => listed }),
+    }) as any;
 
-    it('should create scanner with ignore patterns', () => {
-      const scanner = new MongoScanner(mongoDb, {
-        bs,
-        ignore: ['system.*', 'temp_*'],
-      });
-      expect(scanner).toBeDefined();
-    });
-
-    it('should create scanner with include patterns', () => {
-      const scanner = new MongoScanner(mongoDb, {
-        bs,
-        include: ['users', 'posts'],
-      });
-      expect(scanner).toBeDefined();
-    });
+  /** Default converter stub: single-shot path returns a tiny table. */
+  const smallConverter = () => ({
+    discoverSchema: async () => ({ columns: [{ key: '_hash' }], _hash: 'h1' }),
+    mergeTableCfg: (a: any) => a,
+    convertCollection: async () => ({ _data: [{ _id: 1 }], _hash: 'c0' }),
   });
 
-  describe('scan', () => {
-    it('should scan empty database', async () => {
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
+  // ---------------------------------------------------------------------------
+  // constructor + accessors
+  // ---------------------------------------------------------------------------
 
-      expect(tree).toBeDefined();
-      expect(tree.rootHash).toBeDefined();
-      expect(tree.trees).toBeInstanceOf(Map);
-      expect(tree.trees.size).toBeGreaterThanOrEqual(1); // At least database node
-    });
-
-    it('should scan database with single collection', async () => {
-      await mongoDb
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      expect(tree.rootHash).toBeDefined();
-      expect(tree.trees.size).toBe(2); // database + collection (no per-document nodes)
-
-      // Verify root node
-      const rootNode = tree.trees.get(tree.rootHash);
-      expect(rootNode).toBeDefined();
-      expect(rootNode?.meta).toBeDefined();
-      expect((rootNode?.meta as any).type).toBe('database');
-    });
-
-    it('should scan database with multiple collections', async () => {
-      await mongoDb.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice' },
-        { _id: 'user2', name: 'Bob' },
-      ]);
-      await mongoDb.collection('posts').insertMany([
-        { _id: 'post1', title: 'Hello' },
-        { _id: 'post2', title: 'World' },
-      ]);
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      expect(tree.trees.size).toBe(3); // db + 2 collections (no per-document nodes)
-    });
-
-    it('should ignore specified collections', async () => {
-      await mongoDb
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-      await mongoDb
-        .collection('temp_data')
-        .insertOne({ _id: 'temp1', data: 'ignore me' });
-      await mongoDb
-        .collection('tempfiles')
-        .insertOne({ _id: 'temp2', data: 'ignore me too' });
-
-      const scanner = new MongoScanner(mongoDb, {
-        bs,
-        ignore: ['temp*'],
-      });
-      const tree = await scanner.scan();
-
-      // Should include users
-      const nodes = Array.from(tree.trees.values());
-      const usersNode = nodes.find((n) => (n.meta as any)?.name === 'users');
-      expect(usersNode).toBeDefined();
-
-      // Should not include temp collections
-      const tempDataNode = nodes.find(
-        (n) => (n.meta as any)?.name === 'temp_data',
-      );
-      const tempFilesNode = nodes.find(
-        (n) => (n.meta as any)?.name === 'tempfiles',
-      );
-      expect(tempDataNode).toBeUndefined();
-      expect(tempFilesNode).toBeUndefined();
-    });
-
-    it('should only include specified collections', async () => {
-      await mongoDb
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-      await mongoDb
-        .collection('posts')
-        .insertOne({ _id: 'post1', title: 'Hello' });
-      await mongoDb
-        .collection('comments')
-        .insertOne({ _id: 'comment1', text: 'Nice' });
-      await mongoDb.collection('likes').insertOne({ _id: 'like1', count: 5 });
-
-      const scanner = new MongoScanner(mongoDb, {
-        bs,
-        include: ['users', 'posts'],
-      });
-      const tree = await scanner.scan();
-
-      const nodes = Array.from(tree.trees.values());
-
-      // Should include users and posts
-      const usersNode = nodes.find((n) => (n.meta as any)?.name === 'users');
-      const postsNode = nodes.find((n) => (n.meta as any)?.name === 'posts');
-      expect(usersNode).toBeDefined();
-      expect(postsNode).toBeDefined();
-
-      // Should not include comments or likes
-      const commentsNode = nodes.find(
-        (n) => (n.meta as any)?.name === 'comments',
-      );
-      const likesNode = nodes.find((n) => (n.meta as any)?.name === 'likes');
-      expect(commentsNode).toBeUndefined();
-      expect(likesNode).toBeUndefined();
-    });
-
-    it('should store documents as ComponentsTable blobs', async () => {
-      await mongoDb
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice', email: 'alice@example.com' });
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      // Find collection node (not document node - documents are in ComponentsTable)
-      const nodes = Array.from(tree.trees.values());
-      const collNode = nodes.find(
-        (n) => (n.meta as any)?.type === 'collection',
-      );
-
-      expect(collNode).toBeDefined();
-      expect((collNode?.meta as any).componentsBlobId).toBeDefined();
-      expect((collNode?.meta as any).tableCfgHash).toBeDefined();
-
-      // Verify ComponentsTable blob exists
-      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
-      const componentsTable =
-        await scanner.getComponentsTable(componentsBlobId);
-      expect(componentsTable).toBeDefined();
-
-      // Verify ComponentsTable structure
-      expect(componentsTable._type).toBe('components');
-      expect(componentsTable._tableCfg).toBe(
-        (collNode?.meta as any).tableCfgHash,
-      );
-      expect(componentsTable._data.length).toBe(1);
-
-      // Verify document data in ComponentsTable
-      const row = componentsTable._data[0];
-      expect(row._id).toBe('user1');
-      expect(row.name).toBe('Alice');
-      expect(row.email).toBe('alice@example.com');
-      expect(row._hash).toBeDefined();
-    });
-
-    it('should generate unique hashes for each node', async () => {
-      await mongoDb.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice' },
-        { _id: 'user2', name: 'Bob' },
-      ]);
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      const hashes = Array.from(tree.trees.keys());
-      const uniqueHashes = new Set(hashes);
-
-      expect(hashes.length).toBe(uniqueHashes.size); // All hashes should be unique
-    });
-
-    it('should include metadata in tree nodes', async () => {
-      await mongoDb
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      const nodes = Array.from(tree.trees.values());
-
-      // Database node
-      const dbNode = nodes.find((n) => (n.meta as any)?.type === 'database');
-      expect(dbNode?.meta).toBeDefined();
-      expect((dbNode?.meta as any).database).toBe(TEST_DB_NAME);
-      expect((dbNode?.meta as any).mtime).toBeGreaterThan(0);
-
-      // Collection node with ComponentsTable metadata
-      const collNode = nodes.find(
-        (n) => (n.meta as any)?.type === 'collection',
-      );
-      expect(collNode?.meta).toBeDefined();
-      expect((collNode?.meta as any).collection).toBe('users');
-      expect((collNode?.meta as any).docCount).toBe(1);
-      expect((collNode?.meta as any).componentsBlobId).toBeDefined();
-      expect((collNode?.meta as any).tableCfgHash).toBeDefined();
-
-      // No document nodes in new structure - documents are in ComponentsTable
-      const docNode = nodes.find((n) => (n.meta as any)?.type === 'document');
-      expect(docNode).toBeUndefined();
-    });
-
-    it('should handle large collections', async () => {
-      const docs = Array.from({ length: 50 }, (_, i) => ({
-        _id: `user${i}`,
-        name: `User ${i}`,
-      }));
-      await mongoDb.collection('users').insertMany(docs);
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      // No per-document nodes - all documents in one ComponentsTable
-      const nodes = Array.from(tree.trees.values());
-      const collNode = nodes.find(
-        (n) => (n.meta as any)?.type === 'collection',
-      );
-
-      expect(collNode).toBeDefined();
-      expect((collNode?.meta as any).docCount).toBe(50);
-
-      // Verify ComponentsTable has all 50 documents
-      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
-      const componentsTable =
-        await scanner.getComponentsTable(componentsBlobId);
-      expect(componentsTable._data.length).toBe(50);
-    });
-
-    it('should create parent-child relationships', async () => {
-      await mongoDb.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice' },
-        { _id: 'user2', name: 'Bob' },
-      ]);
-
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
-
-      // Database node should be parent
-      const dbNode = tree.trees.get(tree.rootHash);
-      expect(dbNode?.isParent).toBe(true);
-      expect(dbNode?.children).toBeDefined();
-      expect(dbNode!.children!.length).toBeGreaterThan(0);
-
-      // Collection node is now a leaf (isParent=false, no children)
-      const collNode = Array.from(tree.trees.values()).find(
-        (n) => (n.meta as any)?.type === 'collection',
-      );
-      expect(collNode?.isParent).toBe(false);
-      expect(collNode?.children).toBeUndefined();
-
-      // Verify documents are in ComponentsTable, not as individual nodes
-      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
-      const componentsTable =
-        await scanner.getComponentsTable(componentsBlobId);
-      expect(componentsTable._data.length).toBe(2);
-    });
+  it('constructor registers sync_ops and exposes bs / tree getters', () => {
+    const s = new MongoScanner(makeDb());
+    expect(s.bs).toBeTruthy();
+    expect(s.tree).toBeNull();
+    expect(s.getTableCfg('sync_ops')).toBeTruthy();
   });
 
-  describe('edge cases', () => {
-    it('should handle documents with complex nested objects', async () => {
-      await mongoDb.collection('users').insertOne({
-        _id: 'user1',
-        name: 'Alice',
-        address: {
-          street: '123 Main St',
-          city: 'NYC',
-          country: 'USA',
+  it('uses the injected bs when supplied via options', () => {
+    const bs = { setBlob: async () => ({ blobId: 'x' }) } as any;
+    const s = new MongoScanner(makeDb(), { bs });
+    expect(s.bs).toBe(bs);
+  });
+
+  it('onChange registers a callback', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    const cb = () => {};
+    s.onChange(cb);
+    expect(s._changeCallbacks).toContain(cb);
+  });
+
+  // ---------------------------------------------------------------------------
+  // _shouldIgnore
+  // ---------------------------------------------------------------------------
+
+  it('_shouldIgnore: system + internal collections are ignored', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    expect(s._shouldIgnore('system.profile')).toBe(true);
+    expect(s._shouldIgnore('sync_ops')).toBe(true);
+    expect(s._shouldIgnore('sync_recentChanges')).toBe(true);
+  });
+
+  it('_shouldIgnore: sync_tombstones is always scanned even with filters', () => {
+    const s = new MongoScanner(makeDb(), {
+      ignore: ['*'],
+      include: ['nothing'],
+    }) as any;
+    expect(s._shouldIgnore('sync_tombstones')).toBe(false);
+  });
+
+  it('_shouldIgnore: ignore pattern matches', () => {
+    const s = new MongoScanner(makeDb(), { ignore: ['tmp_*'] }) as any;
+    expect(s._shouldIgnore('tmp_cache')).toBe(true);
+    expect(s._shouldIgnore('cd_articles')).toBe(false);
+  });
+
+  it('_shouldIgnore: include filter excludes non-matching collections', () => {
+    const s = new MongoScanner(makeDb(), { include: ['cd_*'] }) as any;
+    expect(s._shouldIgnore('cd_articles')).toBe(false);
+    expect(s._shouldIgnore('other')).toBe(true);
+  });
+
+  it('_shouldIgnore: no filters → kept', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    expect(s._shouldIgnore('anything')).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // _matchPattern
+  // ---------------------------------------------------------------------------
+
+  it('_matchPattern handles * and ? wildcards', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    expect(s._matchPattern('cd_articles', 'cd_*')).toBe(true);
+    expect(s._matchPattern('ab', 'a?')).toBe(true);
+    expect(s._matchPattern('abc', 'a?')).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // _scanCollection — small / single-shot path
+  // ---------------------------------------------------------------------------
+
+  it('_scanCollection small: emits one tree, with GC-unavailable log', async () => {
+    const db = makeDb(() => ({
+      estimatedDocumentCount: async () => 1,
+    }));
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'blob-A' }) };
+    const trees = await s._scanCollection('sd_options', new Map());
+    expect(trees).toHaveLength(1);
+    expect(trees[0].meta.componentsBlobId).toBe('blob-A');
+    // The once-per-process GC availability line was logged.
+    expect(
+      logSpy.mock.calls.some((c) => String(c[0]).includes('NOT AVAILABLE')),
+    ).toBe(true);
+  });
+
+  it('_scanCollection: GC-available log branch when globalThis.gc is a fn', async () => {
+    (globalThis as any).gc = () => {};
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    await s._scanCollection('c', new Map());
+    expect(
+      logSpy.mock.calls.some((c) =>
+        String(c[0]).includes('available (--expose-gc)'),
+      ),
+    ).toBe(true);
+  });
+
+  it('_scanCollection: GC log only happens once across calls', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    await s._scanCollection('a', new Map());
+    const after1 = logSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('explicit GC'),
+    ).length;
+    await s._scanCollection('b', new Map());
+    const after2 = logSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('explicit GC'),
+    ).length;
+    expect(after1).toBe(1);
+    expect(after2).toBe(1);
+  });
+
+  it('_scanCollection small: JSON.stringify RangeError falls through to streaming', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    let streamed = false;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [{ key: '_hash' }], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      // A value whose JSON.stringify throws RangeError in the single-shot path.
+      convertCollection: async () => ({
+        _data: [{ _id: 1 }],
+        _hash: 'c0',
+        bad: {
+          toJSON: () => {
+            throw new RangeError('Invalid string length');
+          },
         },
-        tags: ['admin', 'verified'],
-      });
+      }),
+      convertCollectionStreaming: async function* () {
+        streamed = true;
+        yield { _data: [{ _id: 9 }], _hash: 'cstream' };
+      },
+    };
+    const trees = await s._scanCollection('cd_articles', new Map());
+    expect(streamed).toBe(true);
+    expect(trees).toHaveLength(1);
+    expect(warnSpy).toHaveBeenCalled();
+  });
 
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
+  it('_scanCollection small: non-RangeError from stringify is rethrown', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [{ key: '_hash' }], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      convertCollection: async () => ({
+        _data: [{ _id: 1 }],
+        _hash: 'c0',
+        bad: {
+          toJSON: () => {
+            throw new TypeError('boom single-shot');
+          },
+        },
+      }),
+    };
+    await expect(s._scanCollection('c', new Map())).rejects.toThrow(
+      /boom single-shot/,
+    );
+  });
 
-      const collNode = Array.from(tree.trees.values()).find(
-        (n) => (n.meta as any)?.type === 'collection',
-      );
-      expect(collNode).toBeDefined();
+  // ---------------------------------------------------------------------------
+  // _scanCollection — schema merge branches
+  // ---------------------------------------------------------------------------
 
-      // Get document from ComponentsTable
-      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
-      const componentsTable =
-        await scanner.getComponentsTable(componentsBlobId);
-      const doc = componentsTable._data[0];
+  it('_scanCollection: merges schema when discovered columns differ from cache', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    // Pre-seed a cached cfg with fewer columns to trigger the merge branch.
+    s._tableConfigs.set('cd_x', { columns: [{ key: '_hash' }], _hash: 'old' });
+    let merged = false;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({
+        columns: [{ key: '_hash' }, { key: 'name' }],
+        _hash: 'new',
+      }),
+      mergeTableCfg: () => {
+        merged = true;
+        return { columns: [{ key: '_hash' }, { key: 'name' }], _hash: 'merged' };
+      },
+      convertCollection: async () => ({ _data: [{ _id: 1 }], _hash: 'c0' }),
+    };
+    await s._scanCollection('cd_x', new Map());
+    expect(merged).toBe(true);
+    expect(s.getTableCfg('cd_x')._hash).toBe('merged');
+  });
 
-      // Nested objects are hashed by RLJSON, so they have _hash field
-      expect(doc.address).toMatchObject({
-        street: '123 Main St',
-        city: 'NYC',
-        country: 'USA',
-      });
-      expect(doc.address._hash).toBeDefined();
-      expect(doc.tags).toEqual(['admin', 'verified']);
-    });
+  it('_scanCollection: merges when same column count but a key differs', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    s._tableConfigs.set('cd_z', { columns: [{ key: '_hash' }], _hash: 'old' });
+    let merged = false;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      // Same length (1) but a different key → some() predicate is true.
+      discoverSchema: async () => ({ columns: [{ key: 'other' }], _hash: 'new' }),
+      mergeTableCfg: () => {
+        merged = true;
+        return { columns: [{ key: '_hash' }], _hash: 'merged' };
+      },
+      convertCollection: async () => ({ _data: [{ _id: 1 }], _hash: 'c0' }),
+    };
+    await s._scanCollection('cd_z', new Map());
+    expect(merged).toBe(true);
+  });
 
-    it('should handle documents with special characters', async () => {
-      await mongoDb.collection('users').insertOne({
-        _id: 'user1',
-        name: 'Alice "The Pro" O\'Brien',
-        bio: 'Loves 日本語 and emojis 🎉',
-      });
+  it('_scanCollection: uses cached cfg unchanged when schema matches', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 1 }));
+    const s = new MongoScanner(db) as any;
+    s._tableConfigs.set('cd_y', { columns: [{ key: '_hash' }], _hash: 'old' });
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [{ key: '_hash' }], _hash: 'new' }),
+      mergeTableCfg: () => {
+        throw new Error('merge must not be called when schema matches');
+      },
+      convertCollection: async () => ({ _data: [{ _id: 1 }], _hash: 'c0' }),
+    };
+    await s._scanCollection('cd_y', new Map());
+    expect(s.getTableCfg('cd_y')._hash).toBe('old');
+  });
 
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
+  // ---------------------------------------------------------------------------
+  // _scanCollection — tombstone GC + estimatedCount failure
+  // ---------------------------------------------------------------------------
 
-      const collNode = Array.from(tree.trees.values()).find(
-        (n) => (n.meta as any)?.type === 'collection',
-      );
-      const componentsBlobId = (collNode?.meta as any).componentsBlobId;
-      const componentsTable =
-        await scanner.getComponentsTable(componentsBlobId);
-      const doc = componentsTable._data[0];
+  it('_scanCollection: sync_tombstones triggers a GC deleteMany', async () => {
+    let deleteCalled = false;
+    const db = makeDb(() => ({
+      estimatedDocumentCount: async () => 1,
+      deleteMany: async () => {
+        deleteCalled = true;
+        return {};
+      },
+    }));
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    await s._scanCollection('sync_tombstones', new Map());
+    expect(deleteCalled).toBe(true);
+  });
 
-      expect(doc.name).toBe('Alice "The Pro" O\'Brien');
-      expect(doc.bio).toBe('Loves 日本語 and emojis 🎉');
-    });
+  it('_scanCollection: tombstone GC swallows deleteMany errors (best-effort)', async () => {
+    const db = makeDb(() => ({
+      estimatedDocumentCount: async () => 1,
+      deleteMany: async () => {
+        throw new Error('gc failed');
+      },
+    }));
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    const trees = await s._scanCollection('sync_tombstones', new Map());
+    expect(trees).toHaveLength(1);
+  });
 
-    it('should handle empty collections', async () => {
-      await mongoDb.createCollection('empty_collection');
+  it('_scanCollection: estimatedDocumentCount failure forces streaming', async () => {
+    const db = makeDb(() => ({
+      estimatedDocumentCount: async () => {
+        throw new Error('not authorized');
+      },
+    }));
+    const s = new MongoScanner(db) as any;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    let streamed = false;
+    s._converter = {
+      discoverSchema: async () => ({ columns: [], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      convertCollectionStreaming: async function* () {
+        streamed = true;
+        yield { _data: [{ _id: 1 }], _hash: 'c0' };
+      },
+    };
+    const trees = await s._scanCollection('uncertain', new Map());
+    expect(streamed).toBe(true);
+    expect(trees).toHaveLength(1);
+  });
 
-      const scanner = new MongoScanner(mongoDb, { bs });
-      const tree = await scanner.scan();
+  // ---------------------------------------------------------------------------
+  // _scanCollection — streaming path branches
+  // ---------------------------------------------------------------------------
 
-      const collNode = Array.from(tree.trees.values()).find(
-        (n) =>
-          (n.meta as any)?.type === 'collection' &&
-          (n.meta as any)?.name === 'empty_collection',
-      );
+  it('_scanCollection streaming: multiple chunks + final log', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 100_000 }));
+    const s = new MongoScanner(db) as any;
+    let n = 0;
+    s._bs = { setBlob: async () => ({ blobId: `cb${n++}` }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      convertCollectionStreaming: async function* () {
+        for (let i = 0; i < 3; i++) {
+          yield { _data: [{ _id: i }], _hash: `c${i}` };
+        }
+      },
+    };
+    const trees = await s._scanCollection('cd_articles', new Map());
+    expect(trees).toHaveLength(3);
+    expect(trees.map((t: any) => t.meta.chunkIndex)).toEqual([0, 1, 2]);
+    expect(
+      logSpy.mock.calls.some((c) => String(c[0]).includes('streamed')),
+    ).toBe(true);
+  });
 
-      expect(collNode).toBeDefined();
-      expect((collNode?.meta as any).docCount).toBe(0);
-      expect(collNode?.isParent).toBe(false);
-      expect(collNode?.children).toBeUndefined();
-    });
+  it('_scanCollection streaming: GC hint invoked when globalThis.gc present', async () => {
+    (globalThis as any).gc = vi.fn();
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 100_000 }));
+    const s = new MongoScanner(db) as any;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      convertCollectionStreaming: async function* () {
+        yield { _data: [{ _id: 1 }], _hash: 'c0' };
+      },
+    };
+    await s._scanCollection('cd_articles', new Map());
+    expect((globalThis as any).gc).toHaveBeenCalled();
+  });
+
+  it('_scanCollection streaming: oversized chunk RangeError dropped, continues', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 100_000 }));
+    const s = new MongoScanner(db) as any;
+    let n = 0;
+    s._bs = { setBlob: async () => ({ blobId: `b${n++}` }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      convertCollectionStreaming: async function* () {
+        yield { _data: [{ _id: 'a' }], _hash: 'c0' };
+        yield {
+          _data: [{ _id: 'b' }],
+          _hash: 'c1',
+          bad: {
+            toJSON: () => {
+              throw new RangeError('Invalid string length');
+            },
+          },
+        };
+        yield { _data: [{ _id: 'c' }], _hash: 'c2' };
+      },
+    };
+    const trees = await s._scanCollection('cd_models', new Map());
+    expect(trees).toHaveLength(2);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('_scanCollection streaming: non-RangeError chunk error rethrown', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 100_000 }));
+    const s = new MongoScanner(db) as any;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      convertCollectionStreaming: async function* () {
+        yield {
+          _data: [{ _id: 1 }],
+          _hash: 'c0',
+          bad: {
+            toJSON: () => {
+              throw new TypeError('boom stream');
+            },
+          },
+        };
+      },
+    };
+    await expect(s._scanCollection('c', new Map())).rejects.toThrow(
+      /boom stream/,
+    );
+  });
+
+  it('_scanCollection streaming: empty stream returns []', async () => {
+    const db = makeDb(() => ({ estimatedDocumentCount: async () => 100_000 }));
+    const s = new MongoScanner(db) as any;
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    s._converter = {
+      discoverSchema: async () => ({ columns: [], _hash: 'h1' }),
+      mergeTableCfg: (a: any) => a,
+      // Yields nothing → chunkTrees stays empty.
+      convertCollectionStreaming: async function* () {},
+    };
+    const trees = await s._scanCollection('empty', new Map());
+    expect(trees).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // scan() end-to-end
+  // ---------------------------------------------------------------------------
+
+  it('scan: builds a root tree, skips ignored collections', async () => {
+    const db = makeDb(
+      () => ({ estimatedDocumentCount: async () => 1 }),
+      [{ name: 'system.views' }, { name: 'cd_articles' }],
+    );
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    const tree = await s.scan();
+    expect(tree.rootHash).toBeTruthy();
+    const root = s.getRootTree();
+    expect(root.meta.type).toBe('database');
+    expect(root.children).toHaveLength(1); // system.views skipped
+    expect(s.tree).toBe(tree);
+  });
+
+  it('scan(dirty): re-reads only dirty collections, reuses the cache for the rest', async () => {
+    const db = makeDb(
+      () => ({ estimatedDocumentCount: async () => 1 }),
+      [{ name: 'customers' }, { name: 'items' }],
+    );
+    const s = new MongoScanner(db) as any;
+    s._converter = smallConverter();
+    s._bs = { setBlob: async () => ({ blobId: 'b' }) };
+    // Full scan first → populates the per-collection cache for both.
+    const full = await s.scan();
+    expect(full.rootHash).toBeTruthy();
+    // Incremental: only 'customers' is dirty → 'items' served from the cache,
+    // so _scanCollection runs for 'customers' but NOT 'items'.
+    const spy = vi.spyOn(s, '_scanCollection');
+    const inc = await s.scan(new Set(['customers']));
+    expect(inc.rootHash).toBeTruthy();
+    const scanned = spy.mock.calls.map((c: any[]) => c[0]);
+    expect(scanned).toContain('customers');
+    expect(scanned).not.toContain('items');
+    // A full scan (no dirty arg) re-reads everything again — backward compat.
+    spy.mockClear();
+    await s.scan();
+    const scannedFull = spy.mock.calls.map((c: any[]) => c[0]);
+    expect(scannedFull).toContain('customers');
+    expect(scannedFull).toContain('items');
+    spy.mockRestore();
+  });
+
+  // ---------------------------------------------------------------------------
+  // blob + table cfg helpers
+  // ---------------------------------------------------------------------------
+
+  it('getComponentsTable round-trips through bs', async () => {
+    const s = new MongoScanner(makeDb()) as any;
+    const payload = { _data: [{ _id: 1 }], _hash: 'h' };
+    s._bs = {
+      getBlob: async () => ({
+        content: Buffer.from(JSON.stringify(payload), 'utf-8'),
+      }),
+    };
+    const got = await s.getComponentsTable('blob-1');
+    expect(got).toEqual(payload);
+  });
+
+  it('createTablesCfgTable + save + load + getTableCfgByHash', async () => {
+    const s = new MongoScanner(makeDb()) as any;
+    const table = s.createTablesCfgTable();
+    expect(Array.isArray(table._data)).toBe(true);
+    // sync_ops was registered in the constructor.
+    expect(table._data.length).toBeGreaterThan(0);
+
+    const store = new Map<string, Buffer>();
+    s._bs = {
+      setBlob: async (buf: Buffer) => {
+        store.set('id1', buf);
+        return { blobId: 'id1' };
+      },
+      getBlob: async (id: string) => ({ content: store.get(id) }),
+    };
+    const blobId = await s.saveTablesCfgTable(table);
+    expect(blobId).toBe('id1');
+    const loaded = await s.loadTablesCfgTable(blobId);
+    expect(loaded._data.length).toBe(table._data.length);
+
+    const someHash = table._data[0]._hash;
+    expect(s.getTableCfgByHash(loaded, someHash)).toBeTruthy();
+    expect(s.getTableCfgByHash(loaded, 'no-such-hash')).toBeUndefined();
+  });
+
+  it('getAllTableCfgs returns a copy; addTableCfg mutates the cache', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    const before = s.getAllTableCfgs();
+    expect(before.has('sync_ops')).toBe(true);
+    s.addTableCfg('newcoll', { columns: [], _hash: 'z' });
+    expect(s.getTableCfg('newcoll')._hash).toBe('z');
+    // The previously-returned map must be an independent copy.
+    expect(before.has('newcoll')).toBe(false);
+  });
+
+  it('getRootTree returns null before scan', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    expect(s.getRootTree()).toBeNull();
+  });
+
+  it('getRootTree returns null when rootHash missing from the tree map', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    // _tree set but the rootHash points at an entry that is not present →
+    // the `|| null` defensive fallback fires.
+    s._tree = { rootHash: 'ghost', trees: new Map() };
+    expect(s.getRootTree()).toBeNull();
+  });
+
+  it('getTableCfg returns undefined for unknown collection', () => {
+    const s = new MongoScanner(makeDb()) as any;
+    expect(s.getTableCfg('never-seen')).toBeUndefined();
   });
 });
