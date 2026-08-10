@@ -1,579 +1,488 @@
 // @license
-// Copyright (c) 2025 Rljson
-//
-// Use of this source code is governed by terms that can be
-// found in the LICENSE file in the root of this package.
+// Copyright (c) 2025 CARAT Gesellschaft für Organisation
+// und Softwareentwicklung mbH. All Rights Reserved.
 
 import { BsMem } from '@rljson/bs';
+import { describe, expect, it, vi } from 'vitest';
 
-import { Db as MongoDb, MongoClient } from 'mongodb';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+// MongoAgent is mocked so extractRljsonTree never touches a real Mongo / scanner.
+// The mock returns a controllable tree and shares the caller-provided `bs`, so
+// blob collection runs against a real in-memory BsMem.
+const extractMock = vi.fn();
+const lastCtorArgs: any[] = [];
+vi.mock('../../src/mongo-agent.ts', () => ({
+  MongoAgent: class {
+    bs: any;
+    constructor(_mongoDb: any, bs: any, options: any) {
+      this.bs = bs;
+      lastCtorArgs.push({ options });
+    }
+    extract() {
+      return extractMock(this.bs);
+    }
+  },
+}));
 
 import {
-  applyRljsonTree, extractRljsonTree, getRljsonSyncState, RljsonTreePayload
-} from '../../src/sync/rljson-sync';
+  applyRljsonTree,
+  extractRljsonTree,
+  getRljsonSyncState,
+} from '../../src/sync/rljson-sync.ts';
 
+// ---------------------------------------------------------------------------
+// Fake Mongo helpers
+// ---------------------------------------------------------------------------
 
-const MONGO_URI =
-  process.env.MONGO_URI || 'mongodb://localhost:27017/?directConnection=true';
-const TEST_DB_EXTRACT = 'test_rljson_sync_extract';
-const TEST_DB_APPLY = 'test_rljson_sync_apply';
+/** A minimal in-memory collection recording the ops rljson-sync performs. */
+function makeCollection(initialDocs: any[] = []) {
+  const docs: any[] = [...initialDocs];
+  const calls = { replaceOne: [] as any[], deleteOne: [] as any[], updateOne: [] as any[] };
+  return {
+    docs,
+    calls,
+    find() {
+      return { toArray: async () => docs.map((d) => ({ _id: d._id })) };
+    },
+    async replaceOne(filter: any, doc: any, opts: any) {
+      calls.replaceOne.push({ filter, doc, opts });
+      const i = docs.findIndex((d) => d._id === filter._id);
+      if (i >= 0) docs[i] = doc;
+      else docs.push(doc);
+    },
+    async deleteOne(filter: any) {
+      calls.deleteOne.push({ filter });
+      const i = docs.findIndex((d) => d._id === filter._id);
+      if (i >= 0) docs.splice(i, 1);
+    },
+    async updateOne(filter: any, update: any, opts: any) {
+      calls.updateOne.push({ filter, update, opts });
+    },
+    async findOne(filter: any) {
+      return docs.find((d) => d.origin === filter.origin) ?? null;
+    },
+  };
+}
 
-describe('rljson-sync', () => {
-  let client: MongoClient;
-  let mongoDbExtract: MongoDb;
-  let mongoDbApply: MongoDb;
-  let bs: BsMem;
+/** A fake Db whose collection(name) returns a per-name memoised fake collection. */
+function makeDb(seed: Record<string, any[]> = {}) {
+  const collections = new Map<string, ReturnType<typeof makeCollection>>();
+  for (const [name, docs] of Object.entries(seed)) {
+    collections.set(name, makeCollection(docs));
+  }
+  return {
+    collections,
+    collection(name: string) {
+      if (!collections.has(name)) collections.set(name, makeCollection());
+      return collections.get(name)!;
+    },
+  } as any;
+}
 
-  beforeEach(async () => {
-    client = new MongoClient(MONGO_URI);
-    await client.connect();
-    mongoDbExtract = client.db(TEST_DB_EXTRACT);
-    mongoDbApply = client.db(TEST_DB_APPLY);
-    await mongoDbExtract.dropDatabase();
-    await mongoDbApply.dropDatabase();
-    bs = new BsMem();
+const tree = (meta: any, extra: Partial<any> = {}) => ({
+  id: extra.id ?? 'n',
+  isParent: false,
+  meta,
+  _hash: 'h',
+  ...extra,
+});
+
+// ---------------------------------------------------------------------------
+// extractRljsonTree
+// ---------------------------------------------------------------------------
+
+describe('extractRljsonTree', () => {
+  it('collects nodes + dedupes the three blob-id kinds and base64-encodes them', async () => {
+    const bs = new BsMem();
+    const docBlob = await bs.setBlob(Buffer.from('doc-content'));
+    const compBlob = await bs.setBlob(Buffer.from('comp-content'));
+    const cfgBlob = await bs.setBlob(Buffer.from('cfg-content'));
+
+    const trees = new Map<string, any>([
+      ['rootH', tree({ type: 'database', blobId: docBlob.blobId })],
+      ['cH', tree({ type: 'collection', componentsBlobId: compBlob.blobId })],
+      ['cfgH', tree({ type: 'database', tableCfgsTableBlobId: cfgBlob.blobId })],
+      // node with no relevant meta ids — exercises the falsy branches
+      ['plain', tree({ type: 'collection' })],
+    ]);
+
+    extractMock.mockResolvedValueOnce({
+      rootHash: 'rootH',
+      trees,
+    });
+
+    const payload = await extractRljsonTree({
+      mongoDb: {} as any,
+      nodeId: 'node-A',
+      bs,
+      ignore: ['extra_*'],
+      include: ['caratdb'],
+    });
+
+    expect(payload.origin).toBe('node-A');
+    expect(payload.rootHash).toBe('rootH');
+    expect(payload.totalNodes).toBe(4);
+    expect(payload.nodes).toHaveLength(4);
+    expect(payload.blobs).toHaveLength(3);
+    const byId = Object.fromEntries(payload.blobs.map((b) => [b.blobId, b.content]));
+    expect(Buffer.from(byId[docBlob.blobId], 'base64').toString()).toBe('doc-content');
+    expect(Buffer.from(byId[compBlob.blobId], 'base64').toString()).toBe('comp-content');
+    expect(Buffer.from(byId[cfgBlob.blobId], 'base64').toString()).toBe('cfg-content');
+
+    // ignore list is merged with the built-in system prefixes
+    expect(lastCtorArgs.at(-1).options.ignore).toEqual(
+      expect.arrayContaining(['system.*', 'sync_*', 'extra_*']),
+    );
+    expect(lastCtorArgs.at(-1).options.include).toEqual(['caratdb']);
   });
 
-  afterEach(async () => {
-    if (client) {
-      await client.close();
-    }
+  it('logs and skips a blob that cannot be fetched (getBlob throws)', async () => {
+    const bs = new BsMem();
+    const trees = new Map<string, any>([
+      ['rootH', tree({ type: 'document', blobId: 'missing-blob' })],
+    ]);
+    extractMock.mockResolvedValueOnce({ rootHash: 'rootH', trees });
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const payload = await extractRljsonTree({
+      mongoDb: {} as any,
+      nodeId: 'node-B',
+      bs,
+    });
+    expect(payload.blobs).toHaveLength(0);
+    expect(errSpy).toHaveBeenCalledWith(
+      'Failed to get blob missing-blob:',
+      expect.anything(),
+    );
+    errSpy.mockRestore();
   });
 
-  describe('extractRljsonTree', () => {
-    it('should extract empty database', async () => {
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-      });
+  it('defaults bs to a fresh BsMem when none is provided', async () => {
+    const trees = new Map<string, any>([['rootH', tree({ type: 'collection' })]]);
+    extractMock.mockResolvedValueOnce({ rootHash: 'rootH', trees });
+    const payload = await extractRljsonTree({ mongoDb: {} as any, nodeId: 'node-C' });
+    expect(payload.blobs).toHaveLength(0);
+    expect(payload.totalNodes).toBe(1);
+  });
+});
 
-      expect(payload).toBeDefined();
-      expect(payload.origin).toBe('node1');
-      expect(payload.rootHash).toBeDefined();
-      expect(payload.totalNodes).toBeGreaterThanOrEqual(1);
-      expect(payload.nodes).toBeInstanceOf(Array);
-      expect(payload.blobs).toBeInstanceOf(Array);
-      expect(payload.timestamp).toBeDefined();
-    });
+// ---------------------------------------------------------------------------
+// applyRljsonTree
+// ---------------------------------------------------------------------------
 
-    it('should extract database with single document', async () => {
-      await mongoDbExtract.collection('users').insertOne({
-        _id: 'user1',
-        name: 'Alice',
-      });
+describe('applyRljsonTree', () => {
+  it('applies a document node, deletes stale docs, and saves sync state', async () => {
+    const bs = new BsMem();
+    const doc = { _id: 'keep', val: 1 };
+    const docBlob = await bs.setBlob(Buffer.from(JSON.stringify(doc), 'utf-8'));
 
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-      });
+    const rootNode = tree({ type: 'document', blobId: docBlob.blobId, collection: 'items' });
+    // Seed an existing stale doc that should be deleted (not in payload).
+    const db = makeDb({ items: [{ _id: 'keep' }, { _id: 'stale' }] });
 
-      expect(payload.totalNodes).toBeGreaterThanOrEqual(3); // db + collection + doc
-      expect(payload.blobs.length).toBe(1);
+    const payload = {
+      origin: 'src-1',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: rootNode as any }],
+      blobs: [{ blobId: docBlob.blobId, content: Buffer.from('x').toString('base64') }],
+      timestamp: 't',
+    };
 
-      const blob = payload.blobs[0];
-      expect(blob.blobId).toBeDefined();
-      expect(blob.content).toBeDefined();
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(1);
+    expect(res.nodesApplied).toBe(1);
+    expect(res.blobsReceived).toBe(1);
 
-      const decoded = Buffer.from(blob.content, 'base64').toString('utf-8');
-      const doc = JSON.parse(decoded);
-      expect(doc._id).toBe('user1');
-      expect(doc.name).toBe('Alice');
-    });
-
-    it('should extract database with multiple collections', async () => {
-      await mongoDbExtract.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice' },
-        { _id: 'user2', name: 'Bob' },
-      ]);
-      await mongoDbExtract.collection('posts').insertMany([
-        { _id: 'post1', title: 'Hello' },
-        { _id: 'post2', title: 'World' },
-      ]);
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-      });
-
-      expect(payload.totalNodes).toBeGreaterThanOrEqual(7); // db + 2 collections + 4 docs
-      expect(payload.blobs.length).toBe(4);
-    });
-
-    it('should ignore specified collections', async () => {
-      await mongoDbExtract
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-      await mongoDbExtract
-        .collection('temp_data')
-        .insertOne({ _id: 'temp1', data: 'ignore' });
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-        ignore: ['temp_*'],
-      });
-
-      const nodes = payload.nodes.map((n) => n.node.meta);
-      const tempNode = nodes.find((m: any) => m?.name === 'temp_data');
-      expect(tempNode).toBeUndefined();
-    });
-
-    it('should only include specified collections', async () => {
-      await mongoDbExtract
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-      await mongoDbExtract
-        .collection('posts')
-        .insertOne({ _id: 'post1', title: 'Hello' });
-      await mongoDbExtract
-        .collection('comments')
-        .insertOne({ _id: 'comment1', text: 'Nice' });
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-        include: ['users', 'posts'],
-      });
-
-      const nodes = payload.nodes.map((n) => n.node.meta);
-      const commentNode = nodes.find((m: any) => m?.name === 'comments');
-      expect(commentNode).toBeUndefined();
-    });
-
-    it('should generate unique hashes for each node', async () => {
-      await mongoDbExtract.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice' },
-        { _id: 'user2', name: 'Bob' },
-      ]);
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-      });
-
-      const hashes = payload.nodes.map((n) => n.hash);
-      const uniqueHashes = new Set(hashes);
-
-      expect(hashes.length).toBe(uniqueHashes.size);
-    });
-
-    it('should use custom blob storage', async () => {
-      const customBs = new BsMem();
-      await mongoDbExtract
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs: customBs,
-      });
-
-      expect(payload.blobs.length).toBe(1);
-
-      // Verify blob is in custom storage
-      const blob = await customBs.getBlob(payload.blobs[0].blobId);
-      expect(blob).toBeDefined();
-    });
-
-    it('should include timestamp', async () => {
-      const before = Date.now();
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-      });
-      const after = Date.now();
-
-      const timestamp = new Date(payload.timestamp).getTime();
-      expect(timestamp).toBeGreaterThanOrEqual(before);
-      expect(timestamp).toBeLessThanOrEqual(after);
-    });
-
-    it('should handle large documents', async () => {
-      const largeDoc = {
-        _id: 'large1',
-        data: 'x'.repeat(10000),
-        nested: { deep: { value: 'test' } },
-      };
-
-      await mongoDbExtract.collection('large').insertOne(largeDoc);
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs,
-      });
-
-      expect(payload.blobs.length).toBe(1);
-      const decoded = Buffer.from(payload.blobs[0].content, 'base64').toString(
-        'utf-8',
-      );
-      const doc = JSON.parse(decoded);
-      expect(doc._id).toBe('large1');
-      expect(doc.data).toBe('x'.repeat(10000));
-    });
+    const items = db.collections.get('items')!;
+    // stale doc deleted
+    expect(items.calls.deleteOne).toHaveLength(1);
+    expect(items.calls.deleteOne[0].filter._id).toBe('stale');
+    // sync state upserted
+    const state = db.collections.get('rljson_sync_state')!;
+    expect(state.calls.updateOne[0].opts.upsert).toBe(true);
+    expect(state.calls.updateOne[0].update.$set.lastRootHash).toBe('root');
   });
 
-  describe('applyRljsonTree', () => {
-    let payload: RljsonTreePayload;
-
-    beforeEach(async () => {
-      // Setup source data
-      await mongoDbExtract.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice', email: 'alice@example.com' },
-        { _id: 'user2', name: 'Bob', email: 'bob@example.com' },
-      ]);
-      await mongoDbExtract.collection('posts').insertOne({
-        _id: 'post1',
-        title: 'Hello World',
-        author: 'user1',
-      });
-
-      // Extract tree
-      payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'sourceNode',
-        bs,
-      });
+  it('applies a ComponentsTable collection node and skips rows without _id', async () => {
+    const bs = new BsMem();
+    const componentsTable = {
+      _data: [
+        { _hash: 'a', _id: 'r1', n: 1 },
+        { _hash: 'b', n: 2 }, // no _id → skipped
+        { _hash: 'c', _id: 'r2', n: 3 },
+      ],
+    };
+    const compBlob = await bs.setBlob(
+      Buffer.from(JSON.stringify(componentsTable), 'utf-8'),
+    );
+    const rootNode = tree({
+      type: 'collection',
+      componentsBlobId: compBlob.blobId,
+      name: 'articles',
     });
-
-    it('should apply tree to empty database', async () => {
-      const result = await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.rootHash).toBe(payload.rootHash);
-      expect(result.blobsReceived).toBe(3);
-      expect(result.documentsCreated).toBe(3);
-    });
-
-    it('should create all collections', async () => {
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      const collections = await mongoDbApply.listCollections().toArray();
-      const collNames = collections
-        .map((c) => c.name)
-        .filter((n) => n !== 'rljson_sync_state');
-
-      expect(collNames).toContain('users');
-      expect(collNames).toContain('posts');
-    });
-
-    it('should create all documents', async () => {
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      const users = await mongoDbApply.collection('users').find().toArray();
-      const posts = await mongoDbApply.collection('posts').find().toArray();
-
-      expect(users.length).toBe(2);
-      expect(posts.length).toBe(1);
-
-      expect(users.find((u) => u._id === 'user1')).toBeDefined();
-      expect(users.find((u) => u._id === 'user2')).toBeDefined();
-      expect(posts.find((p) => p._id === 'post1')).toBeDefined();
-    });
-
-    it('should preserve document content', async () => {
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      const user1 = await mongoDbApply
-        .collection('users')
-        .findOne({ _id: 'user1' });
-
-      expect(user1).toBeDefined();
-      expect(user1!.name).toBe('Alice');
-      expect(user1!.email).toBe('alice@example.com');
-    });
-
-    it('should save sync state', async () => {
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      const syncState = await mongoDbApply
-        .collection('rljson_sync_state')
-        .findOne({
-          origin: 'sourceNode',
-        });
-
-      expect(syncState).toBeDefined();
-      expect(syncState!.origin).toBe('sourceNode');
-      expect(syncState!.lastRootHash).toBe(payload.rootHash);
-      expect(syncState!.totalNodes).toBe(payload.totalNodes);
-      expect(syncState!.totalBlobs).toBe(payload.blobs.length);
-      expect(syncState!.lastSyncedAt).toBeDefined();
-    });
-
-    it('should update existing documents', async () => {
-      // First apply
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      // Modify source and re-extract
-      await mongoDbExtract
-        .collection('users')
-        .updateOne({ _id: 'user1' }, { $set: { name: 'Alice Updated' } });
-
-      const newPayload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'sourceNode',
-        bs: new BsMem(), // Use new blob storage
-      });
-
-      // Apply updated tree
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload: newPayload,
-        bs: new BsMem(),
-      });
-
-      const user1 = await mongoDbApply
-        .collection('users')
-        .findOne({ _id: 'user1' });
-      expect(user1!.name).toBe('Alice Updated');
-    });
-
-    it('should use custom blob storage', async () => {
-      const customBs = new BsMem();
-
-      const result = await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs: customBs,
-      });
-
-      expect(result.success).toBe(true);
-    });
-
-    it('should handle complex nested documents', async () => {
-      await mongoDbExtract.dropDatabase();
-      await mongoDbExtract.collection('orders').insertOne({
-        _id: 'order1',
-        customer: { name: 'Alice', email: 'alice@example.com' },
-        items: [
-          { id: 1, qty: 2 },
-          { id: 2, qty: 1 },
-        ],
-      });
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'node1',
-        bs: new BsMem(),
-      });
-
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs: new BsMem(),
-      });
-
-      const order = await mongoDbApply
-        .collection('orders')
-        .findOne({ _id: 'order1' });
-      expect(order!.customer.name).toBe('Alice');
-      expect(order!.items).toHaveLength(2);
-    });
-
-    it('should handle empty payload gracefully', async () => {
-      // Create minimal payload with database node only
-      await mongoDbExtract.dropDatabase();
-
-      const emptyPayload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'emptyNode',
-        bs: new BsMem(),
-      });
-
-      const result = await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload: emptyPayload,
-        bs: new BsMem(),
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.documentsCreated).toBe(0);
-    });
-
-    it('should return error on failure', async () => {
-      const invalidPayload: RljsonTreePayload = {
-        origin: 'invalid',
-        rootHash: 'nonexistent',
-        totalNodes: 1,
-        nodes: [],
-        blobs: [],
-        timestamp: new Date().toISOString(),
-      };
-
-      const result = await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload: invalidPayload,
-        bs,
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.error).toBeDefined();
-    });
+    const db = makeDb();
+    const payload = {
+      origin: 'src-2',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: rootNode as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(2);
+    const arts = db.collections.get('articles')!;
+    expect(arts.calls.replaceOne.map((c) => c.doc._id)).toEqual(['r1', 'r2']);
+    // stripped _hash must NOT be written
+    expect(arts.calls.replaceOne[0].doc._hash).toBeUndefined();
   });
 
-  describe('getRljsonSyncState', () => {
-    it('should return null when no sync state exists', async () => {
-      const state = await getRljsonSyncState(mongoDbApply, 'unknownNode');
+  it('handles legacy collection-with-children and database recursion', async () => {
+    const bs = new BsMem();
+    const doc = { _id: 'd1' };
+    const docBlob = await bs.setBlob(Buffer.from(JSON.stringify(doc), 'utf-8'));
 
-      expect(state).toBeNull();
-    });
+    const docNode = tree(
+      { type: 'document', blobId: docBlob.blobId, collection: 'col1' },
+      { id: 'doc' },
+    );
+    const colNode = tree({ type: 'collection' }, { id: 'col', children: ['docH', 'missingChild'] });
+    const dbNode = tree({ type: 'database' }, { id: 'db', children: ['colH'] });
 
-    it('should return sync state after apply', async () => {
-      await mongoDbExtract
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'testNode',
-        bs,
-      });
-
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
-
-      const state = await getRljsonSyncState(mongoDbApply, 'testNode');
-
-      expect(state).toBeDefined();
-      expect(state!.origin).toBe('testNode');
-      expect(state!.lastRootHash).toBe(payload.rootHash);
-      expect(state!.totalNodes).toBe(payload.totalNodes);
-      expect(state!.totalBlobs).toBe(payload.blobs.length);
-    });
-
-    it('should update sync state on multiple applies', async () => {
-      await mongoDbExtract
-        .collection('users')
-        .insertOne({ _id: 'user1', name: 'Alice' });
-
-      const payload1 = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'testNode',
-        bs: new BsMem(),
-      });
-
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload: payload1,
-        bs: new BsMem(),
-      });
-
-      const state1 = await getRljsonSyncState(mongoDbApply, 'testNode');
-
-      // Add more data
-      await mongoDbExtract
-        .collection('users')
-        .insertOne({ _id: 'user2', name: 'Bob' });
-
-      const payload2 = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'testNode',
-        bs: new BsMem(),
-      });
-
-      await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload: payload2,
-        bs: new BsMem(),
-      });
-
-      const state2 = await getRljsonSyncState(mongoDbApply, 'testNode');
-
-      expect(state2!.lastRootHash).not.toBe(state1!.lastRootHash);
-      expect(state2!.totalBlobs).toBeGreaterThan(state1!.totalBlobs);
-    });
+    const db = makeDb();
+    const payload = {
+      origin: 'src-3',
+      rootHash: 'dbH',
+      totalNodes: 3,
+      nodes: [
+        { hash: 'dbH', node: dbNode as any },
+        { hash: 'colH', node: colNode as any },
+        { hash: 'docH', node: docNode as any },
+      ],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(1);
   });
 
-  describe('end-to-end sync', () => {
-    it('should sync data between two databases', async () => {
-      // Setup source with data
-      await mongoDbExtract.collection('users').insertMany([
-        { _id: 'user1', name: 'Alice', role: 'admin' },
-        { _id: 'user2', name: 'Bob', role: 'user' },
-      ]);
-      await mongoDbExtract.collection('posts').insertMany([
-        { _id: 'post1', title: 'First Post', author: 'user1' },
-        { _id: 'post2', title: 'Second Post', author: 'user2' },
-      ]);
+  it('returns failure when the root node is missing from the node map', async () => {
+    const db = makeDb();
+    const payload = {
+      origin: 'src-4',
+      rootHash: 'absent',
+      totalNodes: 0,
+      nodes: [],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('Root node not found: absent');
+    expect(res.documentsCreated).toBe(0);
+    expect(res.nodesApplied).toBe(0);
+  });
 
-      // Extract from source
-      const payload = await extractRljsonTree({
-        mongoDb: mongoDbExtract,
-        nodeId: 'sourceNode',
-        bs,
-      });
+  it('returns failure with String(error) for a non-Error throw', async () => {
+    const bs = new BsMem();
+    // setBlob that throws a non-Error to exercise the String(error) branch.
+    (bs as any).setBlob = async () => {
+      throw 'boom-string';
+    };
+    const payload = {
+      origin: 'src-5',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: tree({ type: 'database' }) as any }],
+      blobs: [{ blobId: 'x', content: Buffer.from('y').toString('base64') }],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: makeDb(), payload, bs });
+    expect(res.success).toBe(false);
+    expect(res.error).toBe('boom-string');
+  });
 
-      // Apply to target
-      const result = await applyRljsonTree({
-        mongoDb: mongoDbApply,
-        payload,
-        bs,
-      });
+  it('defaults bs to BsMem and tolerates a node with no meta / unmatched type', async () => {
+    // root node has meta:null → applyTreeNode returns 0 immediately.
+    const db = makeDb();
+    const payload = {
+      origin: 'src-6',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: tree(null) as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(0);
+  });
 
-      expect(result.success).toBe(true);
+  it('returns 0 for a document node missing its collection name', async () => {
+    const bs = new BsMem();
+    const rootNode = tree({ type: 'document', blobId: 'b' }); // no collection
+    const db = makeDb();
+    const payload = {
+      origin: 'src-7',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: rootNode as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(0);
+  });
 
-      // Verify data matches
-      const sourceUsers = await mongoDbExtract
-        .collection('users')
-        .find()
-        .sort({ _id: 1 })
-        .toArray();
-      const targetUsers = await mongoDbApply
-        .collection('users')
-        .find()
-        .sort({ _id: 1 })
-        .toArray();
+  it('returns 0 for a ComponentsTable node missing its collection name', async () => {
+    const bs = new BsMem();
+    const compBlob = await bs.setBlob(Buffer.from(JSON.stringify({ _data: [] }), 'utf-8'));
+    // type=collection + componentsBlobId but neither collection nor name set
+    const rootNode = { id: 'n', isParent: false, _hash: 'h', meta: { type: 'collection', componentsBlobId: compBlob.blobId } };
+    const db = makeDb();
+    const payload = {
+      origin: 'src-8',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: rootNode as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(0);
+  });
 
-      expect(JSON.stringify(targetUsers)).toBe(JSON.stringify(sourceUsers));
+  it('handles a ComponentsTable with no _data array (nullish coalesce)', async () => {
+    const bs = new BsMem();
+    const compBlob = await bs.setBlob(Buffer.from(JSON.stringify({}), 'utf-8'));
+    const rootNode = tree({ type: 'collection', componentsBlobId: compBlob.blobId, collection: 'empty' });
+    const db = makeDb();
+    const payload = {
+      origin: 'src-9',
+      rootHash: 'root',
+      totalNodes: 1,
+      nodes: [{ hash: 'root', node: rootNode as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(0);
+    // collection still registered for deletion-detection
+    expect(db.collections.has('empty')).toBe(true);
+  });
+});
 
-      const sourcePosts = await mongoDbExtract
-        .collection('posts')
-        .find()
-        .sort({ _id: 1 })
-        .toArray();
-      const targetPosts = await mongoDbApply
-        .collection('posts')
-        .find()
-        .sort({ _id: 1 })
-        .toArray();
+// ---------------------------------------------------------------------------
+// getRljsonSyncState
+// ---------------------------------------------------------------------------
 
-      expect(JSON.stringify(targetPosts)).toBe(JSON.stringify(sourcePosts));
+describe('applyRljsonTree branch coverage', () => {
+  it('database node with two document children in the same collection (already-present branch)', async () => {
+    const bs = new BsMem();
+    const d1 = { _id: 'a' };
+    const d2 = { _id: 'b' };
+    const b1 = await bs.setBlob(Buffer.from(JSON.stringify(d1), 'utf-8'));
+    const b2 = await bs.setBlob(Buffer.from(JSON.stringify(d2), 'utf-8'));
+    const doc1 = tree({ type: 'document', blobId: b1.blobId, collection: 'same' }, { id: 'd1' });
+    const doc2 = tree({ type: 'document', blobId: b2.blobId, collection: 'same' }, { id: 'd2' });
+    // database root with both doc children + one missing child hash → exercises
+    // both the database recursion AND the `if (childNode)` false branch.
+    const dbNode = tree({ type: 'database' }, { id: 'db', children: ['d1H', 'd2H', 'goneH'] });
+    const db = makeDb();
+    const payload = {
+      origin: 'b-1',
+      rootHash: 'dbH',
+      totalNodes: 3,
+      nodes: [
+        { hash: 'dbH', node: dbNode as any },
+        { hash: 'd1H', node: doc1 as any },
+        { hash: 'd2H', node: doc2 as any },
+      ],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(2);
+  });
+
+  it('two ComponentsTable nodes for the same collection (already-registered branch)', async () => {
+    const bs = new BsMem();
+    const ct1 = { _data: [{ _hash: 'x', _id: 'c1' }] };
+    const ct2 = { _data: [{ _hash: 'y', _id: 'c2' }] };
+    const cb1 = await bs.setBlob(Buffer.from(JSON.stringify(ct1), 'utf-8'));
+    const cb2 = await bs.setBlob(Buffer.from(JSON.stringify(ct2), 'utf-8'));
+    const col1 = tree({ type: 'collection', componentsBlobId: cb1.blobId, collection: 'dup' }, { id: 'c1' });
+    const col2 = tree({ type: 'collection', componentsBlobId: cb2.blobId, collection: 'dup' }, { id: 'c2' });
+    const dbNode = tree({ type: 'database' }, { id: 'db', children: ['c1H', 'c2H'] });
+    const db = makeDb();
+    const payload = {
+      origin: 'b-2',
+      rootHash: 'dbH',
+      totalNodes: 3,
+      nodes: [
+        { hash: 'dbH', node: dbNode as any },
+        { hash: 'c1H', node: col1 as any },
+        { hash: 'c2H', node: col2 as any },
+      ],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload, bs });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(2);
+  });
+
+  it('database node with no children falls through to return 0', async () => {
+    const dbNode = tree({ type: 'database' }, { id: 'db' }); // no children
+    const db = makeDb();
+    const payload = {
+      origin: 'b-4',
+      rootHash: 'dbH',
+      totalNodes: 1,
+      nodes: [{ hash: 'dbH', node: dbNode as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(0);
+  });
+
+  it('legacy collection node with a child hash absent from the map', async () => {
+    const colNode = tree({ type: 'collection' }, { id: 'col', children: ['absentH'] });
+    const db = makeDb();
+    const payload = {
+      origin: 'b-3',
+      rootHash: 'colH',
+      totalNodes: 1,
+      nodes: [{ hash: 'colH', node: colNode as any }],
+      blobs: [],
+      timestamp: 't',
+    };
+    const res = await applyRljsonTree({ mongoDb: db, payload });
+    expect(res.success).toBe(true);
+    expect(res.documentsCreated).toBe(0);
+  });
+});
+
+describe('getRljsonSyncState', () => {
+  it('returns the stored state for an origin', async () => {
+    const db = makeDb({
+      rljson_sync_state: [{ origin: 'o1', lastRootHash: 'r' }],
     });
+    const state = await getRljsonSyncState(db, 'o1');
+    expect(state).toEqual({ origin: 'o1', lastRootHash: 'r' });
+  });
+
+  it('returns null when no state exists', async () => {
+    const db = makeDb();
+    expect(await getRljsonSyncState(db, 'nope')).toBeNull();
   });
 });

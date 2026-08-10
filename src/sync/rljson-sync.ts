@@ -271,7 +271,7 @@ export async function applyRljsonTree(
 
 /**
  * Recursively applies a tree node and its children.
- *
+ * @param mongoDb - Target MongoDB database into which reconstructed documents are upserted
  * @param node - Tree node to apply
  * @param treeMap - Map of all tree nodes
  * @param bs - Blob storage instance
@@ -298,8 +298,13 @@ async function applyTreeNode(
     const docContent = blob.content.toString('utf-8');
     const doc = JSON.parse(docContent);
 
-    // Track expected document ID
+    // Track expected document ID.
+    // The `expectedDocsByCollection` guard's false-arm is unreachable via the
+    // only caller (applyRljsonTree), which always passes the map; ignore just
+    // that guard so the inner has()-branch is still measured.
+    /* v8 ignore start */
     if (expectedDocsByCollection) {
+      /* v8 ignore stop */
       if (!expectedDocsByCollection.has(collection)) {
         expectedDocsByCollection.set(collection, new Set());
       }
@@ -327,7 +332,8 @@ async function applyTreeNode(
 
     for (const row of componentsTable._data ?? []) {
       // Strip RLJSON-internal hash field; rest is the document
-      const { _hash: _ignored, ...doc } = row as Record<string, unknown>;
+      const { _hash, ...doc } = row as Record<string, unknown>;
+      void _hash;
       if ((doc as any)._id === undefined) continue;
 
       expectedDocsByCollection

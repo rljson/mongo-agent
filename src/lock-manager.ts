@@ -146,18 +146,25 @@ export class LockManager {
   }
 
   /**
-   * @param typ
-   * @param value
-   * Generate lock ID from type and value
+   * Generate the deterministic lock ID from an entity type and value.
+   *
+   * The ID has the form `"typ-value"` (e.g. `"8-127731"`) and is used as the
+   * `_id` of the lock record so that concurrent acquisitions collide on the
+   * unique index.
+   * @param typ - Numeric entity type of the locked record (see {@link EntityType}).
+   * @param value - Identifier of the locked record within its entity type.
    */
   private generateLockId(typ: number, value: string): string {
     return `${typ}-${value}`;
   }
 
   /**
-   * Acquire a lock on a record
-   * @param options
-   * Returns true if lock was acquired, false if already locked
+   * Acquire a lock on a record.
+   *
+   * Re-entrant for the same key (refreshes the lock's timestamp); returns
+   * `true` if the lock was acquired or already held by the same key, and
+   * `false` if it is currently held by another node/user.
+   * @param options - Lock target and owner metadata (entity type, value, key, name, etc.).
    */
   async acquireLock(options: LockOptions): Promise<boolean> {
     const lockId = this.generateLockId(options.typ, options.value);
@@ -221,12 +228,14 @@ export class LockManager {
   }
 
   /**
-   * Release a lock on a record
-   * Only the lock owner can release their lock
-   * @param typ
-   * @param value
-   * @param key
-   * Also saves to lock history for offline conflict detection
+   * Release a lock on a record.
+   *
+   * Only the lock owner (matching key) can release their lock. The released
+   * lock is also copied into the lock-history collection so that later offline
+   * conflict detection can tell when the record was locked and by whom.
+   * @param typ - Numeric entity type of the locked record.
+   * @param value - Identifier of the locked record within its entity type.
+   * @param key - Owner key that must match the existing lock to release it.
    */
   async releaseLock(typ: number, value: string, key: string): Promise<boolean> {
     const lockId = this.generateLockId(typ, value);
@@ -265,21 +274,25 @@ export class LockManager {
   }
 
   /**
-   * Check if a record is lockede
-   * @param typ
-   * @param valu
-   * Returns the lock record if locked, null otherwise
+   * Check whether a record is currently locked.
+   *
+   * Returns the active lock record if one exists, or `null` when the record is
+   * not locked.
+   * @param typ - Numeric entity type of the record to check.
+   * @param value - Identifier of the record within its entity type.
    */
   async isLocked(typ: number, value: string): Promise<LockRecord | null> {
     const lockId = this.generateLockId(typ, value);
     return await this.lockCollection.findOne({ _id: lockId });
   }
 
-  /** key
-   * @param typ
-   * @param value
-   * @param
-   * Check if a record is locked by a specific key
+  /**
+   * Check whether a record is locked by one specific key (node/user).
+   *
+   * Returns `true` only when an active lock exists and is owned by `key`.
+   * @param typ - Numeric entity type of the record to check.
+   * @param value - Identifier of the record within its entity type.
+   * @param key - Owner key to compare against the active lock's holder.
    */
   async isLockedBy(typ: number, value: string, key: string): Promise<boolean> {
     const lock = await this.isLocked(typ, value);
@@ -287,17 +300,19 @@ export class LockManager {
   }
 
   /**
-   * @param key
-   * Get all locks held by a specific key (node/user)
+   * Get all active locks held by a specific key (node/user).
+   * @param key - Owner key whose held locks should be returned.
    */
   async getLocksBy(key: string): Promise<LockRecord[]> {
     return await this.lockCollection.find({ key }).toArray();
   }
 
   /**
-   * Release all locks held by a specific key
-   * @param key
-   * Useful for cleanup when a node disconnects
+   * Release all locks held by a specific key.
+   *
+   * Useful for cleanup when a node disconnects. Returns the number of locks
+   * removed.
+   * @param key - Owner key whose held locks should all be released.
    */
   async releaseAllLocks(key: string): Promise<number> {
     const result = await this.lockCollection.deleteMany({ key });
@@ -305,8 +320,10 @@ export class LockManager {
   }
 
   /**
-   * @param maxAgeMs
-   * Remove stale locks older than the specified age in milliseconds
+   * Remove stale locks whose last update is older than the given age.
+   *
+   * Returns the number of stale locks deleted.
+   * @param maxAgeMs - Maximum allowed lock age in milliseconds; older locks are removed.
    */
   async removeOldLocks(maxAgeMs: number): Promise<number> {
     const cutoffDate = new Date(Date.now() - maxAgeMs);
@@ -319,11 +336,13 @@ export class LockManager {
   }
 
   /**
-   * Verify if an operation is allowed on a record
-   * @param typ
-   * @param value
-   * @param key
-   * Returns true if no lock exists or if locked by the same key
+   * Verify whether a modifying operation is allowed on a record.
+   *
+   * Returns `true` when no lock exists or when the existing lock is owned by
+   * the same key, and `false` when another key holds the lock.
+   * @param typ - Numeric entity type of the record to check.
+   * @param value - Identifier of the record within its entity type.
+   * @param key - Owner key requesting the modification.
    */
   async canModify(typ: number, value: string, key: string): Promise<boolean> {
     const lock = await this.isLocked(typ, value);
@@ -338,10 +357,13 @@ export class LockManager {
   }
 
   /**
-   * Attempt to acquire lock with retry
-   * @param options
-   * @param maxRetries
-   * @param retryDelayMs
+   * Attempt to acquire a lock, retrying a bounded number of times.
+   *
+   * Returns `true` as soon as the lock is acquired, or `false` after all
+   * attempts have been exhausted.
+   * @param options - Lock target and owner metadata passed to {@link acquireLock}.
+   * @param maxRetries - Maximum number of acquisition attempts before giving up.
+   * @param retryDelayMs - Delay in milliseconds to wait between failed attempts.
    */
   async acquireLockWithRetry(
     options: LockOptions,
@@ -363,14 +385,17 @@ export class LockManager {
   }
 
   /**
-   * Record an offline change made by a node
-   * @param typ
-   * @param value
-   * @param key
-   * @param changeData
-   * @param collection
-   * @param database
-   * This will be checked against lock history when the node comes back online
+   * Record an offline change made by a node while disconnected.
+   *
+   * The stored change is later checked against the lock history when the node
+   * comes back online, so conflicts with locks held by other nodes can be
+   * detected.
+   * @param typ - Numeric entity type of the changed record.
+   * @param value - Identifier of the changed record within its entity type.
+   * @param key - Node/user key that made the offline change.
+   * @param changeData - Payload describing the change that was applied offline.
+   * @param collection - Name of the collection the change targets.
+   * @param database - Name of the database the change targets.
    */
   async recordOfflineChange(
     typ: number,
@@ -396,10 +421,11 @@ export class LockManager {
   }
 
   /**
-   * Detect conflicts between offline changes and lock history
-   * Returns list of conflicts where offline changes were made
-   * @param key to records
-   * that were locked by other nodes during the offline period
+   * Detect conflicts between a node's offline changes and the lock history.
+   *
+   * Returns the list of offline changes that were made to records which were
+   * locked by other nodes during the offline period.
+   * @param key - Node/user key whose offline changes should be examined.
    */
   async detectOfflineConflicts(
     key: string,
@@ -435,7 +461,12 @@ export class LockManager {
   }
 
   /**
-   * Create conflict records in the sync_conflicts collection
+   * Create conflict records in the `sync_conflicts` collection.
+   *
+   * For each detected conflict, writes a record holding both the offline
+   * node's version and the lock holder's current server version, and returns
+   * the number of conflict records inserted.
+   * @param conflicts - Detected offline/lock conflicts to persist, as produced by {@link detectOfflineConflicts}.
    */
   async createConflictRecords(
     conflicts: Array<{ change: OfflineChange; lock: LockHistoryRecord }>,
@@ -455,7 +486,7 @@ export class LockManager {
           conflict.change.collection,
         );
         const currentDoc = await targetCollection.findOne({
-          _id: conflict.change.value,
+          _id: conflict.change.value as any,
         });
 
         return {
@@ -534,8 +565,8 @@ export class LockManager {
 }
 
 /**
- * Create a lock manager instance
- * @param db
+ * Create a {@link LockManager} instance bound to the given database.
+ * @param db - MongoDB database handle whose locking collections the manager operates on.
  */
 export function createLockManager(db: Db): LockManager {
   return new LockManager(db);
