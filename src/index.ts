@@ -43,3 +43,12 @@ export { MongoCakeSync } from './mongo-cake-sync.ts';
 export type { MongoStore, MongoCakeSyncOptions, ApplyResult } from './mongo-cake-sync.ts';
 export { MongoCakeAgent, MongoDbStore } from './mongo-cake-agent.ts';
 export type { MongoCakeAgentOptions } from './mongo-cake-agent.ts';
+
+// Edits-Chain components/edits mongo sync (convergence engine: per-lineage
+// incremental walk + per-document timeId ordering, deterministic late-joiner
+// catch-up). This is the variant running in production on the CARAT fleet.
+export { MongoEditSync } from './mongo-edit-sync.ts';
+export type { EditSyncConnector } from './mongo-edit-sync.ts';
+export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';
+export type { CollectPutsResult } from './mongo-edit-adapter.ts';
+export { EditCheckpoint } from './mongo-edit-checkpoint.ts';
