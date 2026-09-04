@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildMesh,
   converge,
+  docsOf,
   expectNoRegression,
   restartNode,
   settle,
@@ -264,6 +265,41 @@ describe('MongoEditSync — edit-chain convergence', () => {
       state['p2'],
       'B discarded the head instead of completing the pull by content hash',
     ).toMatchObject({ v: 1 });
+    expectNoRegression(nodes, COLLECTION);
+  }, 40_000);
+
+  // ...........................................................................
+  it('a late joiner catches up after its first pull came back empty', async () => {
+    const { nodes, stop } = await buildMesh(2, [COLLECTION]);
+    stopMesh = stop;
+    const [a, b] = nodes;
+
+    // Baseline: both nodes converge on v1.
+    a.put(COLLECTION, { _id: 'x', v: 1 });
+    await converge(nodes, COLLECTION);
+
+    // Reconnect race: B's origin rows are momentarily unresolvable. It still
+    // receives A's next head + root over the bus, but every pull comes back
+    // empty, so those refs are consumed by its received-dedup without applying
+    // anything — B is left holding a pending head whose content root it lacks.
+    b.peer.blockReads = true;
+    a.put(COLLECTION, { _id: 'x', v: 2 });
+    await settle([a]);
+    expect(
+      docsOf(b, COLLECTION)['x'],
+      'B applied v2 even though its pull was blocked',
+    ).toMatchObject({ v: 1 });
+
+    // Rows resolve again. Nothing new is written — only the periodic root
+    // heartbeat re-announces the UNCHANGED head/root. The late joiner must
+    // re-drive the pending head off that heartbeat and converge, rather than
+    // sit on v1 until some unrelated write mints a fresh hash.
+    b.peer.blockReads = false;
+    const state = await converge(nodes, COLLECTION);
+    expect(
+      state['x'],
+      'late joiner never caught up after its rows became resolvable',
+    ).toMatchObject({ v: 2 });
     expectNoRegression(nodes, COLLECTION);
   }, 40_000);
 });

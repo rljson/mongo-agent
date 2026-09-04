@@ -995,9 +995,8 @@ export class MongoEditSync {
       // back empty/partial because the origin's rows were not resolvable yet.
       // `_applyHead` no-ops when the head was already applied, and skips when
       // its tagged root is already ours — so this is cheap when converged.
-      const diverged = root !== this._contentRoot(collection);
       const pending = this._lastPeerHead.get(collection);
-      if (pending && diverged) {
+      if (pending && root !== this._contentRoot(collection)) {
         this._scheduleApply(
           collection,
           pending.head,
@@ -1005,17 +1004,6 @@ export class MongoEditSync {
           pending.ref,
         );
       }
-      // Keep the retry loop alive while we are diverged. The heartbeat re-emits
-      // the SAME root hash every tick, so after the first delivery the
-      // connector's received-dedup swallows it and this re-drive never fires
-      // again — a reconnecting node whose initial pull came back empty (the
-      // origin's rows were not yet resolvable in the reconnect race) then sits
-      // on stale data until some UNRELATED new write mints a fresh hash. Clear
-      // the root ref from the received-dedup so the next identical heartbeat is
-      // delivered again and re-drives the pending head, giving a deterministic
-      // ~heartbeat-interval retry until we converge. When roots already match we
-      // let the dedup swallow it — no work, no chatter on a healthy cluster.
-      if (diverged) this._connector.invalidateReceived?.(ref);
       return;
     }
     const idx = ref.indexOf(':');

@@ -212,6 +212,13 @@ export class MeshPeerIo implements Io {
    * (`readRowsByHashes`) still resolves it.
    */
   readonly singleReadBlockedTables = new Set<string>();
+  /**
+   * When true, BOTH read paths (`readRows` and `readRowsByHashes`) fail, so a
+   * pull comes back empty — models a reconnecting node whose origin rows are not
+   * yet resolvable in the reconnect race. Flip back to false to let the retry
+   * succeed.
+   */
+  blockReads = false;
 
   constructor(private readonly _peers: () => Io[]) {}
 
@@ -277,6 +284,7 @@ export class MeshPeerIo implements Io {
     where: { [column: string]: JsonValue | null };
   }): Promise<Rljson> {
     this.readRowCalls++;
+    if (this.blockReads) throw new Error(`Timeout after 30000ms: readRows`);
     const wanted = request.where['_hash'];
     if (
       this.singleReadBlockedTables.has(request.table) ||
@@ -318,6 +326,9 @@ export class MeshPeerIo implements Io {
   }): Promise<Rljson> {
     this.batchReadCalls++;
     this.batchSizes.push(request.hashes.length);
+    if (this.blockReads) {
+      throw new Error(`Timeout after 30000ms: readRowsByHashes`);
+    }
     let found = false;
     const rows = new Map<string, Json>();
     let type: ContentType | undefined;

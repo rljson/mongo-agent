@@ -33,8 +33,8 @@ export default defineConfig(({ mode }) => {
         all: true,
         thresholds: {
           statements: 99,
-          branches: 88,
-          functions: 98,
+          branches: 97,
+          functions: 99,
           lines: 99,
         },
         checkCoverage: true,
