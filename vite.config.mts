@@ -20,8 +20,6 @@ export default defineConfig({
     lib: {
       entry: {
         index: resolve(__dirname, 'src/index.ts'),
-        'agent-server': resolve(__dirname, 'src/agent-server.ts'),
-        'hub/index': resolve(__dirname, 'src/hub/index.ts'),
       },
       formats: ['es'],
     },
