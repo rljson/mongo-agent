@@ -529,6 +529,8 @@ export class MongoEditSync {
    * @param collection - The collection whose accumulator to update.
    * @param digest - The 32-byte entry digest to fold in (add or, identically,
    *   remove — XOR is self-inverse).
+   * @param bucket - The manifest bucket the entry belongs to (its per-bucket
+   *   accumulator is updated alongside the whole-collection one).
    */
   private _xorEntry(collection: string, digest: Buffer, bucket: number): void {
     const acc = this._accOf(collection);
@@ -1192,23 +1194,14 @@ export class MongoEditSync {
     const hb = setInterval(() => {
       for (const collection of this._collections) {
         // Re-announce the content root (drives the no-op convergence check).
+        // Anti-entropy is NOT self-triggered from here: with the connector's
+        // sequenced re-announce (causalOrdering) the peer's `~R~` root heartbeat
+        // is delivered reliably even when the hash is unchanged, so the `_onRef`
+        // ROOT branch fires the reconciliation on receipt. Driving a round for
+        // every diverged collection on every heartbeat instead flooded the
+        // connector (dozens of AEQ + their AER per tick × every node), which
+        // starved head propagation and dropped cross-subnet peers.
         this._broadcastRoot(collection);
-        // SELF-TRIGGER anti-entropy when we are behind. A peer advertises its
-        // content root on every head ref (`<head>|<root>`), and we keep the last
-        // one in `_lastPeerHead`. If it differs from ours, drive a reconciliation
-        // round from here — do NOT wait to RECEIVE the peer's `~R~` root
-        // heartbeat: that repeats a byte-identical ref every tick, so the
-        // receiver's dedup swallows it and, through a relay, the round would
-        // never (re)fire — the exact 10-node stall observed (leaf receivers at
-        // recv-root=0 yet holding the peer head's root). `_maybeTriggerAe` is
-        // cooldown-guarded, so calling it each heartbeat is cheap when converged.
-        const peerRoot = this._lastPeerHead.get(collection)?.root;
-        if (
-          peerRoot !== undefined &&
-          peerRoot !== this._contentRoot(collection)
-        ) {
-          this._maybeTriggerAe(collection);
-        }
         const head = this._adapter.headRef(collection);
         if (!head) continue;
         const ref = this._headRef(collection, head);
