@@ -5,7 +5,16 @@
 // found in the LICENSE file in the root of this package.
 
 export { MongoAgent } from './mongo-agent.ts';
+export type { MongoAgentOptions } from './mongo-agent.ts';
 export { MongoScanner } from './mongo-scanner.ts';
+export type {
+  MongoChange,
+  MongoChangeCallback,
+  MongoChangeType,
+  MongoNodeMeta,
+  MongoScanOptions,
+  TreeRef,
+} from './mongo-scanner.ts';
 export { MongoBlobAdapter } from './mongo-blob-adapter.ts';
 export { applyRljsonTree, extractRljsonTree } from './sync/rljson-sync.ts';
 export type { RljsonTreePayload } from './sync/rljson-sync.ts';
@@ -27,4 +36,19 @@ export { MongoDbAdapter } from './mongo-db-adapter.ts';
 export { MongoDbTreeAdapter } from './mongo-db-tree-adapter.ts';
 export { MongoToRljsonConverter } from './mongo-to-rljson-converter.ts';
 export type { MongoTree, Tree } from './mongo-scanner.ts';
-export { computeIntegrityHash } from './hashing/integrity-hash.ts';
+export {
+  computeIntegrityHash,
+  computeOpHash,
+  sha256Hex,
+} from './hashing/integrity-hash.ts';
+export {
+  computeStateCheckpoint,
+  docLeafHash,
+  getLatestCheckpoint,
+} from './hashing/state-hash.ts';
+export type {
+  ComputeStateCheckpointOptions,
+  DocWithHash,
+  MerklePartition,
+  StateCheckpoint,
+} from './hashing/state-hash.ts';
