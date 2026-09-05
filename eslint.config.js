@@ -20,7 +20,6 @@ export default [
       '.git',
       'src/scripts/',
       'test/e2e/',
-      'ui-conflict-resolver/',
     ],
   },
 
