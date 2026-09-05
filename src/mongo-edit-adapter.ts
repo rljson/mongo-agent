@@ -110,7 +110,12 @@ export interface CollectedPut {
  * `MongoEditSync._applyHead`, which treats `!complete` like an empty pull.
  */
 export interface CollectPutsResult {
-  /** The upserts resolvable from the walked chain, oldest first. */
+  /**
+   * The upserts to apply, oldest first. When the walk hit a row it could not
+   * resolve, this holds only the edits NEWER than that hole: an unreadable
+   * edit may be the delete or unset that supersedes an older one, so applying
+   * anything below it would undo a newer change.
+   */
   puts: CollectedPut[];
   /** `false` if any walked edit-history / multi-edit / edit row was missing. */
   complete: boolean;
@@ -585,19 +590,45 @@ export class MongoEditAdapter {
     const applyOrder = [...order].reverse();
     const puts: CollectedPut[] = [];
     const resolved = new Set<string>();
-    for (const ehRef of applyOrder) {
+    // Reconstruct in apply order, remembering the NEWEST node that could not be
+    // reconstructed.
+    //
+    // A hole is not only a reason to re-pull: it shadows everything older than
+    // itself. An edit we cannot read may be the delete, or the unset, that
+    // supersedes an older edit we CAN read — and `timeId` is no defence there,
+    // because the edit that would have out-ordered the old one never arrived.
+    // Applying the old one then undoes a newer change: on ten nodes restarted
+    // at once, a deleted document and a removed field came back exactly this
+    // way. So nothing at or below the hole is applied; only the suffix above it
+    // is, where every edit is newer than anything we failed to resolve.
+    const reconstructed: Array<{
+      index: number;
+      ehRef: string;
+      edit: Record<string, unknown>;
+      timeId: string | undefined;
+    }> = [];
+    let lastHole = -1;
+    for (let index = 0; index < applyOrder.length; index++) {
+      const ehRef = applyOrder[index];
       const eh = rows.get(ehRef) as Record<string, unknown>;
-      // A history row whose multiEdit or edit did not resolve is a hole in the
-      // chain just like a missing history row: referenced, but not delivered by
-      // any read path.
       const multiEdit = multiEdits.get(eh['multiEditRef'] as string);
       const edit = edits.get(multiEdit?.['edit'] as string);
       if (!edit) {
         complete = false;
+        lastHole = index;
         continue;
       }
-      resolved.add(ehRef);
-      const put = this._putOf(edit, eh['timeId'] as string | undefined);
+      reconstructed.push({
+        index,
+        ehRef,
+        edit,
+        timeId: eh['timeId'] as string | undefined,
+      });
+    }
+    for (const node of reconstructed) {
+      if (node.index < lastHole) continue;
+      resolved.add(node.ehRef);
+      const put = this._putOf(node.edit, node.timeId);
       if (put) puts.push(put);
     }
 

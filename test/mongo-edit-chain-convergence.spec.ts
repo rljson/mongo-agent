@@ -302,4 +302,53 @@ describe('MongoEditSync — edit-chain convergence', () => {
     ).toMatchObject({ v: 2 });
     expectNoRegression(nodes, COLLECTION);
   }, 40_000);
+  // ...........................................................................
+  it('a partial walk never applies an edit older than one it could not resolve', async () => {
+    // Field report, ten nodes restarted at once: a deleted document and a
+    // removed field came back on individual nodes. The walk applied the old
+    // insert because the NEWER delete row happened not to be resolvable at
+    // that moment — and `timeId` cannot help there, because the edit that
+    // would have out-ordered it never arrived. Ordering only protects what
+    // reaches the node; the truncation itself has to.
+    const { nodes, stop } = await buildMesh(2, [COLLECTION]);
+    stopMesh = stop;
+    const [a, b] = nodes;
+
+    // B is offline while A creates and then deletes the document, so B has
+    // applied neither edit and will have to walk both.
+    b.peer.blockReads = true;
+    a.put(COLLECTION, { _id: 'ghost', v: 1 });
+    await settle([a]);
+    a.del(COLLECTION, 'ghost');
+    await settle([a], 1500);
+    // One more document AFTER the delete, so the two nodes' content roots
+    // differ and B actually has to walk the chain instead of short-circuiting
+    // on a matching root.
+    a.put(COLLECTION, { _id: 'keep', v: 1 });
+    await settle([a]);
+    expect(docsOf(a, COLLECTION)['ghost']).toBeUndefined();
+
+    // B comes back, but the tombstone's edit row is the one the relay cannot
+    // deliver. The older insert resolves fine.
+    const dump = await a.local.dumpTable({ table: ED_TABLE });
+    const tombstone = (
+      dump[ED_TABLE]._data as Array<{ _hash: string; name?: string }>
+    ).find((row) => String(row.name).startsWith('put customers/ghost') &&
+      JSON.stringify(row).includes('slTombstone'));
+    expect(tombstone, 'no tombstone edit row found').toBeDefined();
+    b.peer.unresolvableRows.add((tombstone as { _hash: string })._hash);
+    b.peer.blockReads = false;
+
+    await settle(nodes, 4000);
+
+    // B must have pulled — otherwise this asserts nothing.
+    expect(
+      docsOf(b, COLLECTION)['keep'],
+      'B never pulled at all, so the case under test was not exercised',
+    ).toMatchObject({ v: 1 });
+    expect(
+      docsOf(b, COLLECTION)['ghost'],
+      'B resurrected a document whose delete it could not resolve',
+    ).toBeUndefined();
+  }, 40_000);
 });

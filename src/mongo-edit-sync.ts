@@ -1137,10 +1137,19 @@ export class MongoEditSync {
       // of the chain. That is NOT a reason to throw the pull away, which is
       // what used to happen: the head was invalidated, and because the content
       // root never matched again the node sat on the old state until it was
-      // restarted. Apply what did resolve — an apply can no longer move a
-      // document backwards, so a partial chain is safe — remember only the refs
-      // whose whole ancestry resolved, and clear the received-dedup so a later
-      // re-announce delivers the head again and completes the rest.
+      // restarted.
+      //
+      // What IS applied is only the part of the chain newer than the hole —
+      // `collectPuts` drops the rest. An earlier version applied everything it
+      // could read and argued that per-document `timeId` ordering made that
+      // safe. It does not: ordering only decides between edits that arrive, and
+      // an unreadable edit may be exactly the delete or unset that supersedes
+      // an older one. On ten nodes restarted at once that brought a deleted
+      // document and a removed field back.
+      //
+      // Remember only the refs whose whole ancestry resolved, and clear the
+      // received-dedup so a later re-announce delivers the head again and
+      // completes the rest.
       this._log(
         `applyHead ${collection} head=${head} PARTIAL -> applying ` +
           `${puts.length} resolvable put(s), re-arming the ref`,
