@@ -1,0 +1,105 @@
+<div class="conflict-list-container">
+  <header class="page-header">
+    <h1>🔄 RLJSON Sync Conflicts</h1>
+    <div class="header-actions">
+      <span
+        class="conflict-badge"
+        [class.has-conflicts]="getPendingCount() > 0">
+        {{ getPendingCount() }} Pending
+      </span>
+      <button
+        class="btn-sync"
+        (click)="triggerSync()">
+        🔄 Trigger Sync
+      </button>
+    </div>
+  </header>
+
+  <div
+    class="loading-state"
+    *ngIf="loading">
+    <div class="spinner"></div>
+    <p>Loading conflicts...</p>
+  </div>
+
+  <div
+    class="error-state"
+    *ngIf="error">
+    <div class="error-icon">⚠️</div>
+    <p>{{ error }}</p>
+  </div>
+
+  <div
+    class="conflicts-grid"
+    *ngIf="!loading && !error">
+    <div
+      class="empty-state"
+      *ngIf="conflicts.length === 0">
+      <div class="empty-icon">✅</div>
+      <h2>No Conflicts Detected</h2>
+      <p>All nodes are synchronized successfully</p>
+    </div>
+
+    <div
+      class="conflict-card"
+      *ngFor="let conflict of conflicts"
+      [class]="getStatusClass(conflict.status)">
+      <div class="conflict-header">
+        <span class="conflict-type-badge">
+          {{ getConflictTypeLabel(conflict.conflictType) }}
+        </span>
+        <span class="conflict-status">{{ conflict.status }}</span>
+      </div>
+
+      <div class="conflict-info">
+        <div class="info-row">
+          <span class="label">Document ID:</span>
+          <code class="document-id">{{ conflict.documentId }}</code>
+        </div>
+        <div class="info-row">
+          <span class="label">Collection:</span>
+          <span class="value"
+            >{{ conflict.database }}.{{ conflict.collection }}</span
+          >
+        </div>
+        <div class="info-row">
+          <span class="label">Detected:</span>
+          <span class="value">{{ getTimeAgo(conflict.detectedAt) }}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Versions:</span>
+          <span class="value"
+            >{{ conflict.versions.length }} conflicting versions</span
+          >
+        </div>
+      </div>
+
+      <div class="conflict-versions">
+        <div
+          class="version-chip"
+          *ngFor="let version of conflict.versions">
+          <div class="version-header">
+            <span class="node-id">📍 {{ version.nodeId }}</span>
+            <span class="operation-type">{{ version.operationType }}</span>
+          </div>
+          <div class="version-time">{{ getTimeAgo(version.timestamp) }}</div>
+        </div>
+      </div>
+
+      <div class="conflict-actions">
+        <a
+          [routerLink]="['/conflicts', conflict.conflictId]"
+          class="btn-resolve"
+          *ngIf="conflict.status === 'pending'">
+          🔍 Resolve Conflict
+        </a>
+        <a
+          [routerLink]="['/conflicts', conflict.conflictId]"
+          class="btn-view"
+          *ngIf="conflict.status !== 'pending'">
+          👁️ View Details
+        </a>
+      </div>
+    </div>
+  </div>
+</div>

@@ -78,7 +78,33 @@ Read [install-wsl-and-ubuntu.md](install-wsl-and-ubuntu.md)
 
 ### Docker Engine
 
-Read [install-docker.md](install-docker.md)
+**Important: You don't need Docker Desktop!** Docker Desktop requires a paid license for companies with 250+ employees or $10M+ revenue. Use these free alternatives instead:
+
+#### macOS - Colima (Recommended)
+```bash
+brew install colima docker docker-compose
+colima start
+```
+
+#### Windows - Rancher Desktop (Recommended)
+```powershell
+winget install Rancher.RancherDesktop
+```
+
+**Alternative for Windows: Podman Desktop**
+```powershell
+winget install RedHat.Podman-Desktop
+```
+
+#### Linux - Docker Engine
+```bash
+sudo apt-get install docker.io docker-compose-plugin
+sudo service docker start
+```
+
+All these alternatives provide the same `docker` and `docker compose` commands. Your development environment and tests work identically with any of them.
+
+For more details, read [install-docker.md](install-docker.md)
 
 ### SQL Server
 
@@ -286,3 +312,40 @@ Make sure, all recommended extensions are installed.
 ```bash
 corepack use pnpm
 ```
+
+### Start the Development Environment
+
+After setting up the tools and cloning the project, start the Docker infrastructure:
+
+```bash
+# Start all services (MongoDB instances, agents, hub)
+npm run docker:up
+
+# Verify containers are running
+docker compose ps
+
+# You should see 5 containers:
+# - mongoa (port 27017)
+# - mongob (port 27018)
+# - agenta (port 3001)
+# - agentb (port 3002)
+# - hub (port 3200)
+```
+
+**View logs:**
+```bash
+npm run docker:logs
+```
+
+**Stop services:**
+```bash
+npm run docker:down
+```
+
+**Rebuild after code changes:**
+```bash
+npm run docker:build
+npm run docker:up
+```
+
+Now you're ready to run tests and develop! See [develop.md](./develop.md) for the development workflow.

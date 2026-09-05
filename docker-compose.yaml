@@ -1,0 +1,179 @@
+services:
+
+  # ------------------ Mongo A ------------------
+  mongoa:
+    image: mongo:7
+    command:
+      [
+        "mongod",
+        "--replSet", "rsA",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB", "1.5"
+      ]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongoa_data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --host localhost:27017 --quiet --eval 'db.hello().ok' | grep 1 >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  mongoa_init:
+    image: mongo:7
+    depends_on:
+      mongoa:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      bash -lc "
+      set -euo pipefail;
+      echo '[mongoa_init] waiting for mongod...';
+      for i in {1..60}; do
+        mongosh --host mongoa:27017 --quiet --eval 'db.hello().ok' >/dev/null 2>&1 && break;
+        sleep 1;
+      done;
+
+      echo '[mongoa_init] initiating replSet if needed...';
+      mongosh --host mongoa:27017 --quiet --eval '
+        try {
+          const s = rs.status();
+          print(\"rsA already initiated\");
+        } catch (e) {
+          rs.initiate({_id:\"rsA\", members:[{_id:0, host:\"mongoa:27017\"}]});
+          print(\"rsA initiated\");
+        }
+      ';
+
+      echo '[mongoa_init] waiting for PRIMARY...';
+      mongosh --host mongoa:27017 --quiet --eval '
+        for (let i=0;i<90;i++){
+          const h = db.hello();
+          if (h.isWritablePrimary) { print(\"PRIMARY\"); quit(0); }
+          sleep(1000);
+        }
+        print(\"NOT PRIMARY\"); quit(2);
+      ';
+      "
+
+  # ------------------ Mongo B ------------------
+  mongob:
+    image: mongo:7
+    command:
+      [
+        "mongod",
+        "--replSet", "rsB",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB", "1.5"
+      ]
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongob_data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --host localhost:27017 --quiet --eval 'db.hello().ok' | grep 1 >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  mongob_init:
+    image: mongo:7
+    depends_on:
+      mongob:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      bash -lc "
+      set -euo pipefail;
+      echo '[mongob_init] waiting for mongod...';
+      for i in {1..60}; do
+        mongosh --host mongob:27017 --quiet --eval 'db.hello().ok' >/dev/null 2>&1 && break;
+        sleep 1;
+      done;
+
+      echo '[mongob_init] initiating replSet if needed...';
+      mongosh --host mongob:27017 --quiet --eval '
+        try {
+          const s = rs.status();
+          print(\"rsB already initiated\");
+        } catch (e) {
+          rs.initiate({_id:\"rsB\", members:[{_id:0, host:\"mongob:27017\"}]});
+          print(\"rsB initiated\");
+        }
+      ';
+
+      echo '[mongob_init] waiting for PRIMARY...';
+      mongosh --host mongob:27017 --quiet --eval '
+        for (let i=0;i<90;i++){
+          const h = db.hello();
+          if (h.isWritablePrimary) { print(\"PRIMARY\"); quit(0); }
+          sleep(1000);
+        }
+        print(\"NOT PRIMARY\"); quit(2);
+      ';
+      "
+
+  # ------------------ Hub ------------------
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile.hub
+    environment:
+      PORT: "3200"
+      NODE_OPTIONS: "--max-old-space-size=256"
+    ports:
+      - "3200:3200"
+    restart: unless-stopped
+
+  # ------------------ Agent A ------------------
+  agenta:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    depends_on:
+      mongoa_init:
+        condition: service_completed_successfully
+      hub:
+        condition: service_started
+    environment:
+      NODE_ID: "nodeA"
+      MONGO_URI: "mongodb://mongoa:27017/syncdb?replicaSet=rsA"
+      DB_NAME: "syncdb"
+      PORT: "3001"
+      HUB_URL: "http://hub:3200"
+      PEERS: "nodeB"
+      SYNC_INTERVAL_MS: "2000"
+      NODE_OPTIONS: "--max-old-space-size=8192"
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+
+  # ------------------ Agent B ------------------
+  agentb:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    depends_on:
+      mongob_init:
+        condition: service_completed_successfully
+      hub:
+        condition: service_started
+    environment:
+      NODE_ID: "nodeB"
+      MONGO_URI: "mongodb://mongob:27017/syncdb?replicaSet=rsB"
+      DB_NAME: "syncdb"
+      PORT: "3002"
+      HUB_URL: "http://hub:3200"
+      PEERS: "nodeA"
+      SYNC_INTERVAL_MS: "2000"
+      NODE_OPTIONS: "--max-old-space-size=8192"
+    ports:
+      - "3002:3002"
+    restart: unless-stopped
+
+volumes:
+  mongoa_data:
+  mongob_data:

@@ -14,10 +14,13 @@ export default defineConfig({
   build: {
     copyPublicDir: false,
     minify: false,
+    target: 'node22',
     // sourcemap: 'inline',
 
     lib: {
-      entry: resolve(__dirname, 'src/index.ts'),
+      entry: {
+        index: resolve(__dirname, 'src/index.ts'),
+      },
       formats: ['es'],
     },
     rollupOptions: {
@@ -25,6 +28,10 @@ export default defineConfig({
         '@rljson/rljson',
         '@rljson/json',
         '@rljson/hash',
+        'fastify',
+        'mongodb',
+        'bson',
+        /^node:.*/,
         // Add all peer depencies from package.json here
       ],
       output: {

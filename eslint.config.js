@@ -4,9 +4,24 @@ import tseslint from 'typescript-eslint';
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
-  // Ignore all JS files and the coverage folder
+  // Ignore all JS files and the coverage folder. Also scope linting to the
+  // library core: exclude the coverage-excluded utility scripts, the standalone
+  // e2e / benchmark runners under test/e2e (not vitest unit specs), the separate
+  // Angular UI sub-package (own lint config), and temporary probe files.
   {
-    ignores: ['**/*.js', 'coverage/', 'dist/', 'node_modules', '.git'],
+    ignores: [
+      '**/*.js',
+      '**/*.cjs',
+      '_*.ts',
+      '_*.mts',
+      'coverage/',
+      'dist/',
+      'node_modules',
+      '.git',
+      'src/scripts/',
+      'test/e2e/',
+      'ui-conflict-resolver/',
+    ],
   },
 
   // Configure eslint for implementation files

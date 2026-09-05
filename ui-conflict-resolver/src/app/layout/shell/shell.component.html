@@ -1,0 +1,37 @@
+<div class="control-panel">
+  <!-- Header with Node Info -->
+  <header class="panel-header">
+    <div class="header-content">
+      <div class="header-left">
+        <h1 class="panel-title">RLJSON Node Control Panel</h1>
+      </div>
+      <div class="header-right">
+        <span class="node-badge">
+          <span class="node-id">{{ nodeId }}</span>
+          <span
+            class="node-role"
+            [class.role-hub]="nodeRole === 'Hub'">
+            {{ nodeRole }}
+          </span>
+        </span>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <nav class="panel-nav">
+      <a
+        *ngFor="let item of navItems"
+        [routerLink]="item.path"
+        routerLinkActive="active"
+        class="nav-item">
+        <span class="nav-icon">{{ item.icon }}</span>
+        <span class="nav-label">{{ item.label }}</span>
+      </a>
+    </nav>
+  </header>
+
+  <!-- Main Content Area -->
+  <main class="panel-content">
+    <router-outlet></router-outlet>
+  </main>
+</div>
