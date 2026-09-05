@@ -219,6 +219,14 @@ export class MeshPeerIo implements Io {
    * succeed.
    */
   blockReads = false;
+  /**
+   * Row hashes this relay cannot deliver on EITHER path — the row is simply
+   * absent from the result, which is what a receiver actually sees when a
+   * referenced row is not resolvable through the hub. Unlike
+   * {@link blockReads} this leaves the rest of the request working, so a walk
+   * can resolve some nodes of a chain and not others.
+   */
+  readonly unresolvableRows = new Set<string>();
 
   constructor(private readonly _peers: () => Io[]) {}
 
@@ -285,6 +293,11 @@ export class MeshPeerIo implements Io {
   }): Promise<Rljson> {
     this.readRowCalls++;
     if (this.blockReads) throw new Error(`Timeout after 30000ms: readRows`);
+    if (typeof wanted === 'string' && this.unresolvableRows.has(wanted)) {
+      return {
+        [request.table]: { _data: [], _type: undefined },
+      } as unknown as Rljson;
+    }
     const wanted = request.where['_hash'];
     if (
       this.singleReadBlockedTables.has(request.table) ||
@@ -347,7 +360,9 @@ export class MeshPeerIo implements Io {
         found = true;
         type ??= table._type;
         for (const row of table._data) {
-          rows.set((row as { _hash?: string })._hash as string, row);
+          const hash = (row as { _hash?: string })._hash as string;
+          if (this.unresolvableRows.has(hash)) continue;
+          rows.set(hash, row);
         }
       } catch {
         continue;

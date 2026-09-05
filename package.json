@@ -1,6 +1,6 @@
 {
   "name": "@rljson/mongo-agent",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "description": "Rljson mongo-agent description",
   "homepage": "https://github.com/rljson/mongo-agent",
   "bugs": "https://github.com/rljson/mongo-agent/issues",
