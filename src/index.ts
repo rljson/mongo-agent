@@ -19,3 +19,12 @@ export type { EditSyncConnector } from './mongo-edit-sync.ts';
 export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';
 export type { CollectPutsResult } from './mongo-edit-adapter.ts';
 export { EditCheckpoint } from './mongo-edit-checkpoint.ts';
+
+// Adapters and helpers the consuming app builds on. They were part of the
+// package's source from the first port but not of its public surface, so
+// cos-one-client could not drop its own copy of them.
+export { MongoDbAdapter } from './mongo-db-adapter.ts';
+export { MongoDbTreeAdapter } from './mongo-db-tree-adapter.ts';
+export { MongoToRljsonConverter } from './mongo-to-rljson-converter.ts';
+export type { MongoTree, Tree } from './mongo-scanner.ts';
+export { computeIntegrityHash } from './hashing/integrity-hash.ts';

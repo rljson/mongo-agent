@@ -1,6 +1,6 @@
 {
   "name": "@rljson/mongo-agent",
-  "version": "0.0.18",
+  "version": "0.0.19",
   "description": "Rljson mongo-agent description",
   "homepage": "https://github.com/rljson/mongo-agent",
   "bugs": "https://github.com/rljson/mongo-agent/issues",
@@ -13,7 +13,7 @@
     "type": "git",
     "url": "git+https://github.com/rljson/mongo-agent.git"
   },
-  "main": "dist/mongo-agent.js",
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"
