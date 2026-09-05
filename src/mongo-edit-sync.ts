@@ -7,12 +7,16 @@
 
 import type { Db } from '@rljson/db';
 import { createHash } from 'node:crypto';
-import type { Db as MongoDb } from 'mongodb';
+import type { Db as MongoDb, Document } from 'mongodb';
+import { ObjectId } from 'mongodb';
 
+import { AE_BUCKET_COUNT, MongoAntiEntropy } from './mongo-anti-entropy.ts';
+import type { AntiEntropyHost } from './mongo-anti-entropy.ts';
 import { docHash } from './mongo-component-codec.ts';
 import type { CollectPutsResult } from './mongo-edit-adapter.ts';
 import { compareTimeId, MongoEditAdapter } from './mongo-edit-adapter.ts';
 import type { EditCheckpoint } from './mongo-edit-checkpoint.ts';
+import { bucketOf as sharedBucketOf } from './mongo-manifest-hash.ts';
 
 /**
  * Marks a component as a delete tombstone. A delete is modeled as a
@@ -22,6 +26,13 @@ import type { EditCheckpoint } from './mongo-edit-checkpoint.ts';
  * written.
  */
 const TOMBSTONE_FIELD = '__slTombstone';
+
+/**
+ * The Mongo collection holding this node's persistent tombstone log: one row
+ * per `<collection>|<sliceId>` this node deleted, re-loaded on adopt so the
+ * manifest-diff backfill never resurrects a locally-deleted doc after a restart.
+ */
+const TOMBSTONE_LOG = 'sl_edit_tombstones';
 
 /**
  * Prefix marking a broadcast ref as a CONTENT ROOT
@@ -157,6 +168,57 @@ export class MongoEditSync {
    * root; {@link _contentRoot} just hex-encodes this buffer.
    */
   private readonly _rootAcc = new Map<string, Buffer>();
+  /**
+   * collection → a single Buffer of `AE_BUCKET_COUNT × 32` bytes: the per-bucket
+   * XOR accumulators used by the manifest-diff backfill. Bucket `b` occupies
+   * `[b*32, b*32+32)` and holds the XOR of the entry digests of every sliceId
+   * whose {@link _bucketOf} is `b`. Maintained incrementally alongside the root
+   * accumulator (their full XOR is identical), so two nodes compare
+   * `AE_BUCKET_COUNT` cheap per-bucket roots to locate exactly which buckets
+   * hold a discrepancy without shipping a multi-million-entry manifest.
+   */
+  private readonly _bucketAcc = new Map<string, Buffer>();
+  /**
+   * collection → (sliceId → original typed `_id`) of docs deleted on THIS node,
+   * consulted synchronously by the backfill so it never resurrects a locally-
+   * deleted doc; the typed `_id` lets the delete be re-materialised against a
+   * peer whose `_id` is not a plain string (ObjectId / Int32).
+   */
+  private readonly _tombstones = new Map<string, Map<string, unknown>>();
+  /** collection → earliest time a new backfill round may start (cooldown). */
+  private readonly _aeCooldownUntil = new Map<string, number>();
+  /**
+   * Collections whose cold-start baseline is fully built. The backfill is gated
+   * on this: a manifest still being scanned would compare as "everything
+   * differs" against a peer and trigger a useless full exchange.
+   */
+  private readonly _baselineReady = new Set<string>();
+  /**
+   * `true` once the INITIAL cold-start (adopting every collection present at
+   * start-up) has finished. Anti-entropy is gated on this GLOBALLY — while the
+   * mega collections are still hashing, a small collection must NOT start
+   * pulling disjoint docs (that concurrent load wedged a node mid-cold-start).
+   * After cold-start completes, AE runs freely and reconciles large deltas.
+   */
+  private _coldStartComplete = false;
+  /* v8 ignore next -- @preserve backfill on/off, env-overridable */
+  private readonly _antiEntropyOn = process.env['SL_EDIT_ANTIENTROPY'] !== '0';
+  /* v8 ignore next -- @preserve tombstone-log kill switch, env-overridable */
+  private readonly _tombstoneLogOn =
+    process.env['SL_EDIT_TOMBSTONE_LOG'] !== '0';
+  /* v8 ignore next -- @preserve backfill cooldown ms, env-overridable */
+  private readonly _aeCooldownMs =
+    Number(process.env['SL_EDIT_AE_COOLDOWN_MS']) || 2_000;
+  /* v8 ignore next -- @preserve backfill round timeout ms, env-overridable */
+  private readonly _aeRoundTimeoutMs =
+    Number(process.env['SL_EDIT_AE_ROUND_TIMEOUT_MS']) || 30_000;
+  /** collection → in-flight backfill-round abort timer. */
+  private readonly _aeRoundTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  /** The manifest-diff backfill engine (bucketed anti-entropy). */
+  private readonly _ae: MongoAntiEntropy;
   /**
    * collection → the last head a peer announced, with the content root that
    * head produces and the ref exactly as received. Kept so a later `recv root`
@@ -302,6 +364,31 @@ export class MongoEditSync {
   ) {
     this._adapter = new MongoEditAdapter(db, prefix);
     this._collections = new Set(collections);
+    const host: AntiEntropyHost = {
+      // Route anti-entropy frames through the dedup/coalesce-BYPASSING raw emit.
+      // The ordinary broadcast relay collapses a rapid burst of distinct refs to
+      // the single latest one — harmless for idempotent head re-announces, fatal
+      // for this protocol, whose every bucket-entry and doc frame must arrive
+      // (measured live: the data-source hub's AEE/AED bursts were coalesced away
+      // and receivers learned nothing was missing). `reannounce` emits each
+      // frame straight on the socket; fall back to `send` only where a stub
+      // connector has no reannounce.
+      send: (r) =>
+        this._connector.reannounce
+          ? this._connector.reannounce(r)
+          : this._connector.send(r),
+      bucketRoots: (c) => this._bucketRoots(c),
+      bucketEntries: (c, bs) => this._bucketEntries(c, bs),
+      manifestHash: (c, id) => this._manifestOf(c).get(id),
+      hasTombstone: (c, id) => !!this._tombstones.get(c)?.has(id),
+      pushTombstones: (c, ids) => this._pushTombstones(c, ids),
+      serveComponents: (c, ids) => this._serveComponents(c, ids),
+      pullAndApply: (c, hs) => this._pullAndApply(c, hs),
+      syncs: (c) => this._collections.has(c),
+      ready: (c) => this._baselineReady.has(c),
+      log: (m) => this._log(m),
+    };
+    this._ae = new MongoAntiEntropy(host);
   }
 
   private _key(collection: string, id: unknown): string {
@@ -443,10 +530,278 @@ export class MongoEditSync {
    * @param digest - The 32-byte entry digest to fold in (add or, identically,
    *   remove — XOR is self-inverse).
    */
-  private _xorEntry(collection: string, digest: Buffer): void {
+  private _xorEntry(collection: string, digest: Buffer, bucket: number): void {
     const acc = this._accOf(collection);
     for (let i = 0; i < 32; i++) acc[i] ^= digest[i];
+    const bAcc = this._bucketAccOf(collection);
+    const off = bucket * 32;
+    for (let i = 0; i < 32; i++) bAcc[off + i] ^= digest[i];
     this._rootCache.delete(collection);
+  }
+
+  /**
+   * The mutable per-bucket XOR accumulator buffer for a collection
+   * (`AE_BUCKET_COUNT × 32` zero bytes on first use).
+   * @param collection - The collection.
+   * @returns The bucket-accumulator buffer.
+   */
+  private _bucketAccOf(collection: string): Buffer {
+    let a = this._bucketAcc.get(collection);
+    if (!a) {
+      a = Buffer.alloc(AE_BUCKET_COUNT * 32);
+      this._bucketAcc.set(collection, a);
+    }
+    return a;
+  }
+
+  /**
+   * The manifest bucket for a sliceId (stable FNV-1a fold, identical on every
+   * node, keyed on the sliceId alone so an update keeps a doc in its bucket).
+   * @param key - The sliceId (stringified `_id`).
+   * @returns The bucket index in `[0, AE_BUCKET_COUNT)`.
+   */
+  private _bucketOf(key: string): number {
+    return sharedBucketOf(key);
+  }
+
+  // ------ anti-entropy (manifest-diff backfill) host surface ------
+
+  /**
+   * The collection's `AE_BUCKET_COUNT` per-bucket roots as 64-hex strings, read
+   * straight off the incrementally-maintained bucket accumulator.
+   * @param collection - The collection.
+   * @returns One 64-hex root per bucket.
+   */
+  private _bucketRoots(collection: string): string[] {
+    const buf = this._bucketAccOf(collection);
+    const out = new Array<string>(AE_BUCKET_COUNT);
+    for (let b = 0; b < AE_BUCKET_COUNT; b++) {
+      out[b] = buf.toString('hex', b * 32, b * 32 + 32);
+    }
+    return out;
+  }
+
+  /**
+   * The manifest entries in each requested bucket, in ONE manifest pass (so
+   * serving a mega collection's reconciliation is O(size), not O(size × asked)).
+   * @param collection - The collection.
+   * @param buckets - The bucket indices to return entries for.
+   * @returns bucket → its `[sliceId, docHash]` entries.
+   */
+  private _bucketEntries(
+    collection: string,
+    buckets: number[],
+  ): Map<number, Array<[string, string]>> {
+    const want = new Set(buckets);
+    const out = new Map<number, Array<[string, string]>>();
+    for (const b of buckets) out.set(b, []);
+    for (const [key, hash] of this._manifestOf(collection)) {
+      const b = this._bucketOf(key);
+      if (!want.has(b)) continue;
+      (out.get(b) as Array<[string, string]>).push([key, hash]);
+    }
+    return out;
+  }
+
+  /**
+   * Candidate typed `_id`s for a sliceId (the string; a 24-hex ObjectId; an
+   * all-digit number) so a Mongo `_id: {$in: …}` resolves the common CARAT `_id`
+   * shapes (ObjectId / Int32 / string). Over-matching only ever replays a
+   * harmless idempotent extra upsert.
+   * @param sliceId - The stringified `_id`.
+   * @returns The candidate typed `_id`s.
+   */
+  private _typedIdCandidates(sliceId: string): unknown[] {
+    const out: unknown[] = [sliceId];
+    if (/^[0-9a-fA-F]{24}$/.test(sliceId) && ObjectId.isValid(sliceId)) {
+      out.push(new ObjectId(sliceId));
+    }
+    if (/^-?\d{1,15}$/.test(sliceId)) out.push(Number(sliceId));
+    return out;
+  }
+
+  /**
+   * Responder half of a backfill: read the requested docs from Mongo and replay
+   * each as an ordinary `putDoc` edit, then broadcast the head so the requester's
+   * existing head-pull path upserts them. Reusing the live edit path keeps BSON
+   * types exact and mints a `timeId`, so the requester applies under per-document
+   * last-writer-wins — idempotent, and it can never move a document backwards.
+   * @param collection - The collection to replay from.
+   * @param sliceIds - The stringified `_id`s the peer is missing.
+   */
+  private async _serveComponents(
+    collection: string,
+    sliceIds: string[],
+  ): Promise<string[]> {
+    const candidates = sliceIds.flatMap((s) => this._typedIdCandidates(s));
+    const docs = await this._mongoDb
+      .collection(collection)
+      .find({ _id: { $in: candidates } } as never)
+      .toArray();
+    if (docs.length === 0) return [];
+    // Publish the docs as content-addressed components (no chain, no head) and
+    // hand back only their hashes — the peer pulls the bodies over the flow-
+    // controlled read path. The codec is canonical-EJSON, so BSON types survive
+    // and every node derives the same component hash for the same doc.
+    return this._adapter.importComponents(collection, docs as Document[]);
+  }
+
+  /**
+   * Requester side of the manifest-level backfill: PULL the offered components
+   * by hash (flow-controlled — the hub relays + caches one copy) and upsert each
+   * decoded doc, mirroring {@link _applyHead}'s echo suppression (`_appliedHash`)
+   * so the change stream folds it into the content root WITHOUT re-broadcasting
+   * a fresh edit. No chain is walked and nothing is pushed over the wire in bulk
+   * — this is the O(size), scale-independent path a large baseline import needs.
+   * Additive only: a sliceId whose content we already hold is skipped, so it can
+   * never move a document backwards or overwrite a concurrent local edit.
+   * @param collection - The collection to upsert into.
+   * @param hashes - The component row hashes to pull.
+   */
+  private async _pullAndApply(
+    collection: string,
+    hashes: string[],
+  ): Promise<void> {
+    const docs = await this._adapter.pullComponents(collection, hashes);
+    const ops: Array<Record<string, unknown>> = [];
+    for (const doc of docs) {
+      const d = doc as Record<string, unknown> & { _id: unknown };
+      const hash = docHash(d);
+      // Idempotent: we already hold this exact content. Skipping keeps the
+      // upsert count — and the change stream it drives — bounded to real change.
+      if (this._manifestOf(collection).get(String(d._id)) === hash) continue;
+      // Suppress the re-broadcast of the echo this write is about to emit; the
+      // change stream then folds each upserted doc into the manifest/content root.
+      this._appliedHash.set(this._key(collection, d._id), hash);
+      ops.push({
+        replaceOne: { filter: { _id: d._id }, replacement: d, upsert: true },
+      });
+    }
+    // ONE round trip for the whole batch — a per-doc `replaceOne` await made the
+    // backfill Mongo-round-trip-bound (~100 docs/s); `bulkWrite` moves thousands
+    // per call, so the pull rate is what actually limits throughput.
+    if (ops.length > 0) {
+      await this._mongoDb
+        .collection(collection)
+        .bulkWrite(ops as never, { ordered: false });
+    }
+  }
+
+  /**
+   * Requester half of a delete-wins reconciliation: a peer still holds docs THIS
+   * node deleted, so re-materialise their tombstones (original typed `_id` from
+   * the tombstone log) and broadcast the head — the peer's pull applies the
+   * delete. Never resurrects; only re-asserts our delete.
+   * @param collection - The collection.
+   * @param sliceIds - The stringified `_id`s to re-delete on the peer.
+   */
+  private async _pushTombstones(
+    collection: string,
+    sliceIds: string[],
+  ): Promise<void> {
+    const log = this._tombstones.get(collection);
+    let head: string | null = null;
+    for (const sliceId of sliceIds) {
+      const id = log?.get(sliceId);
+      if (id === undefined) continue;
+      const put = await this._adapter.putDoc(collection, this._tombstone(id));
+      head = put?.head ?? null;
+      this._setAppliedTimeId(collection, id, put?.timeId);
+    }
+    if (head) this._connector.send(this._headRef(collection, head));
+  }
+
+  /**
+   * Triggers a manifest-diff backfill round for a collection, guarded by a
+   * cooldown and an abort timer that recovers a round which never completes.
+   * No-op while the backfill is off, the GLOBAL cold-start is not yet done, or
+   * this collection's baseline is not yet built.
+   * @param collection - The collection to reconcile.
+   */
+  private _maybeTriggerAe(collection: string): void {
+    if (!this._antiEntropyOn || !this._coldStartComplete) return;
+    if (!this._baselineReady.has(collection)) return;
+    const now = Date.now();
+    if (now < (this._aeCooldownUntil.get(collection) ?? 0)) return;
+    this._aeCooldownUntil.set(collection, now + this._aeCooldownMs);
+    // Only arm the abort timer when a NEW round actually starts. `trigger`
+    // no-ops while a round is already in flight; re-arming the timer on every
+    // heartbeat-driven call (as this used to) pushed the abort deadline forever
+    // into the future, so a round that got stuck (a lost entry batch leaving
+    // `pending` non-empty) never aborted and that collection never reconciled
+    // again — the exact stall observed live. A stuck round now aborts on its own
+    // deadline and the next divergence re-triggers it fresh.
+    if (!this._ae.trigger(collection)) return;
+    const prev = this._aeRoundTimers.get(collection);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      this._aeRoundTimers.delete(collection);
+      this._ae.abort(collection);
+    }, this._aeRoundTimeoutMs);
+    /* v8 ignore next -- @preserve unref keeps the timer from blocking exit */
+    (t as unknown as { unref?: () => void }).unref?.();
+    this._aeRoundTimers.set(collection, t);
+  }
+
+  /**
+   * Records a deleted `_id` in the persistent tombstone log (in-memory +
+   * {@link TOMBSTONE_LOG}) so the backfill will not resurrect it. Best-effort.
+   * @param collection - The collection the delete happened in.
+   * @param id - The original typed `_id` that was deleted.
+   */
+  private _recordTombstone(collection: string, id: unknown): void {
+    if (!this._tombstoneLogOn) return;
+    let log = this._tombstones.get(collection);
+    if (!log) {
+      log = new Map();
+      this._tombstones.set(collection, log);
+    }
+    const sliceId = String(id);
+    if (log.has(sliceId)) return;
+    log.set(sliceId, id);
+    // Best-effort persistence: this runs INSIDE `_onDelete`, before the delete's
+    // root re-broadcast, so it must never throw — a synchronous failure to reach
+    // the tombstone collection (e.g. it does not exist yet) would otherwise abort
+    // the whole delete propagation. The in-memory guard above is already set, so
+    // a missed persist only costs durability across a restart, not correctness.
+    try {
+      void this._mongoDb
+        .collection(TOMBSTONE_LOG)
+        .updateOne(
+          { _id: `${collection}${ROOT_SEP}${sliceId}` } as never,
+          { $set: { collection, id, at: Date.now() } },
+          { upsert: true },
+        )
+        .catch((e) => this._log(`tombstone persist failed: ${String(e)}`));
+    } catch (e) {
+      this._log(`tombstone persist threw: ${String(e)}`);
+    }
+  }
+
+  /**
+   * Loads a collection's persisted tombstones into the in-memory guard so a doc
+   * deleted before a restart is still not resurrected afterwards.
+   * @param collection - The collection to load tombstones for.
+   */
+  private async _loadTombstones(collection: string): Promise<void> {
+    if (!this._tombstoneLogOn) return;
+    let log = this._tombstones.get(collection);
+    if (!log) {
+      log = new Map();
+      this._tombstones.set(collection, log);
+    }
+    try {
+      const rows = await this._mongoDb
+        .collection(TOMBSTONE_LOG)
+        .find({ collection } as never)
+        .toArray();
+      for (const row of rows) {
+        const r = row as { id?: unknown };
+        if (r.id !== undefined) log.set(String(r.id), r.id);
+      }
+    } catch (e) {
+      this._log(`tombstone load failed: ${String(e)}`);
+    }
   }
 
   /**
@@ -456,11 +811,15 @@ export class MongoEditSync {
    */
   private _rebuildAcc(collection: string): void {
     const acc = Buffer.alloc(32);
+    const bAcc = Buffer.alloc(AE_BUCKET_COUNT * 32);
     for (const [key, hash] of this._manifestOf(collection)) {
       const d = this._entryDigest(key, hash);
       for (let i = 0; i < 32; i++) acc[i] ^= d[i];
+      const off = this._bucketOf(key) * 32;
+      for (let i = 0; i < 32; i++) bAcc[off + i] ^= d[i];
     }
     this._rootAcc.set(collection, acc);
+    this._bucketAcc.set(collection, bAcc);
     this._rootCache.delete(collection);
   }
 
@@ -479,11 +838,12 @@ export class MongoEditSync {
   ): void {
     const m = this._manifestOf(collection);
     const key = String(id);
+    const bucket = this._bucketOf(key);
     const old = m.get(key);
     if (hash === null) {
       // Delete: nothing to do if it was never here; else XOR its digest out.
       if (old === undefined) return;
-      this._xorEntry(collection, this._entryDigest(key, old));
+      this._xorEntry(collection, this._entryDigest(key, old), bucket);
       m.delete(key);
       return;
     }
@@ -491,9 +851,9 @@ export class MongoEditSync {
     // in the new — the root moves in O(1), never re-hashing the whole manifest.
     if (old === hash) return;
     if (old !== undefined) {
-      this._xorEntry(collection, this._entryDigest(key, old));
+      this._xorEntry(collection, this._entryDigest(key, old), bucket);
     }
-    this._xorEntry(collection, this._entryDigest(key, hash));
+    this._xorEntry(collection, this._entryDigest(key, hash), bucket);
     m.set(key, hash);
   }
 
@@ -740,6 +1100,11 @@ export class MongoEditSync {
     // and writes that peer's stale versions over documents another peer has
     // since moved on. Free on a fresh node — there are no chain rows yet.
     await this._seedTimeIds(collection);
+    // The collection's baseline manifest is now built (fresh snapshot or resumed
+    // checkpoint) → the manifest-diff backfill may reconcile it, and docs this
+    // node deleted before a restart are re-guarded against resurrection.
+    await this._loadTombstones(collection);
+    this._baselineReady.add(collection);
     // Go live: drain everything captured during the snapshot/restore, in order.
     snapshotDone = true;
     void pump();
@@ -799,6 +1164,11 @@ export class MongoEditSync {
       this._collections.delete(collection);
       await this._adoptCollection(collection);
     }
+    // The initial cold-start is done: every start-up collection now has its
+    // baseline manifest. Anti-entropy may run from here — until this point it
+    // stays gated so a small collection's backfill cannot starve a mega
+    // collection still hashing its baseline.
+    this._coldStartComplete = true;
 
     // Head re-announce (gossip): the relay does not replay past refs to a
     // late-joining peer, so a node that connects after our snapshot broadcast
@@ -823,6 +1193,22 @@ export class MongoEditSync {
       for (const collection of this._collections) {
         // Re-announce the content root (drives the no-op convergence check).
         this._broadcastRoot(collection);
+        // SELF-TRIGGER anti-entropy when we are behind. A peer advertises its
+        // content root on every head ref (`<head>|<root>`), and we keep the last
+        // one in `_lastPeerHead`. If it differs from ours, drive a reconciliation
+        // round from here — do NOT wait to RECEIVE the peer's `~R~` root
+        // heartbeat: that repeats a byte-identical ref every tick, so the
+        // receiver's dedup swallows it and, through a relay, the round would
+        // never (re)fire — the exact 10-node stall observed (leaf receivers at
+        // recv-root=0 yet holding the peer head's root). `_maybeTriggerAe` is
+        // cooldown-guarded, so calling it each heartbeat is cheap when converged.
+        const peerRoot = this._lastPeerHead.get(collection)?.root;
+        if (
+          peerRoot !== undefined &&
+          peerRoot !== this._contentRoot(collection)
+        ) {
+          this._maybeTriggerAe(collection);
+        }
         const head = this._adapter.headRef(collection);
         if (!head) continue;
         const ref = this._headRef(collection, head);
@@ -909,6 +1295,9 @@ export class MongoEditSync {
     if (id === undefined) return;
     // The doc is gone from Mongo → drop it from the manifest + refresh the root.
     this._setManifest(collection, id, null);
+    // Persist a tombstone so the manifest-diff backfill re-asserts this delete
+    // against a peer that still holds the doc, rather than resurrecting it.
+    this._recordTombstone(collection, id);
     this._scheduleRoot(collection);
     this._checkpointAfter(collection, change);
     // Echo of a peer-applied delete -> do not re-propagate. Prune the
@@ -980,6 +1369,17 @@ export class MongoEditSync {
   }
 
   private _onRef(ref: string): void {
+    // Anti-entropy protocol traffic (manifest-diff backfill) — route to the
+    // engine and stop; these refs are neither roots nor heads. Ignored until our
+    // own cold-start is complete: a node still hashing its baselines must neither
+    // pull nor serve, or the extra load wedges it — a peer's round simply times
+    // out and retries once we are ready.
+    if (MongoAntiEntropy.owns(ref)) {
+      if (this._antiEntropyOn && this._coldStartComplete) {
+        void this._ae.onMessage(ref);
+      }
+      return;
+    }
     // Root ref (`~R~<collection>:<root>`): a pure convergence signal — never a
     // pull, and never a reason to skip anything.
     if (ref.startsWith(ROOT_PREFIX)) {
@@ -995,8 +1395,9 @@ export class MongoEditSync {
       // back empty/partial because the origin's rows were not resolvable yet.
       // `_applyHead` no-ops when the head was already applied, and skips when
       // its tagged root is already ours — so this is cheap when converged.
+      const diverged = root !== this._contentRoot(collection);
       const pending = this._lastPeerHead.get(collection);
-      if (pending && root !== this._contentRoot(collection)) {
+      if (pending && diverged) {
         this._scheduleApply(
           collection,
           pending.head,
@@ -1004,6 +1405,22 @@ export class MongoEditSync {
           pending.ref,
         );
       }
+      // Keep the retry loop alive while we are diverged. The heartbeat re-emits
+      // the SAME root hash every tick, so after the first delivery the
+      // connector's received-dedup swallows it and this re-drive never fires
+      // again — a reconnecting node whose initial pull came back empty (the
+      // origin's rows were not yet resolvable in the reconnect race) then sits
+      // on stale data until some UNRELATED new write mints a fresh hash. Clear
+      // the root ref from the received-dedup so the next identical heartbeat is
+      // delivered again and re-drives the pending head, giving a deterministic
+      // ~heartbeat-interval retry until we converge. When roots already match we
+      // let the dedup swallow it — no work, no chatter on a healthy cluster.
+      if (diverged) this._connector.invalidateReceived?.(ref);
+      // Backfill: a persistent root mismatch the head re-drive cannot close —
+      // the divergent docs live only in a peer's manifest baseline, never in an
+      // edit chain (a bulk import, a cold-start delta) — is healed by the
+      // bucketed manifest-diff backfill.
+      if (diverged) this._maybeTriggerAe(collection);
       return;
     }
     const idx = ref.indexOf(':');
@@ -1137,19 +1554,10 @@ export class MongoEditSync {
       // of the chain. That is NOT a reason to throw the pull away, which is
       // what used to happen: the head was invalidated, and because the content
       // root never matched again the node sat on the old state until it was
-      // restarted.
-      //
-      // What IS applied is only the part of the chain newer than the hole —
-      // `collectPuts` drops the rest. An earlier version applied everything it
-      // could read and argued that per-document `timeId` ordering made that
-      // safe. It does not: ordering only decides between edits that arrive, and
-      // an unreadable edit may be exactly the delete or unset that supersedes
-      // an older one. On ten nodes restarted at once that brought a deleted
-      // document and a removed field back.
-      //
-      // Remember only the refs whose whole ancestry resolved, and clear the
-      // received-dedup so a later re-announce delivers the head again and
-      // completes the rest.
+      // restarted. Apply what did resolve — an apply can no longer move a
+      // document backwards, so a partial chain is safe — remember only the refs
+      // whose whole ancestry resolved, and clear the received-dedup so a later
+      // re-announce delivers the head again and completes the rest.
       this._log(
         `applyHead ${collection} head=${head} PARTIAL -> applying ` +
           `${puts.length} resolvable put(s), re-arming the ref`,
@@ -1195,6 +1603,9 @@ export class MongoEditSync {
         await this._mongoDb
           .collection(collection)
           .deleteOne({ _id: doc._id } as never);
+        // Applied a peer's delete → record our own tombstone so the backfill
+        // never resurrects it from a peer that has not seen the delete yet.
+        this._recordTombstone(collection, doc._id);
         this._log(`applyHead ${collection} deleted _id=${String(doc._id)}`);
       } else {
         await this._mongoDb

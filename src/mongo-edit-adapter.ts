@@ -21,8 +21,10 @@ import type { Edit, TableCfg } from '@rljson/rljson';
 import type { Document } from 'mongodb';
 
 import {
+  bodyToDoc,
   componentToDoc,
   docHash,
+  docToBody,
   docToComponent,
 } from './mongo-component-codec.ts';
 
@@ -110,12 +112,7 @@ export interface CollectedPut {
  * `MongoEditSync._applyHead`, which treats `!complete` like an empty pull.
  */
 export interface CollectPutsResult {
-  /**
-   * The upserts to apply, oldest first. When the walk hit a row it could not
-   * resolve, this holds only the edits NEWER than that hole: an unreadable
-   * edit may be the delete or unset that supersedes an older one, so applying
-   * anything below it would undo a newer change.
-   */
+  /** The upserts resolvable from the walked chain, oldest first. */
   puts: CollectedPut[];
   /** `false` if any walked edit-history / multi-edit / edit row was missing. */
   complete: boolean;
@@ -167,6 +164,7 @@ interface CakeMeta {
   cakeKey: string;
   layerKey: string;
   compKey: string;
+  bfKey: string;
   cakeRef: string;
 }
 
@@ -185,6 +183,31 @@ const componentsTableCfg = (key: string): TableCfg =>
     columns: [
       { key: '_hash', type: 'string', titleLong: 'Hash', titleShort: 'Hash' },
       { key: '_id', type: 'string', titleLong: 'Id', titleShort: 'Id' },
+    ],
+    isHead: false,
+    isRoot: false,
+    isShared: true,
+    _hash: '',
+  }) as TableCfg;
+
+// .............................................................................
+/**
+ * The backfill table config: a content-addressed store the anti-entropy backfill
+ * publishes missing docs into so a peer can PULL them by hash (flow-controlled),
+ * instead of the bodies being broadcast. The whole document rides in one canonical
+ * -EJSON `e` string column (so a doc's arbitrary fields never need declared
+ * columns — the components table rejects those), keyed by `_id` for readability.
+ * @param key - The backfill table key.
+ * @returns The table configuration.
+ */
+const backfillTableCfg = (key: string): TableCfg =>
+  hip({
+    key,
+    type: 'components',
+    columns: [
+      { key: '_hash', type: 'string', titleLong: 'Hash', titleShort: 'Hash' },
+      { key: '_id', type: 'string', titleLong: 'Id', titleShort: 'Id' },
+      { key: 'e', type: 'string', titleLong: 'Ejson', titleShort: 'Ejson' },
     ],
     isHead: false,
     isRoot: false,
@@ -271,12 +294,14 @@ export class MongoEditAdapter {
     const layerKey = this.layerKey(collection);
     const compKey = `${safe}${COMP_SUFFIX}`;
     const sliceKey = `${safe}${SLICE_SUFFIX}`;
+    const bfKey = `${safe}Backfill`;
 
     await core.createTable(createEditTableCfg(cakeKey));
     await core.createTable(createMultiEditTableCfg(cakeKey));
     await core.createTable(createEditHistoryTableCfg(cakeKey));
     await core.createTable(createCakeTableCfg(cakeKey));
     await core.createTable(componentsTableCfg(compKey));
+    await core.createTable(backfillTableCfg(bfKey));
     await core.createTable(createSliceIdsTableCfg(sliceKey));
     await core.createTable(createLayerTableCfg(layerKey));
 
@@ -309,6 +334,7 @@ export class MongoEditAdapter {
       cakeKey,
       layerKey,
       compKey,
+      bfKey,
       cakeRef: cake._hash as string,
     });
   }
@@ -363,6 +389,66 @@ export class MongoEditAdapter {
    */
   headRef(collection: string): string | null {
     return this._cakes.get(collection)?.manager.head?.editHistoryRef ?? null;
+  }
+
+  // ...........................................................................
+  /**
+   * Backfill PRODUCER (manifest-level, chain-free): stores a batch of documents
+   * as content-addressed components in the collection's components table and
+   * returns each one's row hash. This is deliberately NOT a `putComponent` edit
+   * — it appends nothing to the edit chain and broadcasts no head, so a large
+   * baseline backfill neither rebuilds the super-linear cold-start wall nor
+   * pushes the bodies over the wire. The peer that lacks these docs pulls them
+   * by hash through the ordinary flow-controlled `readRowsByHashes` path (the
+   * hub relays + caches ONE copy, not one-per-receiver), then upserts them.
+   * @param collection - The collection the docs belong to.
+   * @param docs - The Mongo documents to publish for pull.
+   * @returns The component row hash of each doc, in input order.
+   */
+  async importComponents(
+    collection: string,
+    docs: Document[],
+  ): Promise<string[]> {
+    const meta = this._cakes.get(collection);
+    if (!meta || docs.length === 0) return [];
+    // One row per doc: the whole document as a canonical-EJSON string in `e`
+    // (BSON types preserved, deterministic across nodes), content-addressed by
+    // `hip`. `validate: false` skips referential validation — these rows belong
+    // to no cake graph; they exist only to be pulled by hash.
+    const rows = docs.map((d) =>
+      hip({ _id: String(d['_id']), e: JSON.stringify(docToBody(d)), _hash: '' }),
+    );
+    await this._db.core.import(
+      { [meta.bfKey]: { _type: 'components', _data: rows as never } },
+      { validate: false },
+    );
+    return rows.map((r) => r._hash as string);
+  }
+
+  /**
+   * Backfill CONSUMER: pulls components by hash over the flow-controlled read
+   * path (missing rows resolve through IoMulti → relay → origin) and decodes
+   * each back to a Mongo document with its BSON types intact.
+   * @param collection - The collection the components belong to.
+   * @param hashes - The component row hashes to pull.
+   * @returns The decoded documents that resolved (missing ones are skipped).
+   */
+  async pullComponents(
+    collection: string,
+    hashes: string[],
+  ): Promise<Document[]> {
+    const meta = this._cakes.get(collection);
+    if (!meta || hashes.length === 0) return [];
+    const rows = await this._rows(meta.bfKey, hashes);
+    const out: Document[] = [];
+    for (const h of hashes) {
+      const row = rows.get(h);
+      const e = row?.['e'];
+      if (typeof e === 'string') {
+        out.push(bodyToDoc(JSON.parse(e) as Record<string, unknown>));
+      }
+    }
+    return out;
   }
 
   // ...........................................................................
@@ -591,16 +677,13 @@ export class MongoEditAdapter {
     const puts: CollectedPut[] = [];
     const resolved = new Set<string>();
     // Reconstruct in apply order, remembering the NEWEST node that could not be
-    // reconstructed.
-    //
-    // A hole is not only a reason to re-pull: it shadows everything older than
-    // itself. An edit we cannot read may be the delete, or the unset, that
-    // supersedes an older edit we CAN read — and `timeId` is no defence there,
-    // because the edit that would have out-ordered the old one never arrived.
-    // Applying the old one then undoes a newer change: on ten nodes restarted
-    // at once, a deleted document and a removed field came back exactly this
-    // way. So nothing at or below the hole is applied; only the suffix above it
-    // is, where every edit is newer than anything we failed to resolve.
+    // reconstructed. A hole is not only a reason to re-pull: it shadows
+    // everything older than itself. An edit we cannot read may be the delete, or
+    // the unset, that supersedes an older edit we CAN read — and `timeId` is no
+    // defence, because the edit that would have out-ordered the old one never
+    // arrived. Applying the old one then undoes a newer change (on ten nodes
+    // restarted at once, a deleted document and a removed field came back this
+    // way). So nothing at or below the hole is applied; only the suffix above it.
     const reconstructed: Array<{
       index: number;
       ehRef: string;
