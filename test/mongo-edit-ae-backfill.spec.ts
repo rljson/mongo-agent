@@ -52,6 +52,7 @@ describe('MongoEditSync — anti-entropy backfill', () => {
       'SL_EDIT_HEARTBEAT_MS',
       'SL_EDIT_AE_COOLDOWN_MS',
       'SL_EDIT_AE_ROUND_TIMEOUT_MS',
+      'SL_EDIT_AE_MAX_BUCKETS',
     ]) {
       delete process.env[k];
     }
@@ -106,6 +107,26 @@ describe('MongoEditSync — anti-entropy backfill', () => {
       expect(state[`seed-${i}`]).toMatchObject({ v: i });
     }
     expect(state['live']).toMatchObject({ v: 99 });
+  }, 40_000);
+
+  it('chains many capped rounds to converge a large baseline delta', async () => {
+    // One bucket per round (SL_EDIT_AE_MAX_BUCKETS=1) forces the backfill to
+    // take MANY rounds. Convergence then depends on the round-completion chain
+    // re-driving each next round for the still-diverged collection, not on
+    // re-receiving the peer root. The doc count exceeds one round's capacity.
+    process.env['SL_EDIT_AE_MAX_BUCKETS'] = '1';
+    const { nodes, stop } = await buildMesh(2, [COLLECTION], {
+      seed: (ns) => {
+        const col = ns[1].mongo.collection(COLLECTION);
+        for (let i = 0; i < 40; i++) col.docs.set(`c${i}`, { _id: `c${i}`, v: i });
+      },
+    });
+    stopMesh = stop;
+
+    const state = await converge(nodes, COLLECTION);
+    for (let i = 0; i < 40; i++) {
+      expect(state[`c${i}`], `doc c${i} never backfilled`).toMatchObject({ v: i });
+    }
   }, 40_000);
 
   it('does not resurrect a doc the lagging node deleted (tombstone wins)', async () => {

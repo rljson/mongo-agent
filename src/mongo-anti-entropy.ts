@@ -127,6 +127,18 @@ export interface AntiEntropyHost {
    * round for it.
    */
   ready(collection: string): boolean;
+  /**
+   * Called when a reconciliation round for a collection finishes (drained,
+   * all-equal, or aborted). Lets the host CHAIN the next round immediately when
+   * the collection is still diverged, instead of waiting to RE-RECEIVE the
+   * peer's root heartbeat — a live bulk import delivers one capped chunk per
+   * round, and if the relay does not re-deliver the (now-changed) root the pull
+   * stalls after the first chunk. Chaining self-drives the backfill to
+   * completion for exactly the still-diverged collection (no per-heartbeat scan
+   * over all collections, which floods the connector).
+   * @param collection - The collection whose round just finished.
+   */
+  onRoundComplete?(collection: string): void;
   /** Diagnostic log (gated by SL_EDIT_TRACE in the host). */
   log(msg: string): void;
 }
@@ -435,6 +447,13 @@ export class MongoAntiEntropy {
   private _finish(collection: string): void {
     this._sessions.delete(collection);
     this._busy.delete(collection);
+    // Defer so the host re-triggers on a clean stack (the busy flag is already
+    // cleared, so `trigger` can start the next round) rather than re-entering
+    // mid-message-handling.
+    const host = this._host;
+    if (host.onRoundComplete) {
+      queueMicrotask(() => host.onRoundComplete!(collection));
+    }
   }
 
   // ------ parsing helpers ------

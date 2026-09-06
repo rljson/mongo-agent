@@ -29,6 +29,7 @@ class FakeHost implements AntiEntropyHost {
   serveResult: string[] = [];
   syncable = new Set<string>(['customers']);
   readyCollections = new Set<string>(['customers']);
+  roundsCompleted: string[] = [];
   logs: string[] = [];
 
   send(ref: string): void {
@@ -66,6 +67,9 @@ class FakeHost implements AntiEntropyHost {
   }
   ready(collection: string): boolean {
     return this.readyCollections.has(collection);
+  }
+  onRoundComplete(collection: string): void {
+    this.roundsCompleted.push(collection);
   }
   log(msg: string): void {
     this.logs.push(msg);
@@ -337,6 +341,36 @@ describe('MongoAntiEntropy', () => {
       await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
       // 5 wanted / cap 2 -> at least 3 AEW messages.
       expect(host.countOf(AEW)).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  describe('round-completion chaining hook', () => {
+    const flush = (): Promise<void> =>
+      new Promise((r) => queueMicrotask(() => r()));
+
+    it('calls onRoundComplete when a round finishes all-equal', async () => {
+      ae.trigger(COLL);
+      await ae.onMessage(msg(AER, `${COLL}|${host.roots.join('')}`));
+      await flush();
+      expect(host.roundsCompleted).toContain(COLL);
+    });
+
+    it('calls onRoundComplete when a round is aborted', async () => {
+      ae.trigger(COLL);
+      ae.abort(COLL);
+      await flush();
+      expect(host.roundsCompleted).toContain(COLL);
+    });
+
+    it('tolerates a host that does not implement onRoundComplete', async () => {
+      const bare = new FakeHost();
+      (bare as { onRoundComplete?: unknown }).onRoundComplete = undefined;
+      const ae2 = new MongoAntiEntropy(bare);
+      ae2.trigger(COLL);
+      // all-equal round -> _finish, must not throw with the hook absent
+      await ae2.onMessage(msg(AER, `${COLL}|${bare.roots.join('')}`));
+      await flush();
+      expect(bare.roundsCompleted).toEqual([]);
     });
   });
 

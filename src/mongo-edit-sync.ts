@@ -386,6 +386,7 @@ export class MongoEditSync {
       pullAndApply: (c, hs) => this._pullAndApply(c, hs),
       syncs: (c) => this._collections.has(c),
       ready: (c) => this._baselineReady.has(c),
+      onRoundComplete: (c) => this._onAeRoundComplete(c),
       log: (m) => this._log(m),
     };
     this._ae = new MongoAntiEntropy(host);
@@ -743,6 +744,36 @@ export class MongoEditSync {
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit */
     (t as unknown as { unref?: () => void }).unref?.();
     this._aeRoundTimers.set(collection, t);
+  }
+
+  /**
+   * CHAIN the next backfill round. Called by the anti-entropy engine when a
+   * round finishes: if the collection is STILL diverged from the peer root we
+   * last saw, drive the next round right away instead of waiting to re-receive
+   * the peer's root heartbeat. A live bulk import delivers only one capped chunk
+   * per round; the relay does not reliably re-broadcast the (now-changed) root,
+   * so without this the pull stalls after the first chunk. Chaining is scoped to
+   * exactly the still-diverged collection (not a per-heartbeat scan over all
+   * collections, which floods the connector) and is cooldown-gated in
+   * {@link _maybeTriggerAe}, so a converged collection stops the chain and a
+   * chunk that made no progress cannot spin.
+   * @param collection - The collection whose round just finished.
+   */
+  private _onAeRoundComplete(collection: string): void {
+    const peer = this._lastPeerHead.get(collection);
+    if (!peer || peer.root === this._contentRoot(collection)) return; // converged
+    // `_maybeTriggerAe` is cooldown-gated, and the cooldown was armed when THIS
+    // round started; a round that finished faster than the cooldown would be
+    // silently dropped and break the chain. Schedule the next round for exactly
+    // when the cooldown lapses so the chain always continues (delay 0 when it
+    // has already lapsed).
+    const delay = Math.max(
+      0,
+      (this._aeCooldownUntil.get(collection) ?? 0) - Date.now(),
+    );
+    const t = setTimeout(() => this._maybeTriggerAe(collection), delay);
+    /* v8 ignore next -- @preserve unref keeps the timer from blocking exit */
+    (t as unknown as { unref?: () => void }).unref?.();
   }
 
   /**
