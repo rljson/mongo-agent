@@ -54,13 +54,19 @@ const ROOT_PREFIX = '~R~';
 const ROOT_SEP = '|';
 
 /**
- * Above this manifest size a collection is NOT checkpointed: serializing a
- * multi-million-entry manifest to disk on every change (debounced) blocks the
- * event loop as badly as the old full root re-hash did. Such a collection
- * simply rebuilds its manifest by a full scan on restart (correct, just not
- * instant). Smaller collections still checkpoint so they resume without a scan.
+ * Above this manifest size a collection checkpoints on a LONGER interval
+ * (`SL_EDIT_CHECKPOINT_LARGE_DEBOUNCE_MS`, a minute by default) rather than on
+ * the ordinary one.
+ *
+ * This used to be a hard cap that skipped the checkpoint altogether, on the
+ * argument that serializing a huge manifest on every change would stall the
+ * event loop. The serializing is streamed now, so it no longer does — and the
+ * skip had a much worse cost: a collection above the cap kept no resume token
+ * and re-read every document on every restart. The fleet's 563k-document
+ * catalog sat exactly above it, which is why each hub restart cost 2-3 minutes
+ * and ~7.8 GB while nodes starting in that window were left behind.
  */
-const CHECKPOINT_MAX_ENTRIES = 500_000;
+const CHECKPOINT_LARGE_ENTRIES = 100_000;
 
 /** The subset of the rljson Connector this sync needs. */
 export interface EditSyncConnector {
@@ -308,9 +314,11 @@ export class MongoEditSync {
     Number(process.env['SL_EDIT_PULL_BACKOFF_MS']) || 200;
   private readonly _saveDebounceMs =
     Number(process.env['SL_EDIT_SAVE_DEBOUNCE_MS']) || 1000;
-  private readonly _checkpointMaxEntries =
-    Number(process.env['SL_EDIT_CHECKPOINT_MAX_ENTRIES']) ||
-    CHECKPOINT_MAX_ENTRIES;
+  private readonly _checkpointLargeEntries =
+    Number(process.env['SL_EDIT_CHECKPOINT_LARGE_ENTRIES']) ||
+    CHECKPOINT_LARGE_ENTRIES;
+  private readonly _largeSaveDebounceMs =
+    Number(process.env['SL_EDIT_CHECKPOINT_LARGE_DEBOUNCE_MS']) || 60_000;
   private readonly _maxAppliedRefs =
     Number(process.env['SL_EDIT_APPLIED_MAX']) || 50_000;
   private readonly _maxLwwEntries =
@@ -970,10 +978,22 @@ export class MongoEditSync {
     if (!this._checkpoint) return;
     this._lastToken.set(collection, change['_id']);
     if (this._saveTimers.has(collection)) return;
+    // A big manifest is written less often, not never. Writing one every
+    // second would be the event-loop stall the old size cap was trying to
+    // avoid — but that cap SKIPPED the checkpoint entirely, so a collection
+    // above it kept no resume token and re-scanned itself in full on every
+    // restart. On the fleet that was a 563k-document catalog: 2-3 minutes and
+    // ~7.8 GB per hub restart, with nodes starting in that window left behind.
+    // Resuming a minute late costs a minute of replayed changes.
+    const size = this._manifestOf(collection).size;
+    const debounce =
+      size > this._checkpointLargeEntries
+        ? this._largeSaveDebounceMs
+        : this._saveDebounceMs;
     const t = setTimeout(() => {
       this._saveTimers.delete(collection);
       void this._saveCheckpoint(collection);
-    }, this._saveDebounceMs);
+    }, debounce);
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit/tests */
     (t as unknown as { unref?: () => void }).unref?.();
     this._saveTimers.set(collection, t);
@@ -987,15 +1007,6 @@ export class MongoEditSync {
     /* v8 ignore next -- @preserve guarded by callers; defensive */
     if (!this._checkpoint) return;
     const manifest = this._manifestOf(collection);
-    // A mega collection would serialize millions of entries to disk on every
-    // debounced change — the same event-loop stall the root re-hash caused. Skip
-    // it: such a collection rebuilds its manifest by a full scan on restart.
-    if (manifest.size > this._checkpointMaxEntries) {
-      this._log(
-        `checkpoint ${collection} skipped (${manifest.size} > ${this._checkpointMaxEntries}, rebuild-on-restart)`,
-      );
-      return;
-    }
     // `save` normalizes an undefined token to null, so no `?? null` here.
     await this._checkpoint.save(
       collection,
