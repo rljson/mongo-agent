@@ -1,6 +1,6 @@
 {
   "name": "@rljson/mongo-agent",
-  "version": "0.0.29",
+  "version": "0.0.30",
   "description": "Rljson mongo-agent description",
   "homepage": "https://github.com/rljson/mongo-agent",
   "bugs": "https://github.com/rljson/mongo-agent/issues",
@@ -56,7 +56,7 @@
     "@rljson/io": "0.0.76",
     "@rljson/json": "0.0.23",
     "@rljson/rljson": "0.0.81",
-    "@rljson/server": "0.0.54",
+    "@rljson/server": "0.0.55",
     "bson": "^7.2.0",
     "mongodb": "^7.1.0"
   },
@@ -70,7 +70,7 @@
       "@rljson/fs-agent": "0.0.70",
       "@rljson/io": "0.0.76",
       "@rljson/rljson": "0.0.81",
-      "@rljson/server": "0.0.54"
+      "@rljson/server": "0.0.55"
     }
   },
   "packageManager": "pnpm@10.11.0"
