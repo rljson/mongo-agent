@@ -89,6 +89,21 @@ export interface EditSyncConnector {
    * head ref is deduped forever and never re-pulled.
    */
   invalidateReceived?(ref: string): void;
+  /**
+   * Puts a ref on the wire RAW, bypassing every dedup and coalescing step
+   * between here and the peers.
+   *
+   * The anti-entropy protocol needs this and {@link reannounce} no longer
+   * provides it. A head re-announce is idempotent — the receiver only has to
+   * end up knowing the latest state, so routing it through the connector (and
+   * gaining a sequence, which is what lets a peer tell a re-announcement from
+   * an echo) is right. Every anti-entropy frame is different: a bucket listing,
+   * a doc-hash batch, a query. Losing one does not delay the protocol, it
+   * leaves the receiver believing nothing is missing.
+   *
+   * Optional so a stub connector can omit it; the caller then falls back.
+   */
+  emitRaw?(ref: string): void;
 }
 
 /** The minimal MongoDB change-stream surface this module uses. */
@@ -388,18 +403,24 @@ export class MongoEditSync {
     this._adapter = new MongoEditAdapter(db, prefix);
     this._collections = new Set(collections);
     const host: AntiEntropyHost = {
-      // Route anti-entropy frames through the dedup/coalesce-BYPASSING raw emit.
-      // The ordinary broadcast relay collapses a rapid burst of distinct refs to
-      // the single latest one — harmless for idempotent head re-announces, fatal
-      // for this protocol, whose every bucket-entry and doc frame must arrive
-      // (measured live: the data-source hub's AEE/AED bursts were coalesced away
-      // and receivers learned nothing was missing). `reannounce` emits each
-      // frame straight on the socket; fall back to `send` only where a stub
-      // connector has no reannounce.
+      // Anti-entropy frames MUST go out raw — every bucket listing, doc-hash
+      // batch and query is distinct, and losing one does not delay the protocol,
+      // it leaves the receiver believing nothing is missing (measured live: the
+      // hub's AEE/AED bursts were coalesced away and receivers learned nothing).
+      //
+      // This used to ride on `reannounce`, which was that raw emit. It is not
+      // any more — it goes through the connector now so a head re-announce
+      // carries a sequence, which is what lets a peer tell it from an echo.
+      // Correct for an idempotent head, wrong for this protocol, and the
+      // symptom was exactly what you would predict: nodes sent their query and
+      // mostly never got the answer back. Hence `emitRaw`, with the old
+      // fallbacks for a connector that offers neither.
       send: (r) =>
-        this._connector.reannounce
-          ? this._connector.reannounce(r)
-          : this._connector.send(r),
+        this._connector.emitRaw
+          ? this._connector.emitRaw(r)
+          : this._connector.reannounce
+            ? this._connector.reannounce(r)
+            : this._connector.send(r),
       bucketRoots: (c) => this._bucketRoots(c),
       bucketEntries: (c, bs) => this._bucketEntries(c, bs),
       manifestHash: (c, id) => this._manifestOf(c).get(id),

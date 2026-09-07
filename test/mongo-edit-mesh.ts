@@ -490,6 +490,15 @@ export class MeshConnector {
     this._bus.deliver(this.id, ref);
   }
 
+  /**
+   * The anti-entropy protocol's channel: straight onto the bus, past every
+   * dedup. Distinct from {@link reannounce}, which the production wiring now
+   * routes through the connector so a head re-announce carries a sequence.
+   */
+  emitRaw(ref: string): void {
+    this._bus.deliver(this.id, ref);
+  }
+
   invalidateReceived(ref: string): void {
     this._received.delete(ref);
   }
