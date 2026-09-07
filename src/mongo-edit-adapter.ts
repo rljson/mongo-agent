@@ -26,6 +26,7 @@ import {
   docHash,
   docToBody,
   docToComponent,
+  mongoCanonical,
 } from './mongo-component-codec.ts';
 
 /**
@@ -450,7 +451,12 @@ export class MongoEditAdapter {
       const row = rows.get(h);
       const e = row?.['e'];
       if (typeof e === 'string') {
-        out.push(bodyToDoc(JSON.parse(e) as Record<string, unknown>));
+        // Pin the decoded doc to the exact shape Mongo returns on a read, so the
+        // hash of this pulled doc equals the hash of the same doc read natively
+        // on every peer. Without it a large-integer field (canonical EJSON
+        // `$numberLong`, stored by the driver as a Double) hashes differently
+        // than its read-back twin and anti-entropy re-pulls the bucket forever.
+        out.push(mongoCanonical(bodyToDoc(JSON.parse(e) as Record<string, unknown>)));
       }
     }
     return out;
