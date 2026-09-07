@@ -84,11 +84,33 @@ export class MeshCollection {
   /** Writes applied by the sync (not by the application). */
   syncWrites = 0;
 
-  find(): AsyncIterable<Document> {
-    const snapshot = [...this.docs.values()];
+  /**
+   * The driver's `find`. Models the two shapes `MongoEditSync` uses: the
+   * cold-start snapshot iterates `find({})` with `for await`, and the backfill
+   * responder does `find({ _id: { $in } }).toArray()`. So the result is both an
+   * async-iterable and a `{ toArray }` cursor, and it honours an `_id.$in`
+   * filter when one is given.
+   * @param filter - Optional `{ _id: { $in: [...] } }` selector; omitted = all.
+   * @returns An async-iterable cursor with `toArray()`.
+   */
+  find(filter?: {
+    _id?: { $in?: unknown[] };
+    collection?: string;
+  }): AsyncIterable<Document> & { toArray(): Promise<Document[]> } {
+    const inList = filter?._id?.$in;
+    const wanted = inList ? new Set(inList.map((v) => String(v))) : undefined;
+    const coll = filter?.collection;
+    const snapshot = [...this.docs.values()].filter(
+      (d) =>
+        (!wanted || wanted.has(String(d['_id']))) &&
+        (coll === undefined || d['collection'] === coll),
+    );
     return {
       async *[Symbol.asyncIterator]() {
         for (const doc of snapshot) yield doc;
+      },
+      async toArray() {
+        return snapshot;
       },
     };
   }
@@ -128,6 +150,48 @@ export class MeshCollection {
       documentKey: { _id: doc['_id'] },
       fullDocument: doc,
     });
+    return {};
+  }
+
+  /**
+   * The batched write the backfill apply (`MongoEditSync._pullAndApply`) uses:
+   * one round trip for many upserts. Models the driver's `bulkWrite` over the
+   * `replaceOne` (upsert) and `deleteOne` ops, each emitting its change event so
+   * the manifest folds the applied docs in exactly as a real change stream does.
+   * @param ops - The `replaceOne` / `deleteOne` operations.
+   * @returns An empty result (the caller only awaits completion).
+   */
+  async bulkWrite(
+    ops: Array<{
+      replaceOne?: { filter: { _id: unknown }; replacement: Document };
+      deleteOne?: { filter: { _id: unknown } };
+    }>,
+  ): Promise<unknown> {
+    for (const op of ops) {
+      if (op.replaceOne) {
+        await this.replaceOne(op.replaceOne.filter, op.replaceOne.replacement);
+      } else if (op.deleteOne) {
+        await this.deleteOne(op.deleteOne.filter);
+      }
+    }
+    return {};
+  }
+
+  /**
+   * The driver's `updateOne` with `$set` + `upsert`, used by the tombstone log
+   * to persist a deletion so it survives a restart. Only the shapes
+   * `MongoEditSync._recordTombstone` uses are modelled.
+   * @param filter - The `{ _id }` selector.
+   * @param update - The `{ $set }` fields to merge.
+   * @returns An empty result.
+   */
+  async updateOne(
+    filter: { _id: unknown },
+    update: { $set?: Record<string, unknown> },
+  ): Promise<unknown> {
+    const id = String(filter._id);
+    const existing = this.docs.get(id) ?? { _id: filter._id };
+    this.docs.set(id, { ...existing, ...(update.$set ?? {}) });
     return {};
   }
 
@@ -467,6 +531,15 @@ export interface MeshNode {
 export const buildMesh = async (
   count: number,
   collections: string[],
+  opts?: {
+    /**
+     * Runs after every node is constructed but BEFORE any is started, so a test
+     * can seed a node's mongo with baseline docs that the cold-start snapshot
+     * folds into the manifest WITHOUT an edit chain — the exact state only the
+     * anti-entropy backfill (not head-pull) can reconcile to a peer.
+     */
+    seed?: (nodes: MeshNode[]) => void | Promise<void>;
+  },
 ): Promise<{ nodes: MeshNode[]; stop: () => Promise<void> }> => {
   const locals: IoMem[] = [];
   const nodes: MeshNode[] = [];
@@ -511,6 +584,8 @@ export const buildMesh = async (
       del: (collection, docId) => mongo.collection(collection).remove(docId),
     });
   }
+
+  if (opts?.seed) await opts.seed(nodes);
 
   for (const node of nodes) await node.sync.start();
 

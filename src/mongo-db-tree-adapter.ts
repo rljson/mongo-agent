@@ -110,7 +110,7 @@ export class MongoDbTreeAdapter {
       try {
         const _t0 = Date.now();
         result = await (this._db as any).get(route, { _hash: current });
-        /* v8 ignore start -- diagnostic instrumentation (SL_TREE_SYNC_DEBUG) */
+        /* v8 ignore start */
         if (_dbg) {
           const td = result?.rljson?.[this._treeKey];
           const n = Array.isArray(td?._data)
@@ -124,7 +124,7 @@ export class MongoDbTreeAdapter {
         }
         /* v8 ignore stop */
       } catch (err) {
-        /* v8 ignore start -- diagnostic instrumentation (SL_TREE_SYNC_DEBUG) */
+        /* v8 ignore start */
         if (_dbg) {
           console.log(
             `[tree-sync] fetchTree ${_isRoot ? 'ROOT ' : 'node '}${current.slice(0, 8)} THREW: ${(err as Error).message}`,

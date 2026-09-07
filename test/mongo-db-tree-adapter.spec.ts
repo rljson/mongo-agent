@@ -157,6 +157,46 @@ describe('MongoDbTreeAdapter.fetchTree', () => {
     expect([...tree.trees.keys()]).toEqual(['root']);
   });
 
+  it('emits fetchTree diagnostics under SL_TREE_SYNC_DEBUG (array, object, empty, throw)', async () => {
+    process.env['SL_TREE_SYNC_DEBUG'] = '1';
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      // root: array _data with three children — object _data, empty _data, and
+      // a child whose get throws — so every debug branch (row count via array,
+      // via object, via 0, and the THREW path) is exercised.
+      const get = vi.fn(async (_r: any, q: { _hash: string }) => {
+        if (q._hash === 'root') {
+          return {
+            rljson: {
+              mongoTrees: {
+                _data: [
+                  node('root', {
+                    isParent: true,
+                    children: ['obj', 'empty', 'boom'],
+                  }),
+                ],
+              },
+            },
+          };
+        }
+        if (q._hash === 'obj') {
+          return { rljson: { mongoTrees: { _data: { '0': node('obj') } } } };
+        }
+        if (q._hash === 'empty') {
+          return { rljson: { mongoTrees: {} } };
+        }
+        throw new Error('boom');
+      });
+      const a = new MongoDbTreeAdapter({ get } as any, 'mongoTrees');
+      const tree = await a.fetchTree('root');
+      expect([...tree.trees.keys()].sort()).toEqual(['obj', 'root']);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      delete process.env['SL_TREE_SYNC_DEBUG'];
+    }
+  });
+
   it('skips a node whose result has no _data', async () => {
     const get = vi.fn(async (_r: any, q: { _hash: string }) => {
       if (q._hash === 'root') {
