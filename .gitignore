@@ -77,3 +77,9 @@ Thumbs.db
 # Other
 *.lock  # (Optional: for ignoring package-lock.json or yarn.lock if you don't want to version them)
 *.tgz
+
+# The DNA config files start with an underscore, which the "_*" rule above
+# would swallow — without them the DNA test cannot find its configuration.
+!dna/_dna.json
+!dna/_generated.json
+!dna/_vars.json
