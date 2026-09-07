@@ -207,4 +207,41 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     // The delete reached the peer that still held it in its baseline.
     expect(docsOf(b, COLLECTION)['ghost']).toBeUndefined();
   }, 40_000);
+  it('a round that pulled documents chains on the cooldown, not the back-off', async () => {
+    // The other side of the gate. A productive round must resume as soon as the
+    // cooldown it armed has elapsed — waiting out the no-progress back-off
+    // instead would turn a fast backfill into a trickle.
+    process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS'] = '5000';
+    const { nodes, stop } = await buildMesh(2, [COLLECTION]);
+    stopMesh = stop;
+    const [a] = nodes;
+    const internals = a.sync as unknown as {
+      _aeRoundProgress: Map<string, boolean>;
+      _aeCooldownUntil: Map<string, number>;
+      _lastPeerHead: Map<string, { head: string; root?: string; ref: string }>;
+      _onAeRoundComplete: (c: string) => void;
+      _maybeTriggerAe: (c: string) => void;
+    };
+
+    // Diverged from the peer, and the round we just finished applied documents.
+    internals._lastPeerHead.set(COLLECTION, {
+      head: 'H',
+      root: 'f'.repeat(64),
+      ref: `${COLLECTION}:H`,
+    });
+    internals._aeRoundProgress.set(COLLECTION, true);
+    internals._aeCooldownUntil.set(COLLECTION, Date.now() + 40);
+
+    let triggered = 0;
+    internals._maybeTriggerAe = () => {
+      triggered++;
+    };
+    internals._onAeRoundComplete(COLLECTION);
+
+    // Chains on the cooldown remainder (~40ms), long before the 5s back-off.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(triggered, 'a productive round waited out the no-progress back-off').toBe(1);
+    // The progress flag is consumed, so the next round judges itself afresh.
+    expect(internals._aeRoundProgress.has(COLLECTION)).toBe(false);
+  }, 40_000);
 });
