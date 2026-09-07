@@ -194,6 +194,21 @@ export class MongoEditSync {
   /** collection → earliest time a new backfill round may start (cooldown). */
   private readonly _aeCooldownUntil = new Map<string, number>();
   /**
+   * collection → did the round in flight actually apply any pulled docs. Gates
+   * the round-completion chain: a round that made progress chains straight into
+   * the next (fast backfill), one that pulled nothing backs off (so a stuck
+   * pull cannot spin the chain, the exact 4000-empty-rounds failure observed).
+   */
+  private readonly _aeRoundProgress = new Map<string, boolean>();
+  /**
+   * Backoff before re-chaining a round that made NO progress — long enough that
+   * a dead/slow pull path retries at a trickle instead of spinning, short enough
+   * that it resumes promptly once the peer can serve again. Overridable for
+   * tests.
+   */
+  private readonly _aeNoProgressBackoffMs =
+    Number(process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS']) || 5_000;
+  /**
    * Collections whose cold-start baseline is fully built. The backfill is gated
    * on this: a manifest still being scanned would compare as "everything
    * differs" against a peer and trigger a useless full exchange.
@@ -695,6 +710,9 @@ export class MongoEditSync {
       await this._mongoDb
         .collection(collection)
         .bulkWrite(ops as never, { ordered: false });
+      // This round pulled + applied real docs -> mark progress so the
+      // round-completion chain drives the next one immediately.
+      this._aeRoundProgress.set(collection, true);
     }
   }
 
@@ -770,15 +788,22 @@ export class MongoEditSync {
   private _onAeRoundComplete(collection: string): void {
     const peer = this._lastPeerHead.get(collection);
     if (!peer || peer.root === this._contentRoot(collection)) return; // converged
-    // `_maybeTriggerAe` is cooldown-gated, and the cooldown was armed when THIS
-    // round started; a round that finished faster than the cooldown would be
-    // silently dropped and break the chain. Schedule the next round for exactly
-    // when the cooldown lapses so the chain always continues (delay 0 when it
-    // has already lapsed).
-    const delay = Math.max(
-      0,
-      (this._aeCooldownUntil.get(collection) ?? 0) - Date.now(),
-    );
+    // Progress gate: a round that applied docs chains straight into the next
+    // (fast backfill); one that pulled NOTHING backs off. Without this, a round
+    // that finds divergence but cannot pull the bodies (a slow/failed serve)
+    // re-chains instantly and spins the loop thousands of times, starving the
+    // event loop so the pulls that DO arrive are never applied — the exact
+    // 4000-empty-rounds saturation seen live. The back-off retries at a trickle
+    // so a transiently-unservable pull resumes without spinning.
+    const madeProgress = this._aeRoundProgress.get(collection) === true;
+    this._aeRoundProgress.delete(collection);
+    // `_maybeTriggerAe` is cooldown-gated (armed when this round started), so a
+    // fast round would otherwise be dropped and break the chain; wait out the
+    // cooldown on progress, or the longer back-off when the round pulled nothing.
+    const base = madeProgress
+      ? (this._aeCooldownUntil.get(collection) ?? 0) - Date.now()
+      : this._aeNoProgressBackoffMs;
+    const delay = Math.max(0, base);
     const t = setTimeout(() => this._maybeTriggerAe(collection), delay);
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit */
     (t as unknown as { unref?: () => void }).unref?.();

@@ -53,6 +53,7 @@ describe('MongoEditSync — anti-entropy backfill', () => {
       'SL_EDIT_AE_COOLDOWN_MS',
       'SL_EDIT_AE_ROUND_TIMEOUT_MS',
       'SL_EDIT_AE_MAX_BUCKETS',
+      'SL_EDIT_AE_NOPROGRESS_BACKOFF_MS',
     ]) {
       delete process.env[k];
     }
@@ -127,6 +128,30 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     for (let i = 0; i < 40; i++) {
       expect(state[`c${i}`], `doc c${i} never backfilled`).toMatchObject({ v: i });
     }
+  }, 40_000);
+
+  it('backs off a no-progress round then converges once the pull works again', async () => {
+    // A round that finds divergence but pulls NOTHING (a slow/unservable read)
+    // must not spin the chain; it backs off. Once the pull works, the backfill
+    // resumes and converges. Short backoff so the test does not wait 5s.
+    process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS'] = '30';
+    const { nodes, stop } = await buildMesh(2, [COLLECTION], {
+      seed: (ns) => {
+        const col = ns[1].mongo.collection(COLLECTION);
+        for (let i = 0; i < 20; i++) col.docs.set(`b${i}`, { _id: `b${i}`, v: i });
+      },
+    });
+    stopMesh = stop;
+    const [a] = nodes;
+
+    // A's pulls return empty at first -> its rounds make no progress -> backoff.
+    a.peer.blockReads = true;
+    await settle(nodes, 1200);
+    expect(docsOf(a, COLLECTION)['b0']).toBeUndefined(); // nothing pulled yet
+    // Pull works again -> the backfill resumes and converges.
+    a.peer.blockReads = false;
+    const state = await converge(nodes, COLLECTION);
+    for (let i = 0; i < 20; i++) expect(state[`b${i}`]).toMatchObject({ v: i });
   }, 40_000);
 
   it('does not resurrect a doc the lagging node deleted (tombstone wins)', async () => {
