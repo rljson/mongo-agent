@@ -10,7 +10,7 @@ overrides:
   '@rljson/fs-agent': 0.0.67
   '@rljson/io': 0.0.73
   '@rljson/rljson': 0.0.80
-  '@rljson/server': 0.0.50
+  '@rljson/server': 0.0.51
 
 importers:
 
@@ -38,8 +38,8 @@ importers:
         specifier: 0.0.80
         version: 0.0.80
       '@rljson/server':
-        specifier: 0.0.50
-        version: 0.0.50
+        specifier: 0.0.51
+        version: 0.0.51
       bson:
         specifier: ^7.2.0
         version: 7.2.0
@@ -618,8 +618,8 @@ packages:
     resolution: {integrity: sha512-wh3l1fGVukXjzF1SY7BMT0h7zbvBhAuGZDnFIOGpDIYDYeJKJF+T9mehUVnodZqrhBs/t4fmFCAdC3OJtonJ+w==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/server@0.0.50':
-    resolution: {integrity: sha512-njy/I0by5lVC6WoSGpV1jjsRwCUv6NmIAHngW7M0NGitHlo2Me1Lsv05jiIY3pooSzIhbwhOYB5hY77ll2NZwA==}
+  '@rljson/server@0.0.51':
+    resolution: {integrity: sha512-V1o2pHY9uE5BRdRpdUKYNr9S5OHbSitH2gXfD2DlDX2DwoYOyMyvDhlXVVj1wkj0NNY8gkzns407GMXbVoEnDg==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.11':
@@ -2521,7 +2521,7 @@ snapshots:
       '@rljson/json': 0.0.23
       nanoid: 5.1.16
 
-  '@rljson/server@0.0.50':
+  '@rljson/server@0.0.51':
     dependencies:
       '@rljson/bs': 0.0.25
       '@rljson/db': 0.0.38
