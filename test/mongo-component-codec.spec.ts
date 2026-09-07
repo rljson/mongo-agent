@@ -5,13 +5,26 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { Binary, Decimal128, Double, EJSON, Int32, Long, ObjectId } from 'bson';
+import {
+  Binary,
+  Decimal128,
+  deserialize as bsonDeserialize,
+  Double,
+  EJSON,
+  Int32,
+  Long,
+  ObjectId,
+  serialize as bsonSerialize,
+} from 'bson';
 import { describe, expect, it } from 'vitest';
 
 import {
+  bodyToDoc,
   componentToDoc,
   docHash,
+  docToBody,
   docToComponent,
+  mongoCanonical,
 } from '../src/mongo-component-codec.ts';
 
 describe('mongo-component-codec', () => {
@@ -108,6 +121,47 @@ describe('mongo-component-codec', () => {
       }).not.toThrow();
       expect(hash).toHaveLength(64);
       expect(docHash(big)).toBe(hash);
+    });
+  });
+
+  describe('mongoCanonical', () => {
+    it('pins a component-decoded doc to the Mongo read-back form', () => {
+      // The exact shape a bulk import produces: every field a plain JS number,
+      // so the driver stores the large `createdAt` (Date.now()) as a Double.
+      const stored = bsonDeserialize(
+        bsonSerialize({
+          _id: 'bt2-099243',
+          idx: 99243,
+          batch: 'bt2',
+          createdAt: 1_725_000_000_000,
+        }),
+      );
+      // Encode → decode through the component codec, exactly as an anti-entropy
+      // pull does. Canonical EJSON tags the large integer `$numberLong`, so it
+      // decodes as a BSON Long — a different raw-BSON encoding than the stored
+      // Double, hence a different hash. This is the mismatch that made a pulled
+      // doc's content root disagree with its read-back twin and wedged the
+      // backfill in an endless re-pull.
+      const decoded = bodyToDoc(docToBody(stored));
+      expect(docHash(decoded)).not.toBe(docHash(stored));
+      // mongoCanonical collapses the typed wrapper to precisely the stored form,
+      // so the pulled doc hashes identically to the same doc read from Mongo.
+      expect(docHash(mongoCanonical(decoded))).toBe(docHash(stored));
+    });
+
+    it('leaves the types Mongo itself keeps hash-identical', () => {
+      // An Int32 id, a Date, and a Long too large to promote to a JS number all
+      // survive the canonicalization with the same content hash — only the
+      // ambiguous integer-vs-Double numbers are pinned.
+      const build = () => ({
+        _id: new Int32(7),
+        when: new Date('2026-01-01T00:00:00.000Z'),
+        big: Long.fromString('9007199254740993'), // 2^53 + 1, unsafe to promote
+        who: new ObjectId('64b7f0c2e4b0a1a2b3c4d5e6'),
+        blob: new Binary(Buffer.from([1, 2, 3])),
+        price: Decimal128.fromString('19.99'),
+      });
+      expect(docHash(mongoCanonical(build()))).toBe(docHash(build()));
     });
   });
 });
