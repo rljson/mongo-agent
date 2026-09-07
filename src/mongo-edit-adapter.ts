@@ -112,7 +112,12 @@ export interface CollectedPut {
  * `MongoEditSync._applyHead`, which treats `!complete` like an empty pull.
  */
 export interface CollectPutsResult {
-  /** The upserts resolvable from the walked chain, oldest first. */
+  /**
+   * The upserts to apply, oldest first. When the walk hit a row it could not
+   * resolve, this holds only the edits NEWER than that hole: an unreadable
+   * edit may be the delete or unset that supersedes an older one, so applying
+   * anything below it would undo a newer change.
+   */
   puts: CollectedPut[];
   /** `false` if any walked edit-history / multi-edit / edit row was missing. */
   complete: boolean;
