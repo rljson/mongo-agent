@@ -6,7 +6,11 @@
 // found in the LICENSE file in the root of this package.
 
 import { hip } from '@rljson/hash';
-import { EJSON, serialize as bsonSerialize } from 'bson';
+import {
+  deserialize as bsonDeserialize,
+  EJSON,
+  serialize as bsonSerialize,
+} from 'bson';
 import type { Document } from 'mongodb';
 import { createHash } from 'node:crypto';
 
@@ -140,3 +144,36 @@ export const bodyToDoc = (body: Record<string, unknown>): Document => {
  */
 export const componentToDoc = (component: MongoComponent): Document =>
   bodyToDoc(component);
+
+// .............................................................................
+/**
+ * Normalizes a document to the exact form MongoDB hands back on a read.
+ *
+ * The driver serializes an inserted JS value with its own rules and, on read,
+ * promotes what it can back to plain JS numbers (`promoteLongs`/`promoteValues`
+ * are on by default). Two of those rules disagree with canonical Extended JSON:
+ * canonical EJSON encodes any integer above the Int32 range as `$numberLong`,
+ * but the driver stores a large *JS-number* integer (e.g. `Date.now()`) as a
+ * BSON **Double**. So a document decoded from a component ({@link bodyToDoc}
+ * hands back a BSON `Long`) is NOT byte-identical to the same document read
+ * straight from Mongo (a promoted number → stored Double) — and since
+ * {@link docHash} hashes the raw BSON bytes, the two forms hash differently.
+ *
+ * That single-byte type gap is enough to break convergence: the content hash of
+ * a PULLED doc (anti-entropy backfill) never equals the hash of the same doc
+ * read natively on every other node, so the manifest/content-root disagree, the
+ * echo of the write is not recognised, and anti-entropy re-pulls the same
+ * bucket forever (observed live: a 100k bulk import wedged three nodes at a
+ * fraction of the delta, `pullAndApply applied=1000` every round, 2026-09-07).
+ *
+ * A driver-faithful serialize→deserialize round-trip collapses the typed
+ * wrappers to precisely the promoted form Mongo returns, so a doc reconstructed
+ * from a component is byte-identical to its stored-and-read-back twin. Types
+ * Mongo keeps distinct (Date, ObjectId, Decimal128, Binary, an Int32 id, a Long
+ * too large to promote) survive unchanged — only the ambiguous integer-vs-Double
+ * numbers are pinned to the storage form.
+ * @param doc - A document decoded from a component (may hold typed BSON numbers).
+ * @returns The same document in the byte-exact shape Mongo returns on read.
+ */
+export const mongoCanonical = (doc: Document): Document =>
+  bsonDeserialize(bsonSerialize(doc)) as Document;
