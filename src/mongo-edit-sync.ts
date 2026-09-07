@@ -275,6 +275,24 @@ export class MongoEditSync {
   private readonly _aeNoProgressBackoffMs =
     Number(process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS']) || 5_000;
   /**
+   * `collection|head` → consecutive PARTIAL applies that moved the walk floor
+   * nowhere. A head whose edit chain is fundamentally incomplete — the common
+   * case for a collection that was bulk-imported and therefore stored
+   * chain-free by anti-entropy (see {@link MongoAntiEntropy}) — can never
+   * resolve through `_applyHead`, so re-arming it on every re-announce is an
+   * infinite, event-loop-starving no-op (`applyHead … PARTIAL, 0 resolvable`
+   * forever). We re-arm while the walk still advances (the genuine transient:
+   * a fresh connection whose origin rows are not visible yet), and after
+   * {@link _headRearmCap} no-progress applies in a row stop re-arming and leave
+   * the collection to the chain-free anti-entropy path that actually owns it.
+   * A genuinely new edit carries a new head id → new key → fresh count, so it
+   * is never starved by a stuck predecessor.
+   */
+  private readonly _headNoProgress = new Map<string, number>();
+  /* v8 ignore next -- @preserve partial-head re-arm cap, env-overridable */
+  private readonly _headRearmCap =
+    Number(process.env['SL_EDIT_HEAD_REARM_CAP']) || 3;
+  /**
    * Collections whose cold-start baseline is fully built. The backfill is gated
    * on this: a manifest still being scanned would compare as "everything
    * differs" against a peer and trigger a useless full exchange.
@@ -1791,11 +1809,33 @@ export class MongoEditSync {
       // document backwards, so a partial chain is safe — remember only the refs
       // whose whole ancestry resolved, and clear the received-dedup so a later
       // re-announce delivers the head again and completes the rest.
-      this._log(
-        `applyHead ${collection} head=${head} PARTIAL -> applying ` +
-          `${puts.length} resolvable put(s), re-arming the ref`,
-      );
-      this._connector.invalidateReceived?.(rawRef);
+      //
+      // But only while the walk still advances. A head whose chain is
+      // fundamentally incomplete (a bulk-imported collection stored chain-free
+      // by anti-entropy) resolves the same partial set on every re-announce and
+      // never completes; re-arming it forever is an event-loop-starving no-op
+      // that also stalls the anti-entropy path which alone can converge it. So
+      // re-arm while the floor moves; once it stops moving for `_headRearmCap`
+      // applies in a row, leave the head to anti-entropy.
+      const key = `${collection}|${head}`;
+      const advanced = sealed.some((ref) => !applied.has(ref));
+      const stalls = advanced ? 0 : (this._headNoProgress.get(key) ?? 0) + 1;
+      if (advanced) this._headNoProgress.delete(key);
+      else this._headNoProgress.set(key, stalls);
+      if (stalls <= this._headRearmCap) {
+        this._log(
+          `applyHead ${collection} head=${head} PARTIAL -> applying ` +
+            `${puts.length} resolvable put(s), re-arming the ref`,
+        );
+        this._connector.invalidateReceived?.(rawRef);
+      } else {
+        this._log(
+          `applyHead ${collection} head=${head} PARTIAL -> no floor progress ` +
+            `${stalls}x, leaving to anti-entropy (not re-arming)`,
+        );
+      }
+    } else {
+      this._headNoProgress.delete(`${collection}|${head}`);
     }
 
     if (puts.length === 0) {
