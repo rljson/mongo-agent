@@ -531,6 +531,74 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('stops re-arming a PARTIAL head once the walk floor stops moving', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+
+    const internals = sync as unknown as {
+      _adapter: { collectPuts: unknown };
+      _applyChain: Map<string, Promise<void>>;
+      _pullRetries: number;
+      _headRearmCap: number;
+    };
+    internals._pullRetries = 0; // one collectPuts per apply, no backoff wait
+    // Every walk resolves the same nothing and seals nothing: a head whose edit
+    // chain is fundamentally incomplete — the common case for a collection that
+    // was bulk-imported and therefore stored chain-free by anti-entropy. The
+    // walk floor never moves, so re-arming it on every re-announce forever is an
+    // event-loop-starving no-op that also stalls the anti-entropy path that
+    // alone can converge it.
+    internals._adapter.collectPuts = vi
+      .fn()
+      .mockResolvedValue({ puts: [], complete: false, sealed: [] });
+
+    const cap = internals._headRearmCap;
+    for (let i = 0; i < cap + 2; i++) {
+      conn.fire('customers:HEAD_STUCK');
+      await internals._applyChain.get('customers')?.catch(() => {});
+    }
+    // Re-armed while it might still be the transient fresh-connection race, then
+    // gave up and left the collection to anti-entropy — exactly `cap` re-arms,
+    // never an unbounded spin.
+    expect(conn.invalidateReceived).toHaveBeenCalledTimes(cap);
+    await sync.stop();
+  });
+
+  it('keeps re-arming a PARTIAL head while the walk floor still advances', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+
+    const internals = sync as unknown as {
+      _adapter: { collectPuts: unknown };
+      _applyChain: Map<string, Promise<void>>;
+      _pullRetries: number;
+      _headRearmCap: number;
+    };
+    internals._pullRetries = 0;
+    // Each walk is still partial but seals a NEW ref — the floor advances every
+    // time, the genuine "peer is serving the chain a chunk at a time" case. The
+    // no-progress count must reset on every advance, so re-arming continues well
+    // past the cap and the chain is never abandoned mid-heal.
+    let n = 0;
+    internals._adapter.collectPuts = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve({ puts: [], complete: false, sealed: [`S${n++}`] }),
+      );
+
+    const fires = internals._headRearmCap + 3;
+    for (let i = 0; i < fires; i++) {
+      conn.fire('customers:HEAD_ADV');
+      await internals._applyChain.get('customers')?.catch(() => {});
+    }
+    expect(conn.invalidateReceived).toHaveBeenCalledTimes(fires);
+    await sync.stop();
+  });
+
   it('re-pulls a partial chain and seals it once it becomes complete', async () => {
     const cols = { customers: new FakeCollection([]) };
     const conn = mkConnector();
