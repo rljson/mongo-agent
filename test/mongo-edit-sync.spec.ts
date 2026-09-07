@@ -1385,24 +1385,42 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
-  it('skips the checkpoint for a manifest above the size cap (mega collection)', async () => {
-    // A mega collection must not serialize its whole manifest to disk on every
-    // change — that stalls the loop as badly as the old root re-hash. Above the
-    // cap the checkpoint is skipped (the collection rebuilds by scan on restart).
+  it('checkpoints a mega collection on the longer interval — never skips it', async () => {
+    // This used to be a hard cap that skipped the checkpoint entirely, so a
+    // collection above it kept NO resume token and re-read every document on
+    // every restart. The fleet's 563k-document catalog sat just above the old
+    // 500k cap: 2-3 minutes and ~7.8 GB per hub restart, with nodes starting in
+    // that window left behind. Writing is streamed now, so size only decides
+    // how OFTEN — never whether.
     process.env['SL_EDIT_SAVE_DEBOUNCE_MS'] = '5';
-    process.env['SL_EDIT_CHECKPOINT_MAX_ENTRIES'] = '1';
-    const cols = { customers: new FakeCollection([]) };
+    process.env['SL_EDIT_CHECKPOINT_LARGE_ENTRIES'] = '1';
+    process.env['SL_EDIT_CHECKPOINT_LARGE_DEBOUNCE_MS'] = '40';
+    // Seeded, so the manifest is already large when the first live change
+    // decides which interval to use — exactly the production shape, where the
+    // snapshot has filled it long before anything is edited.
+    const cols = {
+      customers: new FakeCollection([
+        { _id: new Int32(1), name: 'A' },
+        { _id: new Int32(2), name: 'B' },
+      ]),
+    };
     const cp = new FakeCheckpoint();
     const conn = mkConnector();
     const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p', undefined, cp as never);
     await sync.start();
-    cols.customers.stream.emit({ _id: { tk: 'A' }, operationType: 'insert', fullDocument: { _id: new Int32(1), name: 'A' } });
-    cols.customers.stream.emit({ _id: { tk: 'B' }, operationType: 'insert', fullDocument: { _id: new Int32(2), name: 'B' } });
+    cols.customers.stream.emit({ _id: { tk: 'B' }, operationType: 'insert', fullDocument: { _id: new Int32(3), name: 'C' } });
     await tick();
-    expect(cp.save).not.toHaveBeenCalled(); // 2 entries > cap 1 → skipped
+    // The manifest is over the "large" threshold, so the short debounce has
+    // NOT fired …
+    expect(cp.save).not.toHaveBeenCalled();
+    // … but the long one does, and the token goes to disk.
+    await tick(80);
+    expect(cp.save).toHaveBeenCalledTimes(1);
+    expect(cp.saved[0].token).toEqual({ tk: 'B' });
     await sync.stop();
     delete process.env['SL_EDIT_SAVE_DEBOUNCE_MS'];
-    delete process.env['SL_EDIT_CHECKPOINT_MAX_ENTRIES'];
+    delete process.env['SL_EDIT_CHECKPOINT_LARGE_ENTRIES'];
+    delete process.env['SL_EDIT_CHECKPOINT_LARGE_DEBOUNCE_MS'];
     delete process.env['SL_EDIT_APPLIED_MAX'];
     delete process.env['SL_EDIT_LWW_MAX'];
   });
