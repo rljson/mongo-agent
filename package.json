@@ -1,6 +1,6 @@
 {
   "name": "@rljson/mongo-agent",
-  "version": "0.0.28",
+  "version": "0.0.29",
   "description": "Rljson mongo-agent description",
   "homepage": "https://github.com/rljson/mongo-agent",
   "bugs": "https://github.com/rljson/mongo-agent/issues",
@@ -49,14 +49,14 @@
     "vitest-dom": "^0.1.1"
   },
   "dependencies": {
-    "@rljson/bs": "0.0.25",
-    "@rljson/db": "0.0.39",
-    "@rljson/fs-agent": "0.0.69",
+    "@rljson/bs": "0.0.26",
+    "@rljson/db": "0.0.40",
+    "@rljson/fs-agent": "0.0.70",
     "@rljson/hash": "0.0.19",
-    "@rljson/io": "0.0.75",
+    "@rljson/io": "0.0.76",
     "@rljson/json": "0.0.23",
-    "@rljson/rljson": "0.0.80",
-    "@rljson/server": "0.0.53",
+    "@rljson/rljson": "0.0.81",
+    "@rljson/server": "0.0.54",
     "bson": "^7.2.0",
     "mongodb": "^7.1.0"
   },
@@ -65,12 +65,12 @@
       "esbuild"
     ],
     "overrides": {
-      "@rljson/bs": "0.0.25",
-      "@rljson/db": "0.0.39",
-      "@rljson/fs-agent": "0.0.69",
-      "@rljson/io": "0.0.75",
-      "@rljson/rljson": "0.0.80",
-      "@rljson/server": "0.0.53"
+      "@rljson/bs": "0.0.26",
+      "@rljson/db": "0.0.40",
+      "@rljson/fs-agent": "0.0.70",
+      "@rljson/io": "0.0.76",
+      "@rljson/rljson": "0.0.81",
+      "@rljson/server": "0.0.54"
     }
   },
   "packageManager": "pnpm@10.11.0"
