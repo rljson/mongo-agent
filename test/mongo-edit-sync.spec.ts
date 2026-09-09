@@ -120,12 +120,14 @@ const mkConnector = (): EditSyncConnector & {
   send: ReturnType<typeof vi.fn>;
   reannounce: ReturnType<typeof vi.fn>;
   invalidateReceived: ReturnType<typeof vi.fn>;
+  reconnect: ReturnType<typeof vi.fn>;
 } => {
   let cb: ((r: string) => void | Promise<void>) | undefined;
   return {
     send: vi.fn(),
     reannounce: vi.fn(),
     invalidateReceived: vi.fn(),
+    reconnect: vi.fn(),
     listen: (fn) => {
       cb = fn;
     },
@@ -248,6 +250,123 @@ describe('MongoEditSync', () => {
 
     await sync.stop();
     expect(cols.customers.stream.close).toHaveBeenCalledTimes(1);
+  });
+
+  describe('receive-liveness watchdog', () => {
+    type Internals = {
+      _lastInboundAt: number;
+      _rxReconnectCooldownUntil: number;
+      _coldStartComplete: boolean;
+      _checkReceiveLiveness: () => void;
+    };
+    const mkSync = async (conn: ReturnType<typeof mkConnector>) => {
+      const cols = { customers: new FakeCollection([]) };
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        conn,
+        ['customers'],
+        'p',
+      );
+      await sync.start();
+      return sync;
+    };
+
+    it('an inbound ref stamps _lastInboundAt (arms the watchdog)', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._lastInboundAt = 0;
+      conn.fire('~R~customers:' + 'a'.repeat(12));
+      expect(i._lastInboundAt).toBeGreaterThan(0);
+      await sync.stop();
+    });
+
+    it('reconnects once inbound has been silent past the window', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = Date.now() - 120_000; // long past the 45s window
+      i._rxReconnectCooldownUntil = 0;
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      // Re-armed from now → an immediate second pass does nothing (window + cooldown).
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      await sync.stop();
+    });
+
+    it('does NOT reconnect when it has never heard the fleet (maybe alone)', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = 0; // never received anything
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).not.toHaveBeenCalled();
+      await sync.stop();
+    });
+
+    it('does NOT reconnect while inbound is recent or during cooldown', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      // Recent inbound → within window.
+      i._lastInboundAt = Date.now();
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).not.toHaveBeenCalled();
+      // Silent past window, but cooldown still in force.
+      i._lastInboundAt = Date.now() - 120_000;
+      i._rxReconnectCooldownUntil = Date.now() + 60_000;
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).not.toHaveBeenCalled();
+      await sync.stop();
+    });
+
+    it('is inert when the connector cannot reconnect', async () => {
+      const conn = mkConnector();
+      (conn as { reconnect?: unknown }).reconnect = undefined;
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = Date.now() - 120_000;
+      expect(() => i._checkReceiveLiveness()).not.toThrow();
+      await sync.stop();
+    });
+
+    it('is disabled by SL_EDIT_RX_WATCHDOG_MS=0', async () => {
+      process.env['SL_EDIT_RX_WATCHDOG_MS'] = '0';
+      try {
+        const conn = mkConnector();
+        const sync = await mkSync(conn);
+        const i = sync as unknown as Internals;
+        i._coldStartComplete = true;
+        i._lastInboundAt = Date.now() - 120_000;
+        i._checkReceiveLiveness();
+        expect(conn.reconnect).not.toHaveBeenCalled();
+        await sync.stop();
+      } finally {
+        delete process.env['SL_EDIT_RX_WATCHDOG_MS'];
+      }
+    });
+
+    it('swallows a throwing reconnect and still arms the cooldown', async () => {
+      const conn = mkConnector();
+      conn.reconnect.mockImplementation(() => {
+        throw new Error('socket gone');
+      });
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = Date.now() - 120_000;
+      i._rxReconnectCooldownUntil = 0;
+      expect(() => i._checkReceiveLiveness()).not.toThrow();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      expect(i._rxReconnectCooldownUntil).toBeGreaterThan(Date.now());
+      await sync.stop();
+    });
   });
 
   it('broadcasts a new head on a live insert and suppresses the echo', async () => {

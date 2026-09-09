@@ -104,6 +104,15 @@ export interface EditSyncConnector {
    * Optional so a stub connector can omit it; the caller then falls back.
    */
   emitRaw?(ref: string): void;
+  /**
+   * Tears down and re-establishes the underlying transport. The receive-liveness
+   * watchdog calls this when the socket has gone HALF-OPEN — connected enough
+   * that nothing else reconnects it, yet delivering no inbound refs, so a
+   * receive-only node (one making no local edits) silently misses every live
+   * head until anti-entropy limps it back. Optional: a stub connector, or one
+   * with no socket to cycle, omits it and the watchdog stays inert.
+   */
+  reconnect?(): void;
 }
 
 /** The minimal MongoDB change-stream surface this module uses. */
@@ -386,6 +395,21 @@ export class MongoEditSync {
   /* v8 ignore next -- @preserve heartbeat interval, env-overridable */
   private readonly _heartbeatMs =
     Number(process.env['SL_EDIT_HEARTBEAT_MS']) || 10_000;
+  /**
+   * Receive-liveness watchdog window (ms). If no ref arrives for this long after
+   * we HAVE heard the fleet, the socket is treated as half-open and reconnected.
+   * `0` disables it. Explicit-undefined check so `0` really means off (a plain
+   * `|| default` would swallow it).
+   */
+  /* v8 ignore next 4 -- @preserve rx-watchdog window, env-overridable (0=off) */
+  private readonly _rxWatchdogMs =
+    process.env['SL_EDIT_RX_WATCHDOG_MS'] !== undefined
+      ? Number(process.env['SL_EDIT_RX_WATCHDOG_MS'])
+      : 45_000;
+  /** When any ref last arrived; `0` until the first, which arms the watchdog. */
+  private _lastInboundAt = 0;
+  /** Earliest time the rx watchdog may force another reconnect (cooldown). */
+  private _rxReconnectCooldownUntil = 0;
   /* v8 ignore next -- @preserve collection-discovery interval, env-overridable */
   private readonly _discoverMs =
     Number(process.env['SL_EDIT_DISCOVER_MS']) || 15_000;
@@ -1511,10 +1535,46 @@ export class MongoEditSync {
       this._stop.push(() => clearInterval(disc));
     }
 
-    const hb = setInterval(() => this.announceHeads(), this._heartbeatMs);
+    const hb = setInterval(() => {
+      this.announceHeads();
+      // Same cadence heals a socket that stopped delivering inbound refs.
+      this._checkReceiveLiveness();
+    }, this._heartbeatMs);
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit/tests */
     (hb as unknown as { unref?: () => void }).unref?.();
     this._stop.push(() => clearInterval(hb));
+  }
+
+  /**
+   * Reconnects the socket when it has gone half-open: connected, but delivering
+   * no inbound refs. A node making no local edits produces no send timeouts, so
+   * the send-side watchdog never fires for it — it just silently stops receiving
+   * live heads (roots, heads, and even anti-entropy answers) and drifts until a
+   * pull happens to get through. Only arms once we have EVER heard the fleet, so
+   * a genuinely lone node never reconnect-loops, and holds a cooldown so a slow
+   * reconnect+resync is not yanked again mid-recovery.
+   */
+  private _checkReceiveLiveness(): void {
+    if (this._rxWatchdogMs <= 0 || !this._coldStartComplete) return;
+    const reconnect = this._connector.reconnect;
+    if (!reconnect) return;
+    const now = Date.now();
+    if (this._lastInboundAt === 0) return; // never heard a peer — maybe alone
+    if (now - this._lastInboundAt <= this._rxWatchdogMs) return;
+    if (now < this._rxReconnectCooldownUntil) return;
+    this._log(
+      `rx-watchdog: no inbound for ` +
+        `${Math.round((now - this._lastInboundAt) / 1000)}s -> reconnecting socket`,
+    );
+    try {
+      reconnect.call(this._connector);
+    } catch (e) {
+      this._log(`rx-watchdog reconnect threw: ${String(e)}`);
+    }
+    // Re-arm from now and hold off at least one window (min 30s) so the fresh
+    // transport gets time to resubscribe and resync before we could yank again.
+    this._lastInboundAt = now;
+    this._rxReconnectCooldownUntil = now + Math.max(this._rxWatchdogMs, 30_000);
   }
 
   private async _onChange(
@@ -1664,6 +1724,10 @@ export class MongoEditSync {
   }
 
   private _onRef(ref: string): void {
+    // Any inbound ref — root heartbeat, head, or anti-entropy frame — proves the
+    // socket is still delivering. Stamp it so the receive-liveness watchdog can
+    // tell a half-open socket (silent) from a healthy one.
+    this._lastInboundAt = Date.now();
     // Anti-entropy protocol traffic (manifest-diff backfill) — route to the
     // engine and stop; these refs are neither roots nor heads. Ignored until our
     // own cold-start is complete: a node still hashing its baselines must neither
