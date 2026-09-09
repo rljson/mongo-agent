@@ -59,6 +59,37 @@ export const stripHashes = (value: unknown): unknown => {
 
 // .............................................................................
 /**
+ * Recursively sorts plain-object keys so a serialize-based hash is
+ * field-order-insensitive. Two documents with the same fields in a different
+ * order (the codec round-trip reorders nested keys) then hash the same.
+ *
+ * A BSON type wrapper (ObjectId, Int32, Long, Double, Decimal128, Binary,
+ * Timestamp, …) carries a `_bsontype` tag and a native `Date` is a Date
+ * instance — both are LEAF values: reordering their internal fields would
+ * corrupt them, so they pass through untouched. Arrays keep their order (order
+ * is data in an array, not incidental).
+ * @param value - Any value from a MongoDB document.
+ * @returns The value with every nested plain object's keys sorted.
+ */
+export const sortKeys = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    (value as { _bsontype?: unknown })._bsontype === undefined &&
+    !(value instanceof Date)
+  ) {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      out[key] = sortKeys((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
+};
+
+// .............................................................................
+/**
  * Encodes a MongoDB document as a content-addressed RLJSON component.
  *
  * Any pre-existing `_hash` on the input is dropped so the component's hash is
@@ -87,17 +118,34 @@ export const docToComponent = (doc: Document): MongoComponent => {
  * - Feeding the canonical form token-by-token to `hash.update()` avoided the
  *   string but, in the SEA runtime, tripped a native `val->IsString()`
  *   assertion in the many tiny string updates.
- * BSON serialization sidesteps both: a MongoDB document is at most 16MB, so its
- * BSON buffer is always small, hashed in one shot with no string path, no giant
- * allocation, and no recursion. It is deterministic and cross-node consistent
- * because peers store byte-identical BSON for the same document (identical field
- * order and BSON types — Int32 stays Int32, so the hash is type-aware just as
- * the old canonical hash was).
+ * BSON serialization sidesteps the giant-string/native-assert traps: a MongoDB
+ * document is at most 16MB, so its BSON buffer is small and hashed in one shot.
+ *
+ * FIELD-ORDER CANONICALIZATION (why the raw BSON is not hashed directly).
+ * `bsonSerialize` is field-order sensitive, and the earlier assumption that
+ * "peers store byte-identical BSON for the same document" is FALSE for any doc
+ * that travelled the edit chain: the codec's canonical-EJSON round-trip
+ * ({@link docToBody}/{@link bodyToDoc}) reorders nested-object keys. The source
+ * hashed its raw `fullDocument`, every receiver hashed the round-tripped form,
+ * and the two disagreed — so the content root diverged for content that is
+ * identical by value (the order-insensitive state checkpoint matched on every
+ * node), and anti-entropy re-reconciled that phantom-differing bucket forever,
+ * flooding the connector and starving live head propagation (observed live
+ * 2026-09-09: `ae … want+=0 drop+=0` looping, live inserts reaching only the
+ * origin). Sorting keys with {@link sortKeys} before serialize makes the hash
+ * order-insensitive, so source and receiver agree. Number-TYPE normalization
+ * (Long-vs-Double promotion) is deliberately NOT folded in here — it stays the
+ * receiver's job ({@link mongoCanonical} on the pull path), so the hash remains
+ * BSON-type-aware (an Int32 id still differs from a Double). Sorting materializes
+ * a per-doc key-ordered copy — bounded (≤16MB, no giant string, no `hip`
+ * recursion), a small cold-start cost for a hash that actually converges.
  * @param doc - The raw MongoDB document (may contain BSON types).
  * @returns The document's 64-hex content hash.
  */
 export const docHash = (doc: Document): string =>
-  createHash('sha256').update(bsonSerialize(doc)).digest('hex');
+  createHash('sha256')
+    .update(bsonSerialize(sortKeys(doc) as Document))
+    .digest('hex');
 
 // .............................................................................
 /**
