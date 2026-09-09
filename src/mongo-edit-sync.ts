@@ -495,6 +495,7 @@ export class MongoEditSync {
       manifestHash: (c, id) => this._manifestOf(c).get(id),
       hasTombstone: (c, id) => !!this._tombstones.get(c)?.has(id),
       pushTombstones: (c, ids) => this._pushTombstones(c, ids),
+      applyPeerTombstones: (c, ids) => this._applyPeerTombstones(c, ids),
       serveComponents: (c, ids) => this._serveComponents(c, ids),
       pullAndApply: (c, hs) => this._pullAndApply(c, hs),
       syncs: (c) => this._collections.has(c),
@@ -711,10 +712,24 @@ export class MongoEditSync {
     const want = new Set(buckets);
     const out = new Map<number, Array<[string, string]>>();
     for (const b of buckets) out.set(b, []);
-    for (const [key, hash] of this._manifestOf(collection)) {
+    const manifest = this._manifestOf(collection);
+    for (const [key, hash] of manifest) {
       const b = this._bucketOf(key);
       if (!want.has(b)) continue;
       (out.get(b) as Array<[string, string]>).push([key, hash]);
+    }
+    // Advertise our tombstones (as an empty-hash entry) so a peer that still
+    // holds live a doc WE deleted learns to drop it — the manifest-diff round is
+    // otherwise additive-only and can never converge such a SUPERSET peer down.
+    // A live doc always wins over a stale tombstone for the same id, so skip any
+    // id the live manifest still carries.
+    const tomb = this._tombstones.get(collection);
+    if (tomb) {
+      for (const key of tomb.keys()) {
+        const b = this._bucketOf(key);
+        if (!want.has(b) || manifest.has(key)) continue;
+        (out.get(b) as Array<[string, string]>).push([key, '']);
+      }
     }
     return out;
   }
@@ -828,6 +843,35 @@ export class MongoEditSync {
       this._setAppliedTimeId(collection, id, put?.timeId);
     }
     if (head) this._connector.send(this._headRef(collection, head));
+  }
+
+  /**
+   * Requester side of a delete-wins reconciliation, mirror image of
+   * {@link _pushTombstones}: a PEER holds a tombstone for a doc THIS node still
+   * has live, so the peer's delete wins and we remove it locally. We delete
+   * straight from Mongo and let our own change stream ({@link _onDelete}) drop it
+   * from the manifest, record our tombstone, and re-propagate the delete under
+   * the mass-delete guard — so the fix converges a SUPERSET node down without
+   * ever bypassing the delete-storm circuit breaker. Idempotent: an id already
+   * gone deletes nothing.
+   * @param collection - The collection.
+   * @param sliceIds - The stringified `_id`s to drop locally.
+   */
+  private async _applyPeerTombstones(
+    collection: string,
+    sliceIds: string[],
+  ): Promise<void> {
+    const coll = this._mongoDb.collection(collection);
+    for (const sliceId of sliceIds) {
+      // The manifest key is the stringified id; the real Mongo `_id` may be a
+      // number or ObjectId, so try each candidate typed shape. Only the one that
+      // exists matches — the others are harmless no-op deletes. Mirrors the
+      // per-id `deleteOne` the head-apply delete path uses.
+      for (const id of this._typedIdCandidates(sliceId)) {
+        await coll.deleteOne({ _id: id } as never);
+      }
+      this._log(`ae ${collection} applied peer tombstone _id=${sliceId}`);
+    }
   }
 
   /**

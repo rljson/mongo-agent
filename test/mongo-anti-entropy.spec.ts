@@ -26,6 +26,7 @@ class FakeHost implements AntiEntropyHost {
   served: Array<{ collection: string; ids: string[] }> = [];
   pulled: Array<{ collection: string; hashes: string[] }> = [];
   pushedTombstones: Array<{ collection: string; ids: string[] }> = [];
+  droppedTombstones: Array<{ collection: string; ids: string[] }> = [];
   serveResult: string[] = [];
   syncable = new Set<string>(['customers']);
   readyCollections = new Set<string>(['customers']);
@@ -54,6 +55,9 @@ class FakeHost implements AntiEntropyHost {
   }
   async pushTombstones(collection: string, ids: string[]): Promise<void> {
     this.pushedTombstones.push({ collection, ids });
+  }
+  async applyPeerTombstones(collection: string, ids: string[]): Promise<void> {
+    this.droppedTombstones.push({ collection, ids });
   }
   async serveComponents(collection: string, ids: string[]): Promise<string[]> {
     this.served.push({ collection, ids });
@@ -353,17 +357,63 @@ describe('MongoAntiEntropy', () => {
       expect(host.countOf(AEW)).toBe(0);
     });
 
-    it('AEE -> ignores an empty-hash entry (a manifest tombstone marker)', async () => {
+    it('AEE -> ignores a peer tombstone for a doc we do not hold', async () => {
       ae.trigger(COLL);
       const bucket = bucketOf('gone');
       host.roots[bucket] = 'f'.repeat(64);
       const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
       await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      // We do NOT hold 'gone' -> the peer's tombstone is a no-op for us.
       const entries: Array<[number, Array<[string, string]>]> = [
         [bucket, [['gone', '']]],
       ];
       await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
       expect(host.countOf(AEW)).toBe(0);
+      expect(host.droppedTombstones).toEqual([]);
+    });
+
+    it('AEE -> drops a doc we hold live when the peer advertises its tombstone (superset convergence)', async () => {
+      ae.trigger(COLL);
+      const bucket = bucketOf('orphan');
+      host.roots[bucket] = 'f'.repeat(64);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      // We still hold 'orphan' live; the peer deleted it (empty-hash entry).
+      host.manifest.set('orphan', 'oh');
+      const entries: Array<[number, Array<[string, string]>]> = [
+        [bucket, [['orphan', '']]],
+      ];
+      await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
+      expect(host.droppedTombstones).toEqual([
+        { collection: COLL, ids: ['orphan'] },
+      ]);
+      // A tombstone is never pulled as a body.
+      expect(host.countOf(AEW)).toBe(0);
+    });
+
+    it('AEE -> caps local tombstone drops per round via SL_EDIT_AE_MAX_DROPS', async () => {
+      process.env['SL_EDIT_AE_MAX_DROPS'] = '2';
+      ae.trigger(COLL);
+      const ids = ['o0', 'o1', 'o2', 'o3'];
+      for (const id of ids) {
+        host.roots[bucketOf(id)] = 'f'.repeat(64);
+        host.manifest.set(id, `${id}h`);
+      }
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      const byBucket = new Map<number, Array<[string, string]>>();
+      for (const id of ids) {
+        const b = bucketOf(id);
+        const list = byBucket.get(b) ?? [];
+        list.push([id, '']);
+        byBucket.set(b, list);
+      }
+      await ae.onMessage(
+        msg(AEE, `${COLL}|${JSON.stringify([...byBucket.entries()])}`),
+      );
+      expect(host.droppedTombstones).toHaveLength(1);
+      expect(host.droppedTombstones[0].ids).toHaveLength(2);
+      delete process.env['SL_EDIT_AE_MAX_DROPS'];
     });
 
     it('AEE with no session is ignored', async () => {

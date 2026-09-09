@@ -7,6 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { bucketOf } from '../src/mongo-manifest-hash.ts';
 import { buildMesh, converge, docsOf, settle } from './mongo-edit-mesh.ts';
 
 /**
@@ -206,6 +207,91 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     ).toBeUndefined();
     // The delete reached the peer that still held it in its baseline.
     expect(docsOf(b, COLLECTION)['ghost']).toBeUndefined();
+  }, 40_000);
+
+  it('advertises a persisted tombstone as an empty-hash bucket entry (a live doc still wins)', async () => {
+    // A holds a persisted tombstone for 'orphan' (deleted, not in its mongo) and
+    // separately still holds 'reborn' live even though a stale tombstone for it
+    // lingers. `_bucketEntries` must advertise 'orphan' as a tombstone so a
+    // superset peer can drop it, but never shadow the live 'reborn'.
+    const { nodes, stop } = await buildMesh(2, [COLLECTION], {
+      seed: (ns) => {
+        const tomb = ns[0].mongo.collection('sl_edit_tombstones');
+        for (const id of ['orphan', 'reborn']) {
+          tomb.docs.set(`${COLLECTION}|${id}`, {
+            _id: `${COLLECTION}|${id}`,
+            collection: COLLECTION,
+            id,
+          });
+        }
+        // 'reborn' is live again in A's mongo despite the lingering tombstone.
+        ns[0].mongo
+          .collection(COLLECTION)
+          .docs.set('reborn', { _id: 'reborn', v: 2 });
+      },
+    });
+    stopMesh = stop;
+    const [a] = nodes;
+    await settle(nodes, 200);
+
+    const internals = a.sync as unknown as {
+      _bucketEntries: (
+        c: string,
+        b: number[],
+      ) => Map<number, Array<[string, string]>>;
+    };
+    const ob = bucketOf('orphan');
+    const rb = bucketOf('reborn');
+    const got = internals._bucketEntries(COLLECTION, [ob, rb]);
+    expect(got.get(ob)).toContainEqual(['orphan', '']);
+    // The live doc wins: 'reborn' appears with its real hash, never as a tombstone.
+    const rebornEntries = got.get(rb) ?? [];
+    expect(rebornEntries.some(([id]) => id === 'reborn')).toBe(true);
+    expect(rebornEntries).not.toContainEqual(['reborn', '']);
+  }, 40_000);
+
+  it('drops a locally-held doc when a peer tombstone arrives through the engine (superset convergence)', async () => {
+    // A single node holds 'orphan' live (a delete head it missed). Driven
+    // end-to-end through its real anti-entropy engine: a controlled round feeds
+    // a peer's roots (only orphan's bucket differs) and that peer's entries
+    // (orphan advertised as a tombstone). The node must drop its own copy — the
+    // only path that converges a SUPERSET node down — exercising the real host
+    // arrow. A lone node has no peer to resurrect it, so the result is exact.
+    const { nodes, stop } = await buildMesh(1, [COLLECTION], {
+      seed: (ns) => {
+        ns[0].mongo
+          .collection(COLLECTION)
+          .docs.set('orphan', { _id: 'orphan', v: 1 });
+      },
+    });
+    stopMesh = stop;
+    const [a] = nodes;
+    await settle(nodes, 200);
+    expect(docsOf(a, COLLECTION)['orphan']).toMatchObject({ v: 1 });
+
+    const ai = a.sync as unknown as {
+      _ae: {
+        trigger: (c: string) => boolean;
+        onMessage: (ref: string) => Promise<void>;
+        _busy: Set<string>;
+        _sessions: Map<string, unknown>;
+      };
+      _bucketRoots: (c: string) => string[];
+    };
+    // Start a clean round for the collection, then feed the peer's view.
+    ai._ae._busy.delete(COLLECTION);
+    ai._ae._sessions.delete(COLLECTION);
+    ai._ae.trigger(COLLECTION);
+    const mine = ai._bucketRoots(COLLECTION);
+    const ob = bucketOf('orphan');
+    const peer = [...mine];
+    peer[ob] = '0'.repeat(64); // only orphan's bucket differs
+    await ai._ae.onMessage(`~AER~9|${COLLECTION}|${peer.join('')}`);
+    await ai._ae.onMessage(
+      `~AEE~9|${COLLECTION}|${JSON.stringify([[ob, [['orphan', '']]]])}`,
+    );
+    await settle(nodes, 200);
+    expect(docsOf(a, COLLECTION)['orphan']).toBeUndefined();
   }, 40_000);
   it('a round that pulled documents chains on the cooldown, not the back-off', async () => {
     // The other side of the gate. A productive round must resume as soon as the
