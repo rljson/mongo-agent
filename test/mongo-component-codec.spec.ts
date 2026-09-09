@@ -25,6 +25,7 @@ import {
   docToBody,
   docToComponent,
   mongoCanonical,
+  sortKeys,
 } from '../src/mongo-component-codec.ts';
 
 describe('mongo-component-codec', () => {
@@ -121,6 +122,58 @@ describe('mongo-component-codec', () => {
       }).not.toThrow();
       expect(hash).toHaveLength(64);
       expect(docHash(big)).toBe(hash);
+    });
+
+    it('is FIELD-ORDER-insensitive — same content in a different order hashes the same', () => {
+      expect(docHash({ _id: 'x', a: 1, b: 2 })).toBe(
+        docHash({ b: 2, _id: 'x', a: 1 }),
+      );
+      // …including nested objects, which the codec round-trip reorders.
+      expect(docHash({ _id: 'x', n: { z: 1, a: 2 } })).toBe(
+        docHash({ _id: 'x', n: { a: 2, z: 1 } }),
+      );
+    });
+
+    it('agrees between a source doc and its edit-chain round-trip (the convergence fix)', () => {
+      // The exact source→receiver split that diverged live: the source hashes its
+      // raw fullDocument; a receiver pulls the doc through the codec and hashes
+      // that. The codec reorders nested keys — the hash must survive it.
+      const source = {
+        _id: new Int32(7),
+        meta: { created: new Date('2026-09-09T00:00:00Z'), by: 'a', tag: 'z' },
+        vals: [new Int32(1), new Int32(2)],
+        name: 'carol',
+      };
+      const roundTripped = bodyToDoc(docToBody(source));
+      expect(docHash(source)).toBe(docHash(roundTripped));
+    });
+
+    it('array order still matters (order is data in an array)', () => {
+      expect(docHash({ _id: 'x', a: [1, 2] })).not.toBe(
+        docHash({ _id: 'x', a: [2, 1] }),
+      );
+    });
+  });
+
+  describe('sortKeys', () => {
+    it('sorts nested plain-object keys but leaves BSON leaves and arrays intact', () => {
+      const oid = new ObjectId('64b7f0c2e4b0a1a2b3c4d5e6');
+      const out = sortKeys({
+        b: 2,
+        a: { z: new Int32(9), m: [3, 1, 2] },
+        _id: oid,
+      }) as Record<string, unknown>;
+      expect(Object.keys(out)).toEqual(['_id', 'a', 'b']);
+      expect(Object.keys(out['a'] as object)).toEqual(['m', 'z']);
+      expect(out['_id']).toBe(oid); // BSON wrapper untouched (same reference)
+      expect((out['a'] as { m: number[] }).m).toEqual([3, 1, 2]); // array order kept
+    });
+
+    it('leaves a primitive, a Date, and null unchanged', () => {
+      const d = new Date(0);
+      expect(sortKeys(5)).toBe(5);
+      expect(sortKeys(d)).toBe(d);
+      expect(sortKeys(null)).toBe(null);
     });
   });
 
