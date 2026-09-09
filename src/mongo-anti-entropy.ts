@@ -53,9 +53,18 @@
 // each upserted doc into the content root.
 //
 // SAFETY
-// - ADDITIVE ONLY: we only ever pull docs the peer has and we lack; we never
-//   delete a peer's doc from here. Bulk deletes stay the job of the tombstone
-//   edit path + its mass-delete circuit breaker.
+// - PULL IS ADDITIVE: the body-pull path only ever fetches docs the peer has and
+//   we lack; it never overwrites live content. Bulk deletes stay the job of the
+//   tombstone edit path + its mass-delete circuit breaker.
+// - DELETE-WINS, BOTH DIRECTIONS (superset convergence): a live doc on one node
+//   that the other has TOMBSTONED must be dropped, or the two sit at different
+//   roots forever whenever a delete head is missed. Each side advertises its
+//   tombstones as an empty-hash bucket entry; a requester that still holds such a
+//   doc removes it locally (AEE → `applyPeerTombstones`), and a requester missing
+//   a doc it has itself tombstoned re-pushes that tombstone (AEE → `redelete`).
+//   The local removal runs through the host's ordinary delete path, so its
+//   re-propagation is still bounded by the mass-delete circuit breaker, and a
+//   per-round drop cap (`SL_EDIT_AE_MAX_DROPS`) bounds one pass.
 // - NO RESURRECTION: before asking to replay a missing doc we consult a
 //   persistent local tombstone log. A doc we deliberately deleted is NOT pulled
 //   back; instead we re-broadcast its tombstone so the delete wins on the peer.
@@ -108,6 +117,13 @@ export interface AntiEntropyHost {
   hasTombstone(collection: string, sliceId: string): boolean;
   /** Re-broadcast tombstones for sliceIds we deleted (make delete win). */
   pushTombstones(collection: string, sliceIds: string[]): Promise<void>;
+  /**
+   * Apply a PEER's tombstones locally: delete sliceIds we still hold live but
+   * the peer has deleted (superset convergence — the peer's delete wins). The
+   * host's own change stream records our tombstone and re-propagates the delete
+   * (under its mass-delete guard), so this only performs the local removal.
+   */
+  applyPeerTombstones(collection: string, sliceIds: string[]): Promise<void>;
   /**
    * Read these sliceIds from Mongo, publish them as content-addressed components
    * for pull, and return the component row hashes the requester can pull by.
@@ -404,14 +420,22 @@ export class MongoAntiEntropy {
     >;
     const want: string[] = [];
     const redelete: string[] = [];
+    const dropLocal: string[] = [];
     for (const [bucket, entries] of batch) {
       for (const [sliceId, hash] of entries) {
         const ours = this._host.manifestHash(collection, sliceId);
+        // An empty hash marks a TOMBSTONE the peer advertises. If we still hold
+        // the doc live, the peer's delete wins and we drop it locally — this is
+        // the only path that converges a SUPERSET node down (a doc whose delete
+        // head never reached us). If we do not hold it, there is nothing to do.
+        if (hash === '') {
+          if (ours !== undefined) dropLocal.push(sliceId);
+          continue;
+        }
         // Only ADD what we are missing. A sliceId we already hold (even at a
         // different hash — that is a concurrent-edit conflict handled
         // elsewhere) is left alone: backfill never overwrites live content.
         if (ours !== undefined) continue;
-        if (hash === '') continue;
         if (this._host.hasTombstone(collection, sliceId)) redelete.push(sliceId);
         else want.push(sliceId);
       }
@@ -423,10 +447,21 @@ export class MongoAntiEntropy {
     // buckets simply re-trigger next round. Each arriving batch makes forward
     // progress on its own.
     this._host.log(
-      `ae ${collection} <- AEE ${batch.length}b pending=${session.pending.size} want+=${want.length}`,
+      `ae ${collection} <- AEE ${batch.length}b pending=${session.pending.size} ` +
+        `want+=${want.length} drop+=${dropLocal.length}`,
     );
     if (redelete.length > 0) {
       void this._host.pushTombstones(collection, redelete);
+    }
+    if (dropLocal.length > 0) {
+      // Bound how many local drops one round applies, as defence-in-depth: a
+      // peer's tombstone set is already bounded by its real deletes, but a
+      // capped slice keeps a pathological advertisement from removing a large
+      // share of live docs in a single pass — the remainder re-triggers next
+      // round. (The re-propagation of these deletes stays under the host's own
+      // mass-delete circuit breaker.)
+      const cap = Number(process.env['SL_EDIT_AE_MAX_DROPS']) || 20000;
+      void this._host.applyPeerTombstones(collection, dropLocal.slice(0, cap));
     }
     if (want.length > 0) {
       const cap = Number(process.env['SL_EDIT_AE_MAX_DOCS']) || 20000;
