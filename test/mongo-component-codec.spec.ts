@@ -105,10 +105,15 @@ describe('mongo-component-codec', () => {
       expect(docHash({ v: 'a' })).not.toBe(docHash({ v: 'b' }));
     });
 
-    it('is BSON-type-aware — Int32 1 differs from string "1" and from Double 1', () => {
+    it('separates values but CONVERGES ambiguous numbers (Int32 1 == Double 1)', () => {
+      // Different VALUES still hash differently…
       expect(docHash({ v: '1' })).not.toBe(docHash({ v: new Int32(1) }));
-      expect(docHash({ v: new Int32(1) })).not.toBe(docHash({ v: new Double(1) }));
       expect(docHash({ v: 'true' })).not.toBe(docHash({ v: true }));
+      expect(docHash({ v: new Int32(1) })).not.toBe(docHash({ v: new Int32(2) }));
+      // …but an Int32 1 and a Double 1 are the SAME value and MUST hash the same:
+      // either is what a node may read back after a promote, and the content root
+      // has to converge regardless of which storage form each node landed on.
+      expect(docHash({ v: new Int32(1) })).toBe(docHash({ v: new Double(1) }));
     });
 
     it('hashes a large document (huge array) in one shot without throwing', () => {
@@ -153,6 +158,34 @@ describe('mongo-component-codec', () => {
         docHash({ _id: 'x', a: [2, 1] }),
       );
     });
+
+    it('converges every CARAT BSON type through the edit-chain round-trip', () => {
+      // A doc using each type CARAT actually stores. Its raw hash and its
+      // codec-round-tripped hash MUST agree — this is exactly the source→receiver
+      // split that flooded anti-entropy.
+      const doc = {
+        _id: new Int32(42),
+        code: 'EUR',
+        rate: new Double(1.0), // ambiguous integer-valued double
+        amount: 3, // plain JS number
+        when: new Date('2026-09-10T00:00:00.000Z'),
+        oid: new ObjectId('64b7f0c2e4b0a1a2b3c4d5e6'),
+        price: Decimal128.fromString('19.99'),
+        blob: new Binary(Buffer.from([1, 2, 3])),
+        meta: { z: 1, a: new Int32(2), tags: ['x', 'y'] },
+      };
+      const rt = bodyToDoc(docToBody(doc));
+      expect(docHash(doc)).toBe(docHash(rt));
+    });
+
+    it('converges a large Long too — canonical EJSON keeps it a $numberLong string', () => {
+      // A Long above 2^53 survives the canonical-EJSON codec (it is tagged
+      // `$numberLong` as a string, so no JS-number precision is involved) and
+      // hashes identically on both sides.
+      const doc = { _id: 'x', l: Long.fromString('90071992547409931') };
+      const rt = bodyToDoc(docToBody(doc));
+      expect(docHash(doc)).toBe(docHash(rt));
+    });
   });
 
   describe('sortKeys', () => {
@@ -196,9 +229,12 @@ describe('mongo-component-codec', () => {
       // doc's content root disagree with its read-back twin and wedged the
       // backfill in an endless re-pull.
       const decoded = bodyToDoc(docToBody(stored));
-      expect(docHash(decoded)).not.toBe(docHash(stored));
-      // mongoCanonical collapses the typed wrapper to precisely the stored form,
-      // so the pulled doc hashes identically to the same doc read from Mongo.
+      // `docHash` now canonicalizes internally (mongoCanonical + sortKeys), so the
+      // pulled doc and its read-back twin hash the SAME even though their raw BSON
+      // differs (Long wrapper vs stored Double) — the mismatch that wedged the
+      // backfill is gone at the hash level.
+      expect(docHash(decoded)).toBe(docHash(stored));
+      // Explicitly re-canonicalizing is idempotent — still the same hash.
       expect(docHash(mongoCanonical(decoded))).toBe(docHash(stored));
     });
 

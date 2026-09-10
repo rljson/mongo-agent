@@ -121,30 +121,35 @@ export const docToComponent = (doc: Document): MongoComponent => {
  * BSON serialization sidesteps the giant-string/native-assert traps: a MongoDB
  * document is at most 16MB, so its BSON buffer is small and hashed in one shot.
  *
- * FIELD-ORDER CANONICALIZATION (why the raw BSON is not hashed directly).
- * `bsonSerialize` is field-order sensitive, and the earlier assumption that
- * "peers store byte-identical BSON for the same document" is FALSE for any doc
- * that travelled the edit chain: the codec's canonical-EJSON round-trip
- * ({@link docToBody}/{@link bodyToDoc}) reorders nested-object keys. The source
- * hashed its raw `fullDocument`, every receiver hashed the round-tripped form,
- * and the two disagreed — so the content root diverged for content that is
- * identical by value (the order-insensitive state checkpoint matched on every
- * node), and anti-entropy re-reconciled that phantom-differing bucket forever,
- * flooding the connector and starving live head propagation (observed live
- * 2026-09-09: `ae … want+=0 drop+=0` looping, live inserts reaching only the
- * origin). Sorting keys with {@link sortKeys} before serialize makes the hash
- * order-insensitive, so source and receiver agree. Number-TYPE normalization
- * (Long-vs-Double promotion) is deliberately NOT folded in here — it stays the
- * receiver's job ({@link mongoCanonical} on the pull path), so the hash remains
- * BSON-type-aware (an Int32 id still differs from a Double). Sorting materializes
- * a per-doc key-ordered copy — bounded (≤16MB, no giant string, no `hip`
- * recursion), a small cold-start cost for a hash that actually converges.
+ * CANONICALIZATION (why the raw BSON is not hashed directly). `bsonSerialize` is
+ * sensitive to BOTH field order and BSON number type, and the earlier assumption
+ * that "peers store byte-identical BSON for the same document" is FALSE for any
+ * doc that travelled the edit chain: the codec's canonical-EJSON round-trip
+ * ({@link docToBody}/{@link bodyToDoc}) both reorders nested-object keys AND can
+ * leave a value in a different number type than the source read from Mongo. The
+ * source hashed its raw `fullDocument`, every receiver hashed the round-tripped
+ * form, and the two disagreed — so the content root diverged for content that is
+ * identical by value (the order/type-insensitive state checkpoint matched on
+ * every node), and anti-entropy re-reconciled that phantom-differing bucket
+ * forever, flooding the connector and starving live head propagation (observed
+ * live 2026-09-09: `ae … want+=0 drop+=0` looping, live inserts reaching only the
+ * origin). {@link mongoCanonical} pins the number type to Mongo's promoted form
+ * and {@link sortKeys} orders the fields, so source and receiver agree for every
+ * BSON type CARAT stores (Int32, Double, string, Date, ObjectId, Decimal128,
+ * Binary, nested objects). The hash is now value-equal for ambiguous numbers (an
+ * Int32 `1` and a Double `1` hash the same — which is exactly what convergence
+ * needs, since either may be what a node read back). KNOWN LIMIT: an integer
+ * larger than 2^53 stored as a `Long` loses precision through the codec's EJSON
+ * round-trip itself (a data-level codec bug, not a hashing one), so such a doc
+ * cannot converge here — CARAT catalog/currency data does not use values that
+ * large. Canonicalizing materializes a per-doc copy — bounded (≤16MB, no giant
+ * string, no `hip` recursion) — a small cold-start cost for a hash that converges.
  * @param doc - The raw MongoDB document (may contain BSON types).
  * @returns The document's 64-hex content hash.
  */
 export const docHash = (doc: Document): string =>
   createHash('sha256')
-    .update(bsonSerialize(sortKeys(doc) as Document))
+    .update(bsonSerialize(sortKeys(mongoCanonical(doc)) as Document))
     .digest('hex');
 
 // .............................................................................
