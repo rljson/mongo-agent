@@ -63,6 +63,38 @@ describe('EditCheckpoint', () => {
     expect(await cp.load('customers')).toBeUndefined();
   });
 
+  // A manifest larger than the stream's 16 KiB high-water mark makes
+  // `out.write()` return false, which is the whole point of the streamed
+  // writer: it waits for 'drain' instead of buffering the file in memory.
+  // Anything smaller never exercises that path, so the guarantee that a
+  // mega manifest costs constant memory would go untested.
+  it('applies backpressure and still round-trips a manifest past the high-water mark', async () => {
+    const cp = new EditCheckpoint(await mkDir());
+    const manifest = new Map<string, string>();
+    for (let i = 0; i < 5_000; i++) {
+      manifest.set(`slice-${i}`, `hash-${i}`.padEnd(64, '0'));
+    }
+    await cp.save('bigColl', manifest, { _data: 'resume' });
+
+    const loaded = await cp.load('bigColl');
+    expect(loaded?.token).toEqual({ _data: 'resume' });
+    expect(Object.keys(loaded?.manifest ?? {})).toHaveLength(5_000);
+    expect(loaded?.manifest['slice-4999']).toBe(manifest.get('slice-4999'));
+  });
+
+  // The reader skips empty lines so a file that ends with a newline — every
+  // file `save` writes — does not parse '' as an entry.
+  it('ignores blank lines in a streamed checkpoint', async () => {
+    const dir = await mkDir();
+    const cp = new EditCheckpoint(dir);
+    await writeFile(
+      join(dir, 'gapped.json'),
+      `${JSON.stringify({ token: null })}\n\n${JSON.stringify(['a', 'h1'])}\n\n`,
+      'utf8',
+    );
+    expect(await cp.load('gapped')).toEqual({ manifest: { a: 'h1' }, token: null });
+  });
+
   it('percent-encodes path-unsafe collection names', async () => {
     const cp = new EditCheckpoint(await mkDir());
     await cp.save('a/b:c', new Map([['x', 'h']]), { tk: 'T' });

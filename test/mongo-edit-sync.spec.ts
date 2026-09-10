@@ -1100,6 +1100,84 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  // `_recordTombstone` keeps an in-memory guard so a repeated delete of the
+  // same _id does not write the tombstone log again. The guard is what makes
+  // the persist safe to leave best-effort: without it, a delete storm on one
+  // id would hammer the log collection from inside the delete path.
+  it('records a repeated delete of the same id only once', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    // Only THIS test gives the tombstone log a working `updateOne`, so the
+    // shared FakeCollection keeps exercising the best-effort catch elsewhere.
+    const tombstoneLog = new FakeCollection() as FakeCollection & {
+      updateOne: ReturnType<typeof vi.fn>;
+    };
+    tombstoneLog.updateOne = vi.fn(async () => ({}));
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      sl_edit_tombstones: tombstoneLog,
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const del = (): void =>
+      cols.customers.stream.emit({
+        operationType: 'delete',
+        documentKey: { _id: new Int32(1) },
+      });
+
+    del();
+    await tick(40);
+    expect(tombstoneLog.updateOne).toHaveBeenCalledTimes(1);
+
+    del();
+    await tick(40);
+    expect(tombstoneLog.updateOne).toHaveBeenCalledTimes(1);
+    await sync.stop();
+  });
+
+  // The tombstone persist is deliberately fire-and-forget: it runs inside
+  // `_onDelete`, before the delete's root re-broadcast, so a rejected write
+  // must be logged and swallowed rather than aborting delete propagation.
+  it('logs and swallows a rejected tombstone persist', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    const tombstoneLog = new FakeCollection() as FakeCollection & {
+      updateOne: ReturnType<typeof vi.fn>;
+    };
+    tombstoneLog.updateOne = vi.fn(() => Promise.reject(new Error('no log')));
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      sl_edit_tombstones: tombstoneLog,
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    conn.send.mockClear();
+
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    await tick(40);
+
+    // The write was attempted and rejected, and the delete still propagated.
+    expect(tombstoneLog.updateOne).toHaveBeenCalledTimes(1);
+    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+    await sync.stop();
+  });
+
   it('echo-suppresses a peer-applied delete', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
     const cols = {
