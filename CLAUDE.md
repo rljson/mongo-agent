@@ -4,6 +4,25 @@ MongoDB sync agent for the RLJSON ecosystem — the components/edits engine that
 
 ---
 
+## The Sync Engine (read before touching sync code)
+
+One engine ships: the **components/edits chain** (`MongoEditSync`,
+`MongoEditAdapter`, `EditCheckpoint`, `MongoAntiEntropy`). Documents are
+content-addressed Io rows; the head of a collection's `EditHistory` is the
+only thing broadcast. Full picture:
+[doc/sync-architecture.md](doc/sync-architecture.md).
+
+- **A Mongo route must NOT end in `Tree`.** The consuming app selects the
+  engine by that suffix (`!config.treeKey.endsWith('Tree')` in
+  `sl-mongo-agent`), so `mongoCaratOneTree` would ask for an engine that no
+  longer exists. Name it `mongoCaratOne`.
+- The `Cake` **table** is part of this engine. The removed thing was the
+  standalone `MongoCakeAgent`/`MongoCakeSync`, not cakes.
+- Tree + blob Mongo sync is gone. Do not reintroduce a tree walk for flat
+  document data.
+
+---
+
 ## Non-Negotiable Constraints
 
 - **Never commit directly to `main`.** Always work on a feature branch.

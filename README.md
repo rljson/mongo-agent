@@ -19,6 +19,7 @@ found in the LICENSE file in the root of this package.
 | File                                             | Purpose                       |
 | ------------------------------------------------ | ----------------------------- |
 | [README.contributors.md](README.contributors.md) | Run, debug, build and publish |
-| [README.architecture.md](README.architecture.md) | Software architecture guide   |
+| [doc/sync-architecture.md](doc/sync-architecture.md) | How Mongo sync works today    |
+| [README.architecture.md](README.architecture.md) | Operation-log subsystem       |
 | [README.trouble.md](README.trouble.md)           | Errors & solutions            |
 | [README.blog.md](README.blog.md)                 | Blog                          |

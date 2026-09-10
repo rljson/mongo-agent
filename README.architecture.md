@@ -8,6 +8,14 @@ found in the LICENSE file in the root of this package.
 
 # Architecture
 
+> **Scope.** This page describes the **operation-log** subsystem (`sync_ops` /
+> `sync_local` / `sync_state`, the hub HTTP endpoints, hash chains and the
+> Merkle state checkpoints). Of those, only the Merkle checkpoint and hash
+> helpers are still exported; the operation-log source is reachable from its
+> own specs only. **The engine that actually synchronises a MongoDB today is
+> the components/edits chain — see
+> [doc/sync-architecture.md](doc/sync-architecture.md).**
+
 ## Overview
 
 **@rljson/mongo-agent** is a distributed MongoDB synchronization system that enables bidirectional replication between multiple MongoDB instances with built-in integrity verification and tamper detection.
