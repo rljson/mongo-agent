@@ -128,6 +128,35 @@ interface MongoChangeStream {
  * of deletes above the mass-delete threshold is NOT propagated (circuit
  * breaker) so a full restore / empty-DB load on one node can't wipe the peer.
  */
+/** How the components/edits sync is doing, and what it holds. */
+export interface MongoEditSyncHealth {
+  /** Collections this node is syncing. */
+  watching: number;
+  /** How many of them have a change stream open right now. */
+  open: number;
+  /** When any of them last delivered, or `null` if none has. */
+  lastChangeAt: number | null;
+  /**
+   * One value two nodes can compare — `null` when nothing is watched.
+   *
+   * Never an empty-string or zero fallback: a node holding nothing is not a
+   * node that agrees with one holding nothing.
+   */
+  stateRef: string | null;
+  /**
+   * The same comparison, per collection — collection name → content root.
+   *
+   * The node-level fold above answers *do these two hold exactly the same
+   * thing*, which conflates two very different findings: shared data that
+   * disagrees, and machines that simply hold different collections. On the
+   * lab both were true at once and the matrix could only say "different".
+   *
+   * Names, not just counts, because the useful answer is *which*. They are
+   * schema rather than content, and this node's log already carries them.
+   */
+  roots: Record<string, string>;
+}
+
 export class MongoEditSync {
   private readonly _adapter: MongoEditAdapter;
   /**
@@ -189,6 +218,28 @@ export class MongoEditSync {
    * root; {@link _contentRoot} just hex-encodes this buffer.
    */
   private readonly _rootAcc = new Map<string, Buffer>();
+  /**
+   * Collections with a change stream open right now.
+   *
+   * Kept because **nothing outside this class could see whether this sync was
+   * alive.** The legacy tree-sync path had its own `changeStreamAlive`, and it
+   * is never started when the components/edits sync is — so every node on that
+   * build reported its change stream as dead, the Dashboard raised an ERROR on
+   * all four lab machines, and the sync was working the whole time. A health
+   * report that cries wolf is worse than none.
+   */
+  private readonly _liveStreams = new Set<string>();
+  /** When any collection's stream last delivered. */
+  private _lastChangeAt: number | null = null;
+  /**
+   * Whether `start` has finished adopting collections.
+   *
+   * The difference between "this node has not worked out its state yet" and
+   * "this node has, and the answer is: nothing". Both look like an empty
+   * accumulator, and only the first is unknown — a database that was
+   * deliberately emptied has a state, and two of them hold the same one.
+   */
+  private _started = false;
   /**
    * collection → a single Buffer of `AE_BUCKET_COUNT × 32` bytes: the per-bucket
    * XOR accumulators used by the manifest-diff backfill. Bucket `b` occupies
@@ -1116,11 +1167,16 @@ export class MongoEditSync {
       const stream = this._mongoDb
         .collection(collection)
         .watch([], opts) as unknown as MongoChangeStream;
+      this._liveStreams.add(collection);
       stream.on('change', (change: unknown) => {
+        this._lastChangeAt = Date.now();
         queue.push(change as Record<string, unknown>);
         if (snapshotDone) void pump();
       });
-      this._stop.push(() => stream.close());
+      this._stop.push(() => {
+        this._liveStreams.delete(collection);
+        return stream.close();
+      });
       return stream;
     };
     // Full snapshot — MANIFEST ONLY. Reads every existing document, records its
@@ -1245,6 +1301,61 @@ export class MongoEditSync {
     }
   }
 
+  /**
+   * Whether this sync is alive, and what it holds.
+   *
+   * The one value two nodes can compare is `stateRef`: each collection keeps a
+   * 32-byte XOR accumulator over its document digests, which is
+   * order-independent — two nodes with identical data derive the same
+   * accumulator without exchanging anything. Folding the collections together
+   * (name included, so a document moving between them still shows) gives one
+   * root for the node.
+   *
+   * `null` when nothing is watched: a node that syncs no collections holds no
+   * state to agree about, which is not the same as agreeing.
+   * @returns The reading.
+   */
+  health(): MongoEditSyncHealth {
+    const collections = [...this._rootAcc.keys()].sort();
+
+    // Folding zero collections gives 32 zero bytes, and that is a real answer:
+    // a database whose synced set is empty holds nothing, and two of them hold
+    // the same nothing. `null` is reserved for the node that has not finished
+    // working its state out — which is the only honest "unknown".
+    //
+    // No collision with a single empty collection: the fold hashes the name
+    // alongside the root, so one empty collection is sha256(name|zeros), not
+    // zeros.
+    let stateRef: string | null = null;
+    if (this._started) {
+      const acc = Buffer.alloc(32);
+      for (const collection of collections) {
+        const digest = createHash('sha256')
+          .update(collection)
+          .update('\0')
+          .update(this._contentRoot(collection))
+          .digest();
+        for (let i = 0; i < acc.length; i++) {
+          acc[i] = (acc[i] as number) ^ (digest[i] as number);
+        }
+      }
+      stateRef = acc.toString('hex');
+    }
+
+    const roots: Record<string, string> = {};
+    for (const collection of collections) {
+      roots[collection] = this._contentRoot(collection);
+    }
+
+    return {
+      watching: this._collections.size,
+      open: this._liveStreams.size,
+      lastChangeAt: this._lastChangeAt,
+      stateRef,
+      roots,
+    };
+  }
+
   async start(): Promise<void> {
     this._connector.listen((ref) => this._onRef(ref));
 
@@ -1259,6 +1370,9 @@ export class MongoEditSync {
     // stays gated so a small collection's backfill cannot starve a mega
     // collection still hashing its baseline.
     this._coldStartComplete = true;
+    // From here this node can say what it holds — including "nothing", which
+    // is an answer and not an absence.
+    this._started = true;
 
     // Head re-announce (gossip): the relay does not replay past refs to a
     // late-joining peer, so a node that connects after our snapshot broadcast
