@@ -20,7 +20,7 @@ export type {
 // per-document timeId ordering (guaranteed convergence under concurrent
 // multi-writer load), content-root heartbeat, mass-delete circuit breaker.
 export { MongoEditSync } from './mongo-edit-sync.ts';
-export type { EditSyncConnector } from './mongo-edit-sync.ts';
+export type { EditSyncConnector, MongoEditSyncHealth } from './mongo-edit-sync.ts';
 export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';
 export type { CollectPutsResult } from './mongo-edit-adapter.ts';
 export { EditCheckpoint } from './mongo-edit-checkpoint.ts';

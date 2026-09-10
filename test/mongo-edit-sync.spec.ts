@@ -1743,4 +1743,191 @@ describe('MongoEditSync', () => {
     expect(cols.customers.findCalls).toBe(1); // fell back to a full snapshot
     await sync.stop();
   });
+  describe('health — what nothing outside this class could see', () => {
+    // `MongoAgent.getSyncHealth().changeStreamAlive` belongs to the LEGACY
+    // tree sync, which is never started when this one is. So on the lab build
+    // every node reported a dead change stream, the Dashboard raised an ERROR
+    // on all four machines, and the sync was working the whole time.
+
+    it('reports the streams it actually has open', async () => {
+      const cols = {
+        customers: new FakeCollection([{ _id: new Int32(1), name: 'Alice' }]),
+        orders: new FakeCollection([]),
+      };
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        mkConnector(),
+        ['customers', 'orders'],
+        'p',
+      );
+
+      // Told about two collections, watching neither yet: `watching` is what
+      // this sync is responsible for, `open` is what it actually holds — and
+      // the gap between them is the thing worth seeing.
+      expect(sync.health()).toMatchObject({ watching: 2, open: 0 });
+
+      await sync.start();
+
+      expect(sync.health()).toMatchObject({ watching: 2, open: 2 });
+    });
+
+    it('has no last change before one has arrived, and one after', async () => {
+      const cols = { customers: new FakeCollection([]) };
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        mkConnector(),
+        ['customers'],
+        'p',
+      );
+      await sync.start();
+
+      expect(sync.health().lastChangeAt).toBeNull();
+
+      cols.customers.stream.emit({
+        operationType: 'insert',
+        fullDocument: { _id: new Int32(1), name: 'Carol' },
+      });
+      await tick();
+
+      expect(sync.health().lastChangeAt).toBeGreaterThan(0);
+    });
+
+    describe('the state ref two nodes compare', () => {
+      /**
+       * A sync over the given documents.
+       * @param docs - Per collection.
+       * @returns The started sync.
+       */
+      const syncOver = async (
+        docs: Record<string, { _id: Int32; name: string }[]>,
+      ): Promise<MongoEditSync> => {
+        const cols: Record<string, FakeCollection> = {};
+        for (const [name, rows] of Object.entries(docs)) {
+          cols[name] = new FakeCollection(rows);
+        }
+        const sync = new MongoEditSync(
+          new FakeMongoDb(cols) as never,
+          await mkRljsonDb(),
+          mkConnector(),
+          Object.keys(docs),
+          'p',
+        );
+        await sync.start();
+        return sync;
+      };
+
+      it('is the same on two nodes holding the same data', async () => {
+        // The whole point: order-independent, so two nodes derive it without
+        // exchanging anything.
+        const a = await syncOver({
+          customers: [
+            { _id: new Int32(1), name: 'Alice' },
+            { _id: new Int32(2), name: 'Bob' },
+          ],
+        });
+        const b = await syncOver({
+          customers: [
+            { _id: new Int32(2), name: 'Bob' },
+            { _id: new Int32(1), name: 'Alice' },
+          ],
+        });
+
+        expect(a.health().stateRef).toBe(b.health().stateRef);
+        expect(a.health().stateRef).toMatch(/^[0-9a-f]{64}$/);
+      });
+
+      it('differs when the data differs', async () => {
+        const a = await syncOver({
+          customers: [{ _id: new Int32(1), name: 'Alice' }],
+        });
+        const b = await syncOver({
+          customers: [{ _id: new Int32(1), name: 'Alicia' }],
+        });
+
+        expect(a.health().stateRef).not.toBe(b.health().stateRef);
+      });
+
+      it('differs when the same documents sit in a different collection', async () => {
+        // The collection name is folded in, so a document that moved still
+        // shows — XOR-ing the roots alone would have hidden it.
+        const a = await syncOver({
+          customers: [{ _id: new Int32(1), name: 'Alice' }],
+        });
+        const b = await syncOver({
+          orders: [{ _id: new Int32(1), name: 'Alice' }],
+        });
+
+        expect(a.health().stateRef).not.toBe(b.health().stateRef);
+      });
+
+      it('breaks down per collection, so a matrix can say WHICH', async () => {
+        // The node-level fold conflates "the shared data disagrees" with
+        // "these machines hold different collections". On the lab both were
+        // true at once and the grid could only say "different".
+        const sync = await syncOver({
+          customers: [{ _id: new Int32(1), name: 'Alice' }],
+          orders: [],
+        });
+
+        const { roots } = sync.health();
+
+        expect(Object.keys(roots).sort()).toEqual(['customers', 'orders']);
+        expect(roots['customers']).toMatch(/^[0-9a-f]{64}$/);
+        // An empty collection is 64 zeros — a real root, not a missing one.
+        expect(roots['orders']).toBe('0'.repeat(64));
+      });
+
+      it('gives the same collection the same root on two nodes', async () => {
+        const a = await syncOver({
+          shared: [{ _id: new Int32(1), name: 'Alice' }],
+          extra: [{ _id: new Int32(9), name: 'Only here' }],
+        });
+        const b = await syncOver({
+          shared: [{ _id: new Int32(1), name: 'Alice' }],
+        });
+
+        // The node roots differ — one has a collection the other lacks — but
+        // the shared collection agrees, which is the actionable half.
+        expect(a.health().stateRef).not.toBe(b.health().stateRef);
+        expect(a.health().roots['shared']).toBe(b.health().roots['shared']);
+      });
+
+      it('has nothing to say before it has worked its state out', async () => {
+        // The only honest unknown: this node has not finished looking.
+        const sync = new MongoEditSync(
+          new FakeMongoDb({}) as never,
+          await mkRljsonDb(),
+          mkConnector(),
+          [],
+          'p',
+        );
+
+        expect(sync.health().stateRef).toBeNull();
+      });
+
+      it('says an empty database holds nothing, which two of them share', async () => {
+        // A database that was deliberately emptied HAS a state, and two of
+        // them hold the same one. Reporting "unknown" there left four lab
+        // machines reset to a common empty baseline reading as unknowable
+        // rather than as agreed.
+        const a = await syncOver({});
+        const b = await syncOver({});
+
+        expect(a.health().stateRef).toBe('0'.repeat(64));
+        expect(a.health().stateRef).toBe(b.health().stateRef);
+      });
+
+      it('does not confuse an empty database with one empty collection', async () => {
+        // The fold hashes the name alongside the root, so one empty
+        // collection is sha256(name|zeros) — never zeros.
+        const empty = await syncOver({});
+        const oneEmpty = await syncOver({ orders: [] });
+
+        expect(oneEmpty.health().stateRef).not.toBe(empty.health().stateRef);
+      });
+    });
+  });
+
 });
