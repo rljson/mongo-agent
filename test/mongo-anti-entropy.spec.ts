@@ -190,6 +190,33 @@ describe('MongoAntiEntropy', () => {
       expect(host.countOf(AEE)).toBeGreaterThan(1);
     });
 
+    // A body with no separator at all (a truncated or malformed frame) must
+    // parse as head-only rather than throwing: the collection is read, the
+    // payload is empty, and the responder stays silent.
+    // The host may answer with fewer buckets than were asked for (a bucket
+    // emptied between the roots reply and this request). A missing bucket
+    // counts as empty rather than throwing, so the round still answers for
+    // the buckets that do have entries.
+    it('AEG -> treats a bucket the host omits as empty', async () => {
+      host.entriesByBucket.set(1, [['a', 'h1']]);
+      host.bucketEntries = (): Map<number, Array<[string, string]>> =>
+        new Map([[1, host.entriesByBucket.get(1) ?? []]]);
+      await ae.onMessage(msg(AEG, `${COLL}|1,2`));
+      const payload = JSON.parse(host.lastBodyOf(AEE)!.split('|')[1]) as Array<
+        [number, Array<[string, string]>]
+      >;
+      expect(payload).toEqual([
+        [1, [['a', 'h1']]],
+        [2, []],
+      ]);
+    });
+
+    it('AEG -> treats a separator-less body as an empty payload', async () => {
+      host.entriesByBucket.set(1, [['a', 'h1']]);
+      await ae.onMessage(msg(AEG, COLL));
+      expect(host.countOf(AEE)).toBe(0);
+    });
+
     it('AEG -> silent for empty bucket list or unsynced collection', async () => {
       await ae.onMessage(msg(AEG, `${COLL}|`));
       await ae.onMessage(msg(AEG, `unsynced|1,2`));
@@ -284,6 +311,29 @@ describe('MongoAntiEntropy', () => {
       ]);
       // pending drained -> round finished -> re-trigger accepted.
       expect(ae.trigger(COLL)).toBe(true);
+    });
+
+    // The round is loss-tolerant: each arriving batch acts on its own, but the
+    // session must stay open while other requested buckets are still pending,
+    // or a dropped entry message would end the round early and the remaining
+    // differences would never be reconciled.
+    it('AEE for a subset of the requested buckets leaves the round in flight', async () => {
+      ae.trigger(COLL);
+      differAt(3);
+      differAt(7);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      expect(host.lastBodyOf(AEG)).toBe(`${COLL}|3,7`);
+
+      const entries: Array<[number, Array<[string, string]>]> = [
+        [3, [['only-in-three', 'h3']]],
+      ];
+      await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
+
+      // Bucket 7 never answered -> the round is still busy, so a re-trigger is
+      // refused and no completion was reported.
+      expect(ae.trigger(COLL)).toBe(false);
+      expect(host.roundsCompleted).toEqual([]);
     });
 
     it('AEE -> re-broadcasts tombstones for a deleted doc instead of pulling it', async () => {

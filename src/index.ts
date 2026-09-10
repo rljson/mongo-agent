@@ -13,11 +13,7 @@ export type {
   MongoChangeType,
   MongoNodeMeta,
   MongoScanOptions,
-  TreeRef,
 } from './mongo-scanner.ts';
-export { MongoBlobAdapter } from './mongo-blob-adapter.ts';
-export { applyRljsonTree, extractRljsonTree } from './sync/rljson-sync.ts';
-export type { RljsonTreePayload } from './sync/rljson-sync.ts';
 
 // Edits-Chain components/edits mongo sync — the production sync engine for the
 // CARAT fleet: per-lineage incremental walk over the set of applied refs +
@@ -33,9 +29,7 @@ export { EditCheckpoint } from './mongo-edit-checkpoint.ts';
 // package's source from the first port but not of its public surface, so
 // cos-one-client could not drop its own copy of them.
 export { MongoDbAdapter } from './mongo-db-adapter.ts';
-export { MongoDbTreeAdapter } from './mongo-db-tree-adapter.ts';
 export { MongoToRljsonConverter } from './mongo-to-rljson-converter.ts';
-export type { MongoTree, Tree } from './mongo-scanner.ts';
 export {
   computeIntegrityHash,
   computeOpHash,
