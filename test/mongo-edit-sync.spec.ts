@@ -1852,6 +1852,17 @@ describe('MongoEditSync', () => {
     }
     await tick(40);
     expect(conn.send).not.toHaveBeenCalled();
+    // A blocked id must not be tombstoned either — that would leak the
+    // "blocked" delete to a peer via anti-entropy's own bucket-serving
+    // (`hasTombstone`), which the guard does not gate at all. Reproduced
+    // live: an 8-doc burst the guard correctly logged BLOCKED still cost the
+    // peer its first id, tombstoned the instant the change-stream event
+    // arrived — well before the debounced guard decision even ran.
+    expect(
+      (sync as unknown as { _tombstones: Map<string, Map<string, unknown>> })
+        ._tombstones.get('customers')
+        ?.has('0'),
+    ).toBe(false);
     await sync.stop();
   });
 

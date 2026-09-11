@@ -1767,9 +1767,16 @@ export class MongoEditSync {
     if (id === undefined) return;
     // The doc is gone from Mongo → drop it from the manifest + refresh the root.
     this._setManifest(collection, id, null);
-    // Persist a tombstone so the manifest-diff backfill re-asserts this delete
-    // against a peer that still holds the doc, rather than resurrecting it.
-    this._recordTombstone(collection, id);
+    // Tombstoning happens in `_flushDeletes`, once the mass-delete guard has
+    // actually decided to let this id's delete through — NOT here. Recording it
+    // eagerly, per individual change-stream event, made `hasTombstone` true (and
+    // anti-entropy's bucket-serving advertise an empty hash for it) during the
+    // debounce window, BEFORE the guard ran — so a burst the guard went on to
+    // BLOCK had already leaked to a peer via anti-entropy's own tombstone
+    // convergence, moments ahead of the "blocked, not propagated" decision.
+    // Reproduced live: the E2E mass-delete-guard recipe deleted 8 docs, the
+    // guard correctly logged BLOCKED, and the very first id still vanished on
+    // the peer anyway.
     this._scheduleRoot(collection);
     this._checkpointAfter(collection, change);
     // Echo of a peer-applied delete -> do not re-propagate. Prune the
@@ -1832,6 +1839,11 @@ export class MongoEditSync {
 
     let head: string | null = null;
     for (const id of pending) {
+      // Persist a tombstone so the manifest-diff backfill re-asserts this
+      // delete against a peer that still holds the doc, rather than
+      // resurrecting it. Only reached once this id's delete is confirmed
+      // NOT blocked — see `_onDelete`.
+      this._recordTombstone(collection, id);
       const put = await this._adapter.putDoc(collection, this._tombstone(id));
       head = put?.head ?? null;
       this._setAppliedTimeId(collection, id, put?.timeId);
