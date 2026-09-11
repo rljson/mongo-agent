@@ -373,6 +373,34 @@ export class MongoEditSync {
     this._expectedMassDelete.add(collection);
   }
 
+  /**
+   * Forgets every tombstone this node holds for a collection — in memory and
+   * in the persistent {@link TOMBSTONE_LOG}. Best-effort: a failed persistent
+   * delete still clears the in-memory guard, so a caller that reset the live
+   * collection is not left blocked by a log write it cannot control.
+   *
+   * A tombstone is otherwise eternal by design (see `_applyPeerTombstones` —
+   * NO RESURRECTION), which is exactly what a probe collection with reused,
+   * fixed ids needs to NOT have across independent test runs: a delete that
+   * once succeeded (guard off, or before the guard existed) leaves a real
+   * tombstone, and every later re-insert of that same id is silently deleted
+   * again the moment anti-entropy sees a peer still advertising it — with no
+   * relation to the run that is currently exercising that id. A collection
+   * reset that clears live docs but not this log is not actually a clean
+   * slate.
+   * @param collection - The collection to forget every tombstone for.
+   */
+  async forgetTombstones(collection: string): Promise<void> {
+    this._tombstones.delete(collection);
+    try {
+      await this._mongoDb.collection(TOMBSTONE_LOG).deleteMany({
+        collection,
+      } as never);
+    } catch (e) {
+      this._log(`forget tombstones ${collection} failed: ${String(e)}`);
+    }
+  }
+
   /** collection → the root most recently written to the trace log. */
   private readonly _lastLoggedRoot = new Map<string, string>();
 

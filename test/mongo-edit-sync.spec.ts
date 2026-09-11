@@ -42,6 +42,30 @@ class FakeCollection {
   watchCalls = 0;
   replaceOne = vi.fn(async () => ({}));
   deleteOne = vi.fn(async () => ({}));
+  deleteMany = vi.fn(async (filter: Record<string, unknown>) => {
+    const before = this.docs.length;
+    this.docs = this.docs.filter(
+      (d) => !Object.entries(filter).every(([k, v]) => d[k] === v),
+    );
+    return { deletedCount: before - this.docs.length };
+  });
+  updateOne = vi.fn(
+    async (
+      filter: Record<string, unknown>,
+      update: { $set?: Record<string, unknown> },
+      opts?: { upsert?: boolean },
+    ) => {
+      const found = this.docs.find((d) =>
+        Object.entries(filter).every(([k, v]) => d[k] === v),
+      );
+      if (found) {
+        Object.assign(found, update.$set ?? {});
+      } else if (opts?.upsert) {
+        this.docs.push({ ...filter, ...(update.$set ?? {}) });
+      }
+      return {};
+    },
+  );
   /** The options passed to the most recent `watch()` (to assert `resumeAfter`). */
   watchOpts: Record<string, unknown> | undefined;
   /** How many times `find()` was called (0 ⇒ no full snapshot scan). */
@@ -1544,6 +1568,35 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('a tombstone persist that throws SYNCHRONOUSLY (not a function) is swallowed too', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    // No `updateOne` at all, unlike the rejected-promise case above: calling it
+    // throws synchronously, exercising the outer try/catch rather than the
+    // `.catch()` on the returned promise.
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      sl_edit_tombstones: {},
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols as never) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    await tick(40);
+    // The delete itself still propagates — a synchronously-throwing persist
+    // must never abort the delete it is trying to durably record.
+    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+    await sync.stop();
+  });
+
   it('records a tombstone even when no tombstone map exists yet for the collection', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
     const cols = {
@@ -1574,6 +1627,83 @@ describe('MongoEditSync', () => {
       sync as unknown as { _tombstones: Map<string, Map<string, unknown>> }
     )._tombstones.get('customers');
     expect(tombstones?.has('1')).toBe(true);
+    await sync.stop();
+  });
+
+  it('forgetTombstones clears the in-memory guard and the persistent log for that collection', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      products: new FakeCollection([{ _id: new Int32(9), name: 'Z' }]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers', 'products'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    cols.products.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(9) },
+    });
+    await tick(40);
+    const tombLog = new FakeMongoDb(cols).collection('sl_edit_tombstones');
+    // Both collections' deletes persisted a tombstone log entry.
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'customers'),
+    ).toHaveLength(1);
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'products'),
+    ).toHaveLength(1);
+
+    await sync.forgetTombstones('customers');
+
+    expect(
+      (sync as unknown as { _tombstones: Map<string, unknown> })._tombstones.has(
+        'customers',
+      ),
+    ).toBe(false);
+    // Only the forgotten collection's log entries are removed.
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'customers'),
+    ).toHaveLength(0);
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'products'),
+    ).toHaveLength(1);
+    await sync.stop();
+  });
+
+  it('forgetTombstones swallows a failed persistent-log delete — the in-memory guard still clears', async () => {
+    const tombstoneLog = {
+      updateOne: vi.fn(async () => ({})),
+      deleteMany: vi.fn(async () => {
+        throw new Error('mongo unavailable');
+      }),
+    };
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      sl_edit_tombstones: tombstoneLog,
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols as never) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    await expect(sync.forgetTombstones('customers')).resolves.toBeUndefined();
+    expect(tombstoneLog.deleteMany).toHaveBeenCalledWith({
+      collection: 'customers',
+    });
     await sync.stop();
   });
 
