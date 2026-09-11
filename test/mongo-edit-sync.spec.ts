@@ -691,6 +691,54 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('announceHeads on demand reports how many collections it announced', async () => {
+    // An operator's "push now" is exactly the heartbeat's body, run at once —
+    // a local write is already on the wire by the time the change stream
+    // returns, so a head re-announce is the only thing left to push.
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      empties: new FakeCollection([]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers', 'empties'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'insert',
+      fullDocument: { _id: new Int32(2), name: 'B' },
+    });
+    await tick();
+    conn.reannounce.mockClear();
+
+    // `empties` has no head, so it is not counted — the number is what was
+    // actually announced, not what is watched.
+    expect(sync.announceHeads()).toBe(1);
+    expect(conn.reannounce).toHaveBeenCalledWith(
+      expect.stringMatching(/^customers:/),
+    );
+    await sync.stop();
+  });
+
+  it('announceHeads announces nothing on a node that watches nothing', async () => {
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb({}) as never,
+      await mkRljsonDb(),
+      conn,
+      [],
+      'p',
+    );
+    await sync.start();
+    expect(sync.announceHeads()).toBe(0);
+    expect(conn.reannounce).not.toHaveBeenCalled();
+    await sync.stop();
+  });
+
   it('does not broadcast when putDoc yields no head (unknown collection)', async () => {
     const cols = { customers: new FakeCollection([]) };
     const conn = mkConnector();
