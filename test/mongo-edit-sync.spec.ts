@@ -454,6 +454,109 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('drops a root ref for an unsynced collection when no shouldSync predicate is given', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    await tick();
+
+    const internals = sync as unknown as { _collections: Set<string> };
+    expect(internals._collections.has('peerOnly')).toBe(false);
+    await sync.stop();
+  });
+
+  it('drops a root ref for a peer-only collection the shouldSync predicate rejects', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => false, // shouldSync rejects every peer-only collection
+    );
+    await sync.start();
+
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    await tick();
+
+    const internals = sync as unknown as { _collections: Set<string> };
+    expect(internals._collections.has('peerOnly')).toBe(false);
+    await sync.stop();
+  });
+
+  it('adopts a peer-only collection on an unknown root ref and triggers anti-entropy', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => true, // shouldSync accepts every peer-only collection
+    );
+    await sync.start();
+
+    const internals = sync as unknown as {
+      _collections: Set<string>;
+      _ae: { trigger: (c: string) => boolean };
+    };
+    const triggerSpy = vi.spyOn(internals._ae, 'trigger');
+
+    // A bulk import / cold-start delta never produces a head, only this root
+    // broadcast — the only signal this collection ever gets. Fire a second
+    // root ref for the SAME collection immediately (no await in between) so it
+    // lands while the first adoption is still in flight — the in-flight guard
+    // must skip starting a duplicate adoption.
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    conn.fire(`~R~peerOnly:${'b'.repeat(64)}`);
+    await tick(50);
+
+    expect(internals._collections.has('peerOnly')).toBe(true);
+    expect(triggerSpy).toHaveBeenCalledWith('peerOnly');
+    await sync.stop();
+  });
+
+  it('logs and clears the in-flight guard when adopt-on-ref (root path) fails', async () => {
+    class BrokenCollection extends FakeCollection {
+      watch(): FakeChangeStream {
+        throw new Error('boom');
+      }
+    }
+    const cols: Record<string, FakeCollection> = {
+      customers: new FakeCollection([]),
+      peerOnly: new BrokenCollection([]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => true,
+    );
+    await sync.start();
+
+    const internals = sync as unknown as { _adoptingOnRef: Set<string> };
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    await tick(50);
+
+    expect(internals._adoptingOnRef.has('peerOnly')).toBe(false);
+    await sync.stop();
+  });
+
   it('retries a throwing pull, then applies once it succeeds', async () => {
     const cols = { customers: new FakeCollection([]) };
     const conn = mkConnector();

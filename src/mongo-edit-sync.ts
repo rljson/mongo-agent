@@ -812,11 +812,15 @@ export class MongoEditSync {
    * never move a document backwards or overwrite a concurrent local edit.
    * @param collection - The collection to upsert into.
    * @param hashes - The component row hashes to pull.
+   * @returns How many of `hashes` actually resolved via the peer read (not how
+   *   many were WRITTEN — a hash whose content we already hold resolves but
+   *   needs no write). Short of `hashes.length` is the caller's signal to retry
+   *   — see {@link MongoAntiEntropy}'s `_onHashes`.
    */
   private async _pullAndApply(
     collection: string,
     hashes: string[],
-  ): Promise<void> {
+  ): Promise<number> {
     const docs = await this._adapter.pullComponents(collection, hashes);
     const ops: Array<Record<string, unknown>> = [];
     for (const doc of docs) {
@@ -843,6 +847,7 @@ export class MongoEditSync {
       // round-completion chain drives the next one immediately.
       this._aeRoundProgress.set(collection, true);
     }
+    return docs.length;
   }
 
   /**
@@ -1747,7 +1752,29 @@ export class MongoEditSync {
       if (i < 0) return;
       const collection = body.slice(0, i);
       const root = body.slice(i + 1);
-      if (!this._collections.has(collection)) return;
+      if (!this._collections.has(collection)) {
+        // A collection that exists only on the PEER and whose only edits ever
+        // arrive as manifest-only baselines (a bulk import / cold-start delta
+        // produces no head, only this root broadcast) was permanently
+        // unreachable here: dropping it starved the adopt-on-demand path below
+        // from ever running, because nothing else announces this collection.
+        // Mirrors the head-ref adopt-on-demand fix above for the root-only case.
+        if (!this._shouldSync?.(collection)) {
+          this._log(`recv root ${collection} NOT syncable, drop`);
+          return;
+        }
+        if (!this._adoptingOnRef.has(collection)) {
+          this._adoptingOnRef.add(collection);
+          this._log(`recv root ${collection} unknown here -> adopting on demand`);
+          void this._adoptCollection(collection)
+            .then(() => this._maybeTriggerAe(collection))
+            .catch((e) =>
+              this._log(`adopt-on-ref ${collection} failed: ${String(e)}`),
+            )
+            .finally(() => this._adoptingOnRef.delete(collection));
+        }
+        return;
+      }
       this._log(`recv root ${collection} = ${root.slice(0, 12)}`);
       // A peer reporting a root different from ours means someone is ahead of
       // (or behind) us. Re-drive the last head we saw: its pull may have come
