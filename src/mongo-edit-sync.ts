@@ -1315,6 +1315,43 @@ export class MongoEditSync {
    * state to agree about, which is not the same as agreeing.
    * @returns The reading.
    */
+  /**
+   * Re-announce every watched collection's head and content root, now.
+   *
+   * This is the heartbeat's body, made callable. The heartbeat exists because
+   * the relay does not replay past refs to a late-joining peer, so a node that
+   * connects after our snapshot broadcast would never learn our heads; running
+   * it on demand is what an operator's "push now" actually means on this sync.
+   * There is nothing else to push — a local write is already on the wire by the
+   * time the change stream returns.
+   *
+   * Idempotent, and cheap: a receiver whose last-applied head already equals
+   * ours does nothing, and only hashes travel. Calling it on a node that
+   * watches nothing announces nothing.
+   *
+   * Anti-entropy is deliberately NOT triggered from here. With the connector's
+   * sequenced re-announce the peer's `~R~` root heartbeat is delivered even
+   * when the hash is unchanged, so the receiving `_onRef` ROOT branch starts
+   * the reconciliation. Driving a round for every diverged collection per tick
+   * instead flooded the connector — dozens of AEQ and their AER per tick per
+   * node — which starved head propagation and dropped cross-subnet peers.
+   * @returns How many collections were announced.
+   */
+  announceHeads(): number {
+    let announced = 0;
+    for (const collection of this._collections) {
+      this._broadcastRoot(collection);
+      const head = this._adapter.headRef(collection);
+      if (!head) continue;
+      const ref = this._headRef(collection, head);
+      // Prefer the dedup-bypassing raw re-emit; fall back to send (tests).
+      if (this._connector.reannounce) this._connector.reannounce(ref);
+      else this._connector.send(ref);
+      announced++;
+    }
+    return announced;
+  }
+
   health(): MongoEditSyncHealth {
     const collections = [...this._rootAcc.keys()].sort();
 
@@ -1393,25 +1430,7 @@ export class MongoEditSync {
       this._stop.push(() => clearInterval(disc));
     }
 
-    const hb = setInterval(() => {
-      for (const collection of this._collections) {
-        // Re-announce the content root (drives the no-op convergence check).
-        // Anti-entropy is NOT self-triggered from here: with the connector's
-        // sequenced re-announce (causalOrdering) the peer's `~R~` root heartbeat
-        // is delivered reliably even when the hash is unchanged, so the `_onRef`
-        // ROOT branch fires the reconciliation on receipt. Driving a round for
-        // every diverged collection on every heartbeat instead flooded the
-        // connector (dozens of AEQ + their AER per tick × every node), which
-        // starved head propagation and dropped cross-subnet peers.
-        this._broadcastRoot(collection);
-        const head = this._adapter.headRef(collection);
-        if (!head) continue;
-        const ref = this._headRef(collection, head);
-        // Prefer the dedup-bypassing raw re-emit; fall back to send (tests).
-        if (this._connector.reannounce) this._connector.reannounce(ref);
-        else this._connector.send(ref);
-      }
-    }, this._heartbeatMs);
+    const hb = setInterval(() => this.announceHeads(), this._heartbeatMs);
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit/tests */
     (hb as unknown as { unref?: () => void }).unref?.();
     this._stop.push(() => clearInterval(hb));
