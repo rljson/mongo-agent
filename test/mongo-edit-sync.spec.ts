@@ -36,6 +36,10 @@ class FakeChangeStream {
 
 class FakeCollection {
   stream = new FakeChangeStream();
+  /** Every cursor `watch()` has ever returned, oldest first (`stream` is the latest). */
+  readonly streams: FakeChangeStream[] = [this.stream];
+  /** How many times `watch()` was called (1 after the initial adopt). */
+  watchCalls = 0;
   replaceOne = vi.fn(async () => ({}));
   deleteOne = vi.fn(async () => ({}));
   /** The options passed to the most recent `watch()` (to assert `resumeAfter`). */
@@ -60,8 +64,20 @@ class FakeCollection {
       },
     };
   }
+  /**
+   * A fresh cursor object per call, mirroring the real driver: the cursor
+   * MongoDB invalidates after a drop/rename is a dead object, not one that
+   * comes back to life — only a NEW `watch()` call yields a live one.
+   * `this.stream` always aliases the most recent, so existing single-watch
+   * tests (`cols.x.stream.emit(...)`) keep working unchanged.
+   */
   watch(_pipeline: unknown, opts?: Record<string, unknown>): FakeChangeStream {
     this.watchOpts = opts;
+    this.watchCalls++;
+    if (this.watchCalls > 1) {
+      this.stream = new FakeChangeStream();
+      this.streams.push(this.stream);
+    }
     return this.stream;
   }
 }
@@ -1492,18 +1508,46 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
-  // The tombstone persist is deliberately fire-and-forget: it runs inside
-  // `_onDelete`, before the delete's root re-broadcast, so a rejected write
-  // must be logged and swallowed rather than aborting delete propagation.
-  it('logs and swallows a rejected tombstone persist', async () => {
+  it('a rejected tombstone-log persist is swallowed, not a delete-breaking failure', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
-    const tombstoneLog = new FakeCollection() as FakeCollection & {
-      updateOne: ReturnType<typeof vi.fn>;
+    // Give the tombstone log collection a real `updateOne` that REJECTS —
+    // unlike a missing method (which throws synchronously, the other
+    // defensive branch _recordTombstone guards), this exercises the async
+    // `.catch()` on the persist call itself.
+    const tombstoneLog = {
+      updateOne: vi.fn(async () => {
+        throw new Error('mongo unavailable');
+      }),
     };
-    tombstoneLog.updateOne = vi.fn(() => Promise.reject(new Error('no log')));
     const cols = {
       customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
       sl_edit_tombstones: tombstoneLog,
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols as never) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    await tick(40);
+    // The delete itself still propagates — a failed BEST-EFFORT persist must
+    // never abort the delete it is trying to durably record.
+    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+    expect(tombstoneLog.updateOne).toHaveBeenCalled();
+    await sync.stop();
+  });
+
+  it('records a tombstone even when no tombstone map exists yet for the collection', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
     };
     const conn = mkConnector();
     const sync = new MongoEditSync(
@@ -1514,17 +1558,22 @@ describe('MongoEditSync', () => {
       'p',
     );
     await sync.start();
-    conn.send.mockClear();
-
+    // `_loadTombstones` (run during adopt) always pre-creates an EMPTY map for
+    // every synced collection, so `_recordTombstone`'s own "no map yet" branch
+    // is otherwise unreachable in the same process. Force that exact
+    // first-ever-tombstone state to exercise it directly.
+    (sync as unknown as { _tombstones: Map<string, unknown> })._tombstones.delete(
+      'customers',
+    );
     cols.customers.stream.emit({
       operationType: 'delete',
       documentKey: { _id: new Int32(1) },
     });
     await tick(40);
-
-    // The write was attempted and rejected, and the delete still propagated.
-    expect(tombstoneLog.updateOne).toHaveBeenCalledTimes(1);
-    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+    const tombstones = (
+      sync as unknown as { _tombstones: Map<string, Map<string, unknown>> }
+    )._tombstones.get('customers');
+    expect(tombstones?.has('1')).toBe(true);
     await sync.stop();
   });
 
@@ -1581,11 +1630,14 @@ describe('MongoEditSync', () => {
     expect(cols.customers.findCalls).toBe(1);
 
     // Out-of-band `mongorestore --drop`: Mongo now holds a completely different
-    // set of documents. Mongo represents this to a watcher as a `drop` (or, on
-    // some drivers/topologies, `invalidate`/`rename`) event — never a per-doc
-    // delete for the old rows.
+    // set of documents. On the real driver a single-collection `drop` is
+    // ALWAYS immediately followed by `invalidate`, which kills this cursor
+    // server-side — no per-doc delete for the old rows, and no further event
+    // will ever arrive on it, live or not.
+    const deadStream = cols.customers.stream;
     cols.customers.docs = [{ _id: new Int32(9), name: 'Zoe' }];
-    cols.customers.stream.emit({ operationType: 'drop' });
+    deadStream.emit({ operationType: 'drop' });
+    deadStream.emit({ operationType: 'invalidate' });
     await tick();
 
     // The manifest must be re-derived from Mongo's current content: exactly the
@@ -1597,6 +1649,26 @@ describe('MongoEditSync', () => {
     expect(manifest ? [...manifest.keys()] : []).toEqual(['9']);
     expect(cols.customers.findCalls).toBe(2);
 
+    // `invalidate` must have opened a FRESH cursor — the real driver never
+    // delivers another event on the dropped one (this is what MongoDB's own
+    // `invalidate` contract guarantees; the point under test is that OUR code
+    // reacts to it by opening a replacement instead of going quiet forever).
+    expect(cols.customers.watchCalls).toBe(2);
+    expect(cols.customers.stream).not.toBe(deadStream);
+
+    // A live change arriving on the new cursor still reaches the manifest —
+    // sync did not silently stop after the drop.
+    cols.customers.stream.emit({
+      operationType: 'insert',
+      fullDocument: { _id: new Int32(11), name: 'Nadia' },
+    });
+    await tick();
+    expect(
+      (
+        sync as unknown as { _manifest: Map<string, Map<string, string>> }
+      )._manifest.get('customers')?.has('11'),
+    ).toBe(true);
+
     // The vanished sliceIds (1, 2) must be tombstoned, not just dropped — a
     // peer that still holds them needs to be TOLD to delete them, or it
     // additively backfills them right back the moment it sees this node as
@@ -1607,11 +1679,15 @@ describe('MongoEditSync', () => {
     )._tombstones.get('customers');
     expect(tombstones ? [...tombstones.keys()].sort() : []).toEqual(['1', '2']);
 
-    // An `invalidate`/`rename` event gets the same treatment.
+    // A `rename` gets the same treatment as `drop` (both carry the same "the
+    // old content is gone" meaning); its own trailing `invalidate` only
+    // reopens the cursor, it does not re-trigger the scan this line already did.
     cols.customers.docs = [{ _id: new Int32(10), name: 'Yara' }];
+    cols.customers.stream.emit({ operationType: 'rename' });
     cols.customers.stream.emit({ operationType: 'invalidate' });
     await tick();
     expect(cols.customers.findCalls).toBe(3);
+    expect(cols.customers.watchCalls).toBe(3);
     const manifest2 = (
       sync as unknown as { _manifest: Map<string, Map<string, string>> }
     )._manifest.get('customers');

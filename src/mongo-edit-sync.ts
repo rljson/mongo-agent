@@ -1267,6 +1267,15 @@ export class MongoEditSync {
         this._lastChangeAt = Date.now();
         queue.push(change as Record<string, unknown>);
         if (snapshotDone) void pump();
+        // MongoDB always follows a collection drop/rename with `invalidate` and
+        // then closes THIS cursor server-side — no further event ever arrives
+        // on it, live or not. Re-open a fresh cursor right away so the node
+        // keeps seeing changes once the collection exists again (the normal
+        // case right after a drop-based bulk reload); the queued `invalidate`
+        // still drives `_resyncFromMongo` through the ordinary pump below.
+        if ((change as Record<string, unknown>)['operationType'] === 'invalidate') {
+          open();
+        }
       });
       this._stop.push(() => {
         this._liveStreams.delete(collection);
@@ -1387,11 +1396,11 @@ export class MongoEditSync {
       this._log(
         `seed ${collection} ${seeded.size} document timeId(s) from the local chain`,
       );
-      /* v8 ignore start -- @preserve defensive: seeding must never stop a start-up */
     } catch (e) {
+      /* v8 ignore start -- @preserve defensive: seeding must never stop a start-up */
       this._log(`seed ${collection} failed: ${String(e)}`);
+      /* v8 ignore stop */
     }
-    /* v8 ignore stop */
   }
 
   /**
@@ -1600,10 +1609,18 @@ export class MongoEditSync {
     // content. The anti-entropy backfill can never correct this on its own — it
     // only ever ADDS a sliceId the manifest does not already claim to hold (see
     // `_onEntries`), so a stale-but-present entry is invisible to it forever.
-    if (op === 'drop' || op === 'invalidate' || op === 'rename') {
+    //
+    // `invalidate` deliberately does NOT also resync: MongoDB always emits it
+    // as the terminal event immediately after `drop`/`rename` on a
+    // single-collection watch (never on its own), so the resync above already
+    // ran — rescanning again here would cost a second full collection read
+    // for nothing on every drop, and that read is exactly what is too
+    // expensive to pay twice on a multi-hundred-thousand-row catalog.
+    if (op === 'drop' || op === 'rename') {
       await this._resyncFromMongo(collection);
       return;
     }
+    if (op === 'invalidate') return;
     if (op !== 'insert' && op !== 'update' && op !== 'replace') return;
     const doc = change['fullDocument'] as
       | (Record<string, unknown> & { _id: unknown })
