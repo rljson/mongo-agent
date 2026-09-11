@@ -1195,17 +1195,28 @@ export class MongoEditSync {
     /* v8 ignore next -- @preserve guarded by callers; defensive */
     if (!this._checkpoint) return;
     const manifest = this._manifestOf(collection);
-    // `save` normalizes an undefined token to null, so no `?? null` here.
-    await this._checkpoint.save(
-      collection,
-      manifest,
-      this._lastToken.get(collection),
-      // The head goes with the token: both describe where this collection had
-      // got to, and a restart that restores one without the other resumes the
-      // change stream onto a cake that forgot everything before it.
-      this._adapter.headRef(collection),
-    );
-    this._log(`checkpoint ${collection} saved`);
+    try {
+      // `save` normalizes an undefined token to null, so no `?? null` here.
+      await this._checkpoint.save(
+        collection,
+        manifest,
+        this._lastToken.get(collection),
+        // The head goes with the token: both describe where this collection had
+        // got to, and a restart that restores one without the other resumes the
+        // change stream onto a cake that forgot everything before it.
+        this._adapter.headRef(collection),
+      );
+      this._log(`checkpoint ${collection} saved`);
+    } catch (e) {
+      // Called fire-and-forget (`void this._saveCheckpoint(...)`) from the
+      // debounce timer, so an unhandled rejection here is an unhandled
+      // rejection at the process level — crashing the whole node, not just
+      // this checkpoint. The checkpoint is a resume-speed optimization, not a
+      // correctness requirement (a missing/stale one just costs a slower
+      // cold-start rescan next restart), so a failed write must never do more
+      // than that.
+      this._log(`checkpoint ${collection} save failed: ${String(e)}`);
+    }
   }
 
   /**
