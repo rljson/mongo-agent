@@ -1591,6 +1591,19 @@ export class MongoEditSync {
       this._onDelete(collection, change);
       return;
     }
+    // A collection-level drop/rename (e.g. an out-of-band `mongorestore --drop`)
+    // invalidates every manifest entry at once — no per-document delete event
+    // follows it. Left unhandled, the OLD entries never leave the manifest and
+    // stay XORed into the root/bucket accumulators forever, alongside whatever
+    // the restore re-inserts: a permanent, unresolvable false divergence against
+    // any peer whose accumulator was computed from the actual (post-drop)
+    // content. The anti-entropy backfill can never correct this on its own — it
+    // only ever ADDS a sliceId the manifest does not already claim to hold (see
+    // `_onEntries`), so a stale-but-present entry is invisible to it forever.
+    if (op === 'drop' || op === 'invalidate' || op === 'rename') {
+      await this._resyncFromMongo(collection);
+      return;
+    }
     if (op !== 'insert' && op !== 'update' && op !== 'replace') return;
     const doc = change['fullDocument'] as
       | (Record<string, unknown> & { _id: unknown })
@@ -1627,6 +1640,31 @@ export class MongoEditSync {
     }
     this._log(`change ${collection}/${String(doc._id)} ${op} -> head=${head} send`);
     if (head) this._connector.send(this._headRef(collection, head));
+  }
+
+  /**
+   * Rebuilds a collection's manifest (and root/bucket accumulators) from a
+   * fresh full read of Mongo, discarding whatever the manifest claimed before.
+   * The only correct response to a collection-level drop/rename: unlike a
+   * per-document delete, it carries no list of which sliceIds are now gone, so
+   * the sole way to end up with an honest manifest is to re-derive it from the
+   * collection's actual current content rather than patch the old one.
+   * @param collection - The collection to rebuild.
+   */
+  private async _resyncFromMongo(collection: string): Promise<void> {
+    this._manifestOf(collection).clear();
+    this._accOf(collection).fill(0);
+    this._bucketAccOf(collection).fill(0);
+    this._rootCache.delete(collection);
+    const cursor = this._mongoDb.collection(collection).find({});
+    let count = 0;
+    for await (const doc of cursor) {
+      count++;
+      this._setManifest(collection, (doc as { _id: unknown })._id, docHash(doc));
+    }
+    this._baselineCount.set(collection, count);
+    this._scheduleRoot(collection);
+    this._log(`resync ${collection} after drop/rename -> ${count} docs`);
   }
 
   /**

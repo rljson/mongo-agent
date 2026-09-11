@@ -1562,6 +1562,54 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('a collection drop/rename discards the stale manifest and rebuilds it from Mongo, instead of leaving old entries XORed into the root forever', async () => {
+    const cols = {
+      customers: new FakeCollection([
+        { _id: new Int32(1), name: 'Alice' },
+        { _id: new Int32(2), name: 'Bob' },
+      ]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    expect(cols.customers.findCalls).toBe(1);
+
+    // Out-of-band `mongorestore --drop`: Mongo now holds a completely different
+    // set of documents. Mongo represents this to a watcher as a `drop` (or, on
+    // some drivers/topologies, `invalidate`/`rename`) event — never a per-doc
+    // delete for the old rows.
+    cols.customers.docs = [{ _id: new Int32(9), name: 'Zoe' }];
+    cols.customers.stream.emit({ operationType: 'drop' });
+    await tick();
+
+    // The manifest must be re-derived from Mongo's current content: exactly the
+    // new doc, none of the old ones lingering (which would XOR into the root
+    // forever and never match a peer that only ever saw the new content).
+    const manifest = (
+      sync as unknown as { _manifest: Map<string, Map<string, string>> }
+    )._manifest.get('customers');
+    expect(manifest ? [...manifest.keys()] : []).toEqual(['9']);
+    expect(cols.customers.findCalls).toBe(2);
+
+    // An `invalidate`/`rename` event gets the same treatment.
+    cols.customers.docs = [{ _id: new Int32(10), name: 'Yara' }];
+    cols.customers.stream.emit({ operationType: 'invalidate' });
+    await tick();
+    expect(cols.customers.findCalls).toBe(3);
+    const manifest2 = (
+      sync as unknown as { _manifest: Map<string, Map<string, string>> }
+    )._manifest.get('customers');
+    expect(manifest2 ? [...manifest2.keys()] : []).toEqual(['10']);
+
+    await sync.stop();
+  });
+
   it('blocks a mass-delete burst (guard) and cancels timers on stop', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
     process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';
