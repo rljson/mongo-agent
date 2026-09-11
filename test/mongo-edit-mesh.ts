@@ -227,6 +227,20 @@ export class MeshCollection {
     this._emit({ operationType: 'delete', documentKey: { _id: id } });
   }
 
+  /**
+   * An out-of-band bulk replace: wipes the collection and inserts `docs`,
+   * emitting a single `drop` change event — the shape a real `mongorestore
+   * --drop` (or, on the app side, a bulk "re-import all data" load) produces.
+   * No per-document delete events precede it, which is exactly what
+   * `MongoEditSync._resyncFromMongo` has to recover from.
+   * @param docs - The documents the collection holds after the reload.
+   */
+  dropAndReplace(docs: Document[]): void {
+    this.docs.clear();
+    for (const doc of docs) this.docs.set(String(doc['_id']), doc);
+    this._emit({ operationType: 'drop' });
+  }
+
   /** The collection as a plain `_id → doc` object, for convergence asserts. */
   snapshot(): Record<string, Document> {
     return Object.fromEntries([...this.docs.entries()].sort());

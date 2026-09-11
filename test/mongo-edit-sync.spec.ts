@@ -1597,6 +1597,16 @@ describe('MongoEditSync', () => {
     expect(manifest ? [...manifest.keys()] : []).toEqual(['9']);
     expect(cols.customers.findCalls).toBe(2);
 
+    // The vanished sliceIds (1, 2) must be tombstoned, not just dropped — a
+    // peer that still holds them needs to be TOLD to delete them, or it
+    // additively backfills them right back the moment it sees this node as
+    // "missing" content it used to have (the exact resurrection this guards
+    // against).
+    const tombstones = (
+      sync as unknown as { _tombstones: Map<string, Map<string, unknown>> }
+    )._tombstones.get('customers');
+    expect(tombstones ? [...tombstones.keys()].sort() : []).toEqual(['1', '2']);
+
     // An `invalidate`/`rename` event gets the same treatment.
     cols.customers.docs = [{ _id: new Int32(10), name: 'Yara' }];
     cols.customers.stream.emit({ operationType: 'invalidate' });

@@ -1649,9 +1649,18 @@ export class MongoEditSync {
    * per-document delete, it carries no list of which sliceIds are now gone, so
    * the sole way to end up with an honest manifest is to re-derive it from the
    * collection's actual current content rather than patch the old one.
+   *
+   * Every sliceId the OLD manifest held that the new one does not is recorded
+   * as a tombstone (not merely dropped locally). Without this, a peer that
+   * still holds those documents sees this node as "missing" content it used
+   * to have and additively backfills it right back — resurrecting exactly
+   * what the drop/rename was replacing. Advertising a tombstone instead makes
+   * the peer apply the delete (`_onEntries`'s `hash === ''` branch), the same
+   * mechanism an ordinary live delete already relies on.
    * @param collection - The collection to rebuild.
    */
   private async _resyncFromMongo(collection: string): Promise<void> {
+    const stale = new Set(this._manifestOf(collection).keys());
     this._manifestOf(collection).clear();
     this._accOf(collection).fill(0);
     this._bucketAccOf(collection).fill(0);
@@ -1660,8 +1669,17 @@ export class MongoEditSync {
     let count = 0;
     for await (const doc of cursor) {
       count++;
-      this._setManifest(collection, (doc as { _id: unknown })._id, docHash(doc));
+      const sliceId = (doc as { _id: unknown })._id;
+      stale.delete(String(sliceId));
+      this._setManifest(collection, sliceId, docHash(doc));
     }
+    // Whatever sliceId remains in `stale` existed before the rebuild and does
+    // not exist now: tombstone it so peers converge down instead of backfilling
+    // it back in. The typed `_id` is gone (the manifest only ever kept the
+    // stringified form) — `_typedIdCandidates` reconstructs the candidate
+    // shapes from the string on both the advertise and the apply side, the
+    // same fallback the rest of the tombstone path already relies on.
+    for (const sliceId of stale) this._recordTombstone(collection, sliceId);
     this._baselineCount.set(collection, count);
     this._scheduleRoot(collection);
     this._log(`resync ${collection} after drop/rename -> ${count} docs`);
