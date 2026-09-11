@@ -840,11 +840,15 @@ export class MongoEditSync {
    * never move a document backwards or overwrite a concurrent local edit.
    * @param collection - The collection to upsert into.
    * @param hashes - The component row hashes to pull.
+   * @returns How many of `hashes` actually resolved via the peer read (not how
+   *   many were WRITTEN — a hash whose content we already hold resolves but
+   *   needs no write). Short of `hashes.length` is the caller's signal to retry
+   *   — see {@link MongoAntiEntropy}'s `_onHashes`.
    */
   private async _pullAndApply(
     collection: string,
     hashes: string[],
-  ): Promise<void> {
+  ): Promise<number> {
     const docs = await this._adapter.pullComponents(collection, hashes);
     const ops: Array<Record<string, unknown>> = [];
     for (const doc of docs) {
@@ -871,6 +875,7 @@ export class MongoEditSync {
       // round-completion chain drives the next one immediately.
       this._aeRoundProgress.set(collection, true);
     }
+    return docs.length;
   }
 
   /**
@@ -1794,7 +1799,10 @@ export class MongoEditSync {
         // Adopting makes the collection real here (empty), which makes the
         // next root visibly diverge, which arms the backfill. Same guard as
         // the head branch, so a burst of roots starts one adoption.
-        if (!this._shouldSync?.(collection)) return;
+        if (!this._shouldSync?.(collection)) {
+          this._log(`recv root ${collection} NOT syncable, drop`);
+          return;
+        }
         // Arm the retry loop BEFORE adopting. The peer re-announces the SAME
         // root string every heartbeat, so once this copy sits in the received-
         // dedup every later one is swallowed and `_onRef` is never called for

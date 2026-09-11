@@ -132,8 +132,13 @@ export interface AntiEntropyHost {
   /**
    * Pull these component hashes over the flow-controlled read path and upsert
    * the decoded docs into Mongo (manifest-level, change-stream echo suppressed).
+   * @returns How many of the requested hashes actually resolved and were
+   *   applied — the caller retries the remainder (see `_onHashes`) because a
+   *   single relayed read can come back short with nothing thrown (a transient
+   *   peer-read hiccup, not a real absence), and there is otherwise no signal
+   *   to tell the two apart.
    */
-  pullAndApply(collection: string, hashes: string[]): Promise<void>;
+  pullAndApply(collection: string, hashes: string[]): Promise<number>;
   /** Whether a collection is one we sync (drop protocol refs for others). */
   syncs(collection: string): boolean;
   /**
@@ -179,6 +184,17 @@ export class MongoAntiEntropy {
   private readonly _sessions = new Map<string, Session>();
   /** Collections currently mid-round (suppresses re-trigger churn). */
   private readonly _busy = new Set<string>();
+  /**
+   * Per-collection rotation offset into the sorted `differing` bucket list.
+   * Without it, `_onRoots` always serves buckets `[0, cap)` — the LOWEST
+   * indices, every round. A handful of buckets that stay divergent (a stale
+   * entry neither side ever resolves, or genuinely never-ending churn) then
+   * permanently occupy the whole per-round cap, and the other thousands of
+   * buckets — including a fresh single-doc write that happens to land outside
+   * the first `cap` — are never requested again. Rotating the starting point
+   * each round guarantees every bucket eventually gets a turn.
+   */
+  private readonly _bucketCursor = new Map<string, number>();
   /**
    * Monotonic per-message nonce. The sync connector DEDUPS identical ref
    * strings (both the send side and the receiver's seen-set — the mechanism
@@ -357,6 +373,20 @@ export class MongoAntiEntropy {
   /**
    * AEH: a peer offered the component hashes for docs we asked for. Pull the
    * bodies by hash over the flow-controlled read path and upsert them.
+   *
+   * ONE attempt, deliberately not retried here. A retry loop sounds like a
+   * pure win for a relayed read that comes back short with nothing thrown
+   * (see `pullAndApply`'s doc) — but this hash offer can predate a delete: the
+   * AE *control* messages (AEQ..AEH) ride the same ref bus as heads/roots and
+   * are NOT blocked by a reader that is offline for BODY reads only, so a
+   * requester can hold a hash offered while a doc was still live and only
+   * complete the body pull once it reconnects — after the origin deleted it.
+   * A single attempt right at reconnect already has a real chance of hitting
+   * that window; retrying immediately turns "rare" into "reliable", which is
+   * how a delete-then-recreate test started resurrecting the delete's victim.
+   * Left to the bucket's normal rotation (see `_bucketCursor`) instead: the
+   * peer's NEXT answer reflects its post-delete tombstone, and `_onEntries`'s
+   * `hasTombstone` check keeps that round from re-asking for it at all.
    * @param body - The message body `<collection>|<json hash array>`.
    */
   private async _onHashes(body: string): Promise<void> {
@@ -364,8 +394,10 @@ export class MongoAntiEntropy {
     if (!this._host.syncs(collection)) return;
     const hashes = JSON.parse(json) as string[];
     if (hashes.length === 0) return;
-    await this._host.pullAndApply(collection, hashes);
-    this._host.log(`ae ${collection} <- AEH pull ${hashes.length}`);
+    const applied = await this._host.pullAndApply(collection, hashes);
+    this._host.log(
+      `ae ${collection} <- AEH pull ${hashes.length} applied=${applied}`,
+    );
   }
 
   // ------ requester half ------
@@ -398,7 +430,21 @@ export class MongoAntiEntropy {
     // capped chunk, and the still-differing remainder re-triggers next round,
     // converging incrementally (mirrors the per-round doc cap in `_complete`).
     const cap = Number(process.env['SL_EDIT_AE_MAX_BUCKETS']) || 128;
-    const chunk = differing.length > cap ? differing.slice(0, cap) : differing;
+    let chunk: number[];
+    if (differing.length > cap) {
+      // Rotate the window through `differing` each round instead of always
+      // starting at index 0 — see `_bucketCursor`'s doc comment for why a
+      // fixed slice starves every bucket past the cap.
+      const start = (this._bucketCursor.get(collection) ?? 0) % differing.length;
+      chunk = [
+        ...differing.slice(start),
+        ...differing.slice(0, start),
+      ].slice(0, cap);
+      this._bucketCursor.set(collection, start + chunk.length);
+    } else {
+      chunk = differing;
+      this._bucketCursor.delete(collection);
+    }
     for (const b of chunk) session.pending.add(b);
     this._host.log(
       `ae ${collection} <- AER: ${differing.length} differing bucket(s) -> AEG ${chunk.length}`,
