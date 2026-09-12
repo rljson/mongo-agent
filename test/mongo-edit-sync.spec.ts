@@ -73,25 +73,37 @@ class FakeMongoDb {
   }
 }
 
+/** What a checkpoint holds, in the fake and in the real one. */
+interface FakeCheckpointState {
+  manifest: Record<string, string>;
+  token: unknown;
+  head?: string | null;
+}
+
 /** In-memory stand-in for EditCheckpoint (no filesystem). */
 class FakeCheckpoint {
-  saved: Array<{ token: unknown; manifest: Record<string, string> }> = [];
+  saved: Array<{
+    token: unknown;
+    manifest: Record<string, string>;
+    head: string | null;
+  }> = [];
   load = vi.fn(
-    async (
-      c: string,
-    ): Promise<{ manifest: Record<string, string>; token: unknown } | undefined> =>
-      this.state[c],
+    async (c: string): Promise<FakeCheckpointState | undefined> => this.state[c],
   );
   save = vi.fn(
-    async (c: string, m: Map<string, string>, token: unknown): Promise<void> => {
-      this.saved.push({ token, manifest: Object.fromEntries(m) });
+    async (
+      c: string,
+      m: Map<string, string>,
+      token: unknown,
+      head: string | null = null,
+    ): Promise<void> => {
+      this.saved.push({ token, manifest: Object.fromEntries(m), head });
+      // Persist it the way the real one does, so a test can restart onto it.
+      this.state[c] = { manifest: Object.fromEntries(m), token, head };
     },
   );
   constructor(
-    public state: Record<
-      string,
-      { manifest: Record<string, string>; token: unknown } | undefined
-    > = {},
+    public state: Record<string, FakeCheckpointState | undefined> = {},
   ) {}
 }
 
@@ -1978,4 +1990,82 @@ describe('MongoEditSync', () => {
     });
   });
 
+});
+
+// .............................................................................
+
+describe('MongoEditSync — a restart with a durable store', () => {
+  /**
+   * A durable Io, from the sync's point of view: the SAME Db across two
+   * sequential syncs. With an in-memory one the table is empty again after a
+   * restart and a fresh lineage is the consistent answer; it is the durable
+   * case that forks.
+   * @returns A sync over the given db, collections and checkpoint.
+   */
+  const mkSync = (
+    db: Db,
+    cols: Record<string, FakeCollection>,
+    conn: ReturnType<typeof mkConnector>,
+    cp: FakeCheckpoint,
+  ): MongoEditSync =>
+    new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      db,
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      cp as never,
+    );
+
+  it('continues the chain instead of starting a second one', async () => {
+    const db = await mkRljsonDb();
+    const cp = new FakeCheckpoint();
+    const cols = { customers: new FakeCollection([]) };
+
+    // --- first run: one live change, so a head exists ---
+    const connA = mkConnector();
+    const syncA = mkSync(db, cols, connA, cp);
+    await syncA.start();
+    cols.customers.stream.emit({
+      operationType: 'insert',
+      fullDocument: { _id: new Int32(1), name: 'A' },
+    });
+    await tick(40);
+    const adapterA = (syncA as unknown as { _adapter: { headRef: (c: string) => string | null } })._adapter;
+    const headA = adapterA.headRef('customers');
+    expect(headA).toBeTruthy();
+    await syncA.stop();
+
+    // The head was checkpointed alongside the token.
+    expect(cp.state['customers']?.head).toBe(headA);
+
+    // --- restart onto the same store ---
+    const syncB = mkSync(db, cols, mkConnector(), cp);
+    await syncB.start();
+    const adapterB = (syncB as unknown as { _adapter: { headRef: (c: string) => string | null } })._adapter;
+
+    // THE point: the new sync picked up where the old one left off. Without
+    // this the next edit starts a lineage whose `previous` never reaches
+    // `headA`, and a peer walking back stops at the fork — so everything
+    // written before the restart reads as absent while sitting in the table.
+    expect(adapterB.headRef('customers')).toBe(headA);
+    await syncB.stop();
+  });
+
+  it('starts a fresh chain when the store was wiped under the checkpoint', async () => {
+    // A checkpoint can outlive the store it describes: a cleared cache
+    // directory, a restore from backup. Refusing to start would strand the
+    // node over a resumption that is an optimisation, not a requirement.
+    const db = await mkRljsonDb();
+    const cp = new FakeCheckpoint({
+      customers: { manifest: {}, token: null, head: 'HEAD_NOT_IN_THIS_STORE' },
+    });
+    const cols = { customers: new FakeCollection([]) };
+    const sync = mkSync(db, cols, mkConnector(), cp);
+    await sync.start();
+    const adapter = (sync as unknown as { _adapter: { headRef: (c: string) => string | null } })._adapter;
+    expect(adapter.headRef('customers')).toBeNull();
+    await sync.stop();
+  });
 });

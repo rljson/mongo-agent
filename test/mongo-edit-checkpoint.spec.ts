@@ -5,6 +5,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,7 +54,7 @@ describe('EditCheckpoint', () => {
     const cp = new EditCheckpoint(dir);
     await writeFile(join(dir, 'customers.json'), '{}', 'utf8');
     const loaded = await cp.load('customers');
-    expect(loaded).toEqual({ manifest: {}, token: null });
+    expect(loaded).toEqual({ manifest: {}, token: null, head: null });
   });
 
   it('load returns undefined for a corrupt file', async () => {
@@ -92,12 +93,64 @@ describe('EditCheckpoint', () => {
       `${JSON.stringify({ token: null })}\n\n${JSON.stringify(['a', 'h1'])}\n\n`,
       'utf8',
     );
-    expect(await cp.load('gapped')).toEqual({ manifest: { a: 'h1' }, token: null });
+    expect(await cp.load('gapped')).toEqual({
+      manifest: { a: 'h1' },
+      token: null,
+      head: null,
+    });
   });
 
   it('percent-encodes path-unsafe collection names', async () => {
     const cp = new EditCheckpoint(await mkDir());
     await cp.save('a/b:c', new Map([['x', 'h']]), { tk: 'T' });
     expect((await cp.load('a/b:c'))?.manifest).toEqual({ x: 'h' });
+  });
+});
+
+// .............................................................................
+
+describe('EditCheckpoint — the cake head', () => {
+  it('round-trips the head beside the token', async () => {
+    // The two describe the same thing: where this collection had got to. A
+    // restart that restores one without the other resumes the change stream
+    // onto a cake that forgot everything before it.
+    const dir = mkdtempSync(join(tmpdir(), 'cp-head-'));
+    const cp = new EditCheckpoint(dir);
+    await cp.save('customers', new Map([['a', 'h1']]), { t: 1 }, 'HEAD_7');
+    expect(await cp.load('customers')).toEqual({
+      manifest: { a: 'h1' },
+      token: { t: 1 },
+      head: 'HEAD_7',
+    });
+  });
+
+  it('reads a file written before the head existed as having none', async () => {
+    // Which is exactly the behaviour those files were written under, so an
+    // upgrading node starts a fresh chain rather than resuming a wrong one.
+    const dir = mkdtempSync(join(tmpdir(), 'cp-head-'));
+    writeFileSync(
+      join(dir, 'legacy.json'),
+      '{"token":{"t":2}}\n' + JSON.stringify(['a', 'h1']) + '\n',
+    );
+    const loaded = await new EditCheckpoint(dir).load('legacy');
+    expect(loaded?.head).toBeNull();
+    expect(loaded?.token).toEqual({ t: 2 });
+  });
+
+  it('keeps `token` as the first key, so the format still sniffs', async () => {
+    // STREAM_HEADER looks for `{"token"` to tell this format from the legacy
+    // single-object one. Putting `head` first would make every streamed
+    // checkpoint read as legacy, and every one of them fail to parse.
+    const dir = mkdtempSync(join(tmpdir(), 'cp-head-'));
+    await new EditCheckpoint(dir).save('c', new Map(), null, 'H');
+    const first = readFileSync(join(dir, 'c.json'), 'utf8').split('\n')[0];
+    expect(first.startsWith('{"token"')).toBe(true);
+  });
+
+  it('defaults the head to null when a caller omits it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cp-head-'));
+    const cp = new EditCheckpoint(dir);
+    await cp.save('c', new Map(), null);
+    expect((await cp.load('c'))?.head).toBeNull();
   });
 });

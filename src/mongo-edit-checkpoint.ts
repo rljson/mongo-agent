@@ -31,15 +31,31 @@ const STREAM_HEADER = '{"token"';
  * - `token`: the MongoDB change-stream resume token, so the stream reopens with
  *   `resumeAfter` and replays only the changes missed while the agent was down.
  *
- * It stores NO document bodies and NO cake/edit history: Mongo is the body
- * source of truth, and the content root (not a cake replay) drives baseline
- * convergence, so the cake stays a fresh, incremental append after a restart.
+ * - `head`: the collection's `EditHistory` head at the last save, so a restart
+ *   CONTINUES the chain instead of starting a second one beside it. It matters
+ *   only when the Io survives the restart; with an in-memory Io the table is
+ *   empty again and a fresh lineage is the consistent answer. On a durable Io
+ *   it is the difference between one chain and two, and a peer walking
+ *   `previous` back from the new head stops at the fork — so everything written
+ *   before the restart reads as absent while sitting right there in the table.
+ *
+ * It stores NO document bodies and no edit BODIES: Mongo is the body source of
+ * truth, and the content root (not a cake replay) drives baseline convergence,
+ * so the chain stays small and incremental.
  */
 export interface EditCheckpointState {
   /** `sliceId → doc content-hash` (the content-root manifest). */
   manifest: Record<string, string>;
   /** The MongoDB change-stream resume token, or `null` if none captured yet. */
   token: unknown | null;
+  /**
+   * The `EditHistory` head this collection's cake was at, or `null`.
+   *
+   * `null` on a checkpoint written before this field existed, which reads
+   * correctly as "no head to resume from" — the behaviour those files were
+   * written under.
+   */
+  head: string | null;
 }
 
 /**
@@ -86,7 +102,11 @@ export class EditCheckpoint {
         const parsed = JSON.parse(
           await readFile(file, 'utf8'),
         ) as Partial<EditCheckpointState>;
-        return { manifest: parsed.manifest ?? {}, token: parsed.token ?? null };
+        return {
+          manifest: parsed.manifest ?? {},
+          token: parsed.token ?? null,
+          head: parsed.head ?? null,
+        };
       } catch {
         return undefined;
       }
@@ -128,6 +148,7 @@ export class EditCheckpoint {
   ): Promise<EditCheckpointState | undefined> {
     const manifest: Record<string, string> = {};
     let token: unknown = null;
+    let head: string | null = null;
     let first = true;
     for await (const line of createInterface({
       crlfDelay: Infinity,
@@ -136,7 +157,12 @@ export class EditCheckpoint {
       if (line.length === 0) continue;
       if (first) {
         first = false;
-        token = (JSON.parse(line) as { token?: unknown }).token ?? null;
+        const header = JSON.parse(line) as {
+          token?: unknown;
+          head?: string | null;
+        };
+        token = header.token ?? null;
+        head = header.head ?? null;
         continue;
       }
       const [sliceId, hash] = JSON.parse(line) as [string, string];
@@ -144,7 +170,7 @@ export class EditCheckpoint {
     }
     /* v8 ignore next -- @preserve header-only file cannot happen: save writes it last */
     if (first) return undefined;
-    return { manifest, token };
+    return { manifest, token, head };
   }
 
   /**
@@ -152,11 +178,13 @@ export class EditCheckpoint {
    * @param collection - The collection.
    * @param manifest - The current content-hash manifest.
    * @param token - The latest change-stream resume token (or `null`).
+   * @param head - The collection's `EditHistory` head (or `null`).
    */
   async save(
     collection: string,
     manifest: Map<string, string>,
     token: unknown,
+    head: string | null = null,
   ): Promise<void> {
     await mkdir(this._dir, { recursive: true });
     const file = this._file(collection);
@@ -173,7 +201,9 @@ export class EditCheckpoint {
     // that was never checkpointed at all, and re-scanned in full on every
     // restart. Streaming it costs a constant amount of memory, so size is no
     // longer a reason to skip.
-    await write(`${JSON.stringify({ token: token ?? null })}\n`);
+    // `token` stays the FIRST key: STREAM_HEADER sniffs for it to tell this
+    // format from the legacy single-object one.
+    await write(`${JSON.stringify({ token: token ?? null, head })}\n`);
     for (const [sliceId, hash] of manifest) {
       await write(`${JSON.stringify([sliceId, hash])}\n`);
     }

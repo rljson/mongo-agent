@@ -388,6 +388,37 @@ export class MongoEditAdapter {
   }
 
   /**
+   * Point a collection's cake back at a head it had before a restart.
+   *
+   * `MultiEditManager` starts headless: `init()` only registers an observer,
+   * and `_initCollection` hands it an EMPTY cake to edit from. With an
+   * in-memory Io that is right — the table is empty too. With a DURABLE one the
+   * table still holds the old chain, and the next edit would start a second
+   * lineage beside it whose `previous` never reaches the first. A peer walking
+   * back from the new head stops at the fork, so everything written before the
+   * restart reads as absent while sitting right there in the table.
+   *
+   * Answers `false` rather than throwing when the ref is not in the table: a
+   * checkpoint can outlive the store it describes (a wiped cache directory, a
+   * restore from backup), and a fresh chain is the correct answer then. The
+   * caller logs it; refusing to start would strand a node over a resumption
+   * that is an optimisation, not a correctness requirement.
+   * @param collection - The collection.
+   * @param headRef - The `EditHistory` ref to resume from.
+   * @returns Whether the head was adopted.
+   */
+  async resume(collection: string, headRef: string): Promise<boolean> {
+    const meta = this._cakes.get(collection);
+    if (!meta || !headRef) return false;
+    try {
+      await meta.manager.editHistoryRef(headRef);
+      return meta.manager.head?.editHistoryRef === headRef;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * The current head editHistory ref for a collection, or `null`.
    * @param collection - The collection.
    * @returns The head ref or `null`.

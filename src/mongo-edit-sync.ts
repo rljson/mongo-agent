@@ -1109,6 +1109,10 @@ export class MongoEditSync {
       collection,
       manifest,
       this._lastToken.get(collection),
+      // The head goes with the token: both describe where this collection had
+      // got to, and a restart that restores one without the other resumes the
+      // change stream onto a cake that forgot everything before it.
+      this._adapter.headRef(collection),
     );
     this._log(`checkpoint ${collection} saved`);
   }
@@ -1212,6 +1216,21 @@ export class MongoEditSync {
     const cp = this._checkpoint
       ? await this._checkpoint.load(collection)
       : undefined;
+
+    // Continue the chain rather than starting a second one beside it. Only
+    // meaningful on a durable Io — with an in-memory one the table is empty
+    // again and `resume` correctly answers false — which is why it is tried
+    // unconditionally and never required to succeed.
+    if (cp?.head) {
+      const resumed = await this._adapter.resume(collection, cp.head);
+      this._log(
+        resumed
+          ? `resume ${collection} cake head ${cp.head.slice(0, 12)}…`
+          : `resume ${collection} cake head ${cp.head.slice(0, 12)}… NOT in the ` +
+            'store (wiped or restored) - starting a fresh chain',
+      );
+    }
+
     if (cp && cp.token != null) {
       // Resume: restore the manifest (→ content root immediately known) and
       // reopen the stream from the saved token — no full scan. A token too old
