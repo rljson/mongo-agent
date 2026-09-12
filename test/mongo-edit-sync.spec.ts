@@ -2069,3 +2069,60 @@ describe('MongoEditSync — a restart with a durable store', () => {
     await sync.stop();
   });
 });
+
+// .............................................................................
+
+describe('MongoEditSync — the tombstone log', () => {
+  it('records a deletion once, however often the same id arrives', async () => {
+    // The in-memory guard is what keeps a re-delivered delete from writing the
+    // tombstone collection again, and it is set BEFORE the persist so a failed
+    // write costs durability across a restart rather than correctness.
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb({ customers: new FakeCollection([]) }) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    const internals = sync as unknown as {
+      _recordTombstone: (c: string, id: unknown) => void;
+      _tombstones: Map<string, Map<string, unknown>>;
+    };
+
+    internals._recordTombstone('customers', 7);
+    internals._recordTombstone('customers', 7);
+    internals._recordTombstone('customers', 8);
+
+    expect([...internals._tombstones.get('customers')!.keys()]).toEqual([
+      '7',
+      '8',
+    ]);
+  });
+
+  it('records nothing when the log is switched off', async () => {
+    // `SL_EDIT_TOMBSTONE_LOG=0` is the kill switch. A node running without the
+    // log still deletes correctly; it just cannot answer "was this deleted, or
+    // never seen" after a restart.
+    const previous = process.env['SL_EDIT_TOMBSTONE_LOG'];
+    process.env['SL_EDIT_TOMBSTONE_LOG'] = '0';
+    try {
+      const sync = new MongoEditSync(
+        new FakeMongoDb({ customers: new FakeCollection([]) }) as never,
+        await mkRljsonDb(),
+        mkConnector(),
+        ['customers'],
+        'p',
+      );
+      const internals = sync as unknown as {
+        _recordTombstone: (c: string, id: unknown) => void;
+        _tombstones: Map<string, Map<string, unknown>>;
+      };
+      internals._recordTombstone('customers', 7);
+      expect(internals._tombstones.size).toBe(0);
+    } finally {
+      if (previous === undefined) delete process.env['SL_EDIT_TOMBSTONE_LOG'];
+      else process.env['SL_EDIT_TOMBSTONE_LOG'] = previous;
+    }
+  });
+});
