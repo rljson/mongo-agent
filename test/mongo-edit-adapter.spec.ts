@@ -440,3 +440,47 @@ describe('MongoEditAdapter', () => {
     ).toEqual(new Map());
   });
 });
+
+// .............................................................................
+
+describe('MongoEditAdapter.resume', () => {
+  const prefix = 'testDb';
+
+  it('adopts a head the store still holds', async () => {
+    // `MultiEditManager` starts headless — `init()` only registers an observer
+    // — so on a durable store the next edit would begin a second lineage
+    // beside the first. This is what puts it back on the old one.
+    const p = await mkDb();
+    const a = new MongoEditAdapter(p.db, prefix);
+    await a.init(['customers']);
+    await a.putDoc('customers', { _id: new Int32(1), name: 'Alice' });
+    const head = a.headRef('customers');
+    expect(head).toBeTruthy();
+
+    // A second adapter over the SAME store: the durable case, in one process.
+    const b = new MongoEditAdapter(p.db, prefix);
+    await b.init(['customers']);
+    expect(b.headRef('customers')).toBeNull();
+    expect(await b.resume('customers', head as string)).toBe(true);
+    expect(b.headRef('customers')).toBe(head);
+  });
+
+  it('answers false for a head the store does not have', async () => {
+    // A checkpoint can outlive the store it describes: a wiped cache
+    // directory, a restore from backup. A fresh chain is correct then, and
+    // throwing would strand the node over an optimisation.
+    const p = await mkDb();
+    const a = new MongoEditAdapter(p.db, prefix);
+    await a.init(['customers']);
+    expect(await a.resume('customers', 'NOT_IN_THIS_STORE')).toBe(false);
+    expect(a.headRef('customers')).toBeNull();
+  });
+
+  it('answers false for an unknown collection or an empty ref', async () => {
+    const p = await mkDb();
+    const a = new MongoEditAdapter(p.db, prefix);
+    await a.init(['customers']);
+    expect(await a.resume('never-adopted', 'H')).toBe(false);
+    expect(await a.resume('customers', '')).toBe(false);
+  });
+});
