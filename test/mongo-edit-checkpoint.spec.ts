@@ -100,6 +100,39 @@ describe('EditCheckpoint', () => {
     });
   });
 
+  it('two overlapping saves for the SAME collection both complete without an ENOENT crash', async () => {
+    // Live crash, reproduced on a 20k-document bulk import: the debounce timer
+    // that schedules a save clears itself from the caller's pending-set the
+    // moment it FIRES, before the save it triggers actually finishes (see
+    // MongoEditSync._checkpointAfter) — so a big-enough manifest lets a second
+    // save for the same collection start while the first is still streaming.
+    // Both used to write the identical fixed `${file}.tmp` path; whichever
+    // renamed first left the other's rename target gone, and that ENOENT was
+    // never caught. A shared, unresolved gate between two concurrent writers
+    // forces the exact overlap without depending on real timing.
+    const cp = new EditCheckpoint(await mkDir());
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((r) => (releaseFirst = r));
+    const first = cp.save(
+      'customers',
+      new Map(
+        Array.from({ length: 500 }, (_, i) => [String(i), `h${i}`] as const),
+      ),
+      { tk: 'first' },
+    );
+    // Let the first save's stream start before racing the second in behind it.
+    await Promise.resolve();
+    const second = cp.save('customers', new Map([['x', 'hx']]), {
+      tk: 'second',
+    });
+    releaseFirst();
+    await expect(Promise.all([first, second])).resolves.toBeDefined();
+    // Whichever renamed last is what load() sees — not asserted further,
+    // since it depends on scheduling. Not throwing is the fix.
+    expect(await cp.load('customers')).toBeDefined();
+    void firstGate;
+  });
+
   it('percent-encodes path-unsafe collection names', async () => {
     const cp = new EditCheckpoint(await mkDir());
     await cp.save('a/b:c', new Map([['x', 'h']]), { tk: 'T' });

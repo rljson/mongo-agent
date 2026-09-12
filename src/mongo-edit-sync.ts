@@ -104,6 +104,15 @@ export interface EditSyncConnector {
    * Optional so a stub connector can omit it; the caller then falls back.
    */
   emitRaw?(ref: string): void;
+  /**
+   * Tears down and re-establishes the underlying transport. The receive-liveness
+   * watchdog calls this when the socket has gone HALF-OPEN — connected enough
+   * that nothing else reconnects it, yet delivering no inbound refs, so a
+   * receive-only node (one making no local edits) silently misses every live
+   * head until anti-entropy limps it back. Optional: a stub connector, or one
+   * with no socket to cycle, omits it and the watchdog stays inert.
+   */
+  reconnect?(): void;
 }
 
 /** The minimal MongoDB change-stream surface this module uses. */
@@ -275,6 +284,24 @@ export class MongoEditSync {
   private readonly _aeNoProgressBackoffMs =
     Number(process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS']) || 5_000;
   /**
+   * `collection|head` → consecutive PARTIAL applies that moved the walk floor
+   * nowhere. A head whose edit chain is fundamentally incomplete — the common
+   * case for a collection that was bulk-imported and therefore stored
+   * chain-free by anti-entropy (see {@link MongoAntiEntropy}) — can never
+   * resolve through `_applyHead`, so re-arming it on every re-announce is an
+   * infinite, event-loop-starving no-op (`applyHead … PARTIAL, 0 resolvable`
+   * forever). We re-arm while the walk still advances (the genuine transient:
+   * a fresh connection whose origin rows are not visible yet), and after
+   * {@link _headRearmCap} no-progress applies in a row stop re-arming and leave
+   * the collection to the chain-free anti-entropy path that actually owns it.
+   * A genuinely new edit carries a new head id → new key → fresh count, so it
+   * is never starved by a stuck predecessor.
+   */
+  private readonly _headNoProgress = new Map<string, number>();
+  /* v8 ignore next -- @preserve partial-head re-arm cap, env-overridable */
+  private readonly _headRearmCap =
+    Number(process.env['SL_EDIT_HEAD_REARM_CAP']) || 3;
+  /**
    * Collections whose cold-start baseline is fully built. The backfill is gated
    * on this: a manifest still being scanned would compare as "everything
    * differs" against a peer and trigger a useless full exchange.
@@ -346,6 +373,34 @@ export class MongoEditSync {
     this._expectedMassDelete.add(collection);
   }
 
+  /**
+   * Forgets every tombstone this node holds for a collection — in memory and
+   * in the persistent {@link TOMBSTONE_LOG}. Best-effort: a failed persistent
+   * delete still clears the in-memory guard, so a caller that reset the live
+   * collection is not left blocked by a log write it cannot control.
+   *
+   * A tombstone is otherwise eternal by design (see `_applyPeerTombstones` —
+   * NO RESURRECTION), which is exactly what a probe collection with reused,
+   * fixed ids needs to NOT have across independent test runs: a delete that
+   * once succeeded (guard off, or before the guard existed) leaves a real
+   * tombstone, and every later re-insert of that same id is silently deleted
+   * again the moment anti-entropy sees a peer still advertising it — with no
+   * relation to the run that is currently exercising that id. A collection
+   * reset that clears live docs but not this log is not actually a clean
+   * slate.
+   * @param collection - The collection to forget every tombstone for.
+   */
+  async forgetTombstones(collection: string): Promise<void> {
+    this._tombstones.delete(collection);
+    try {
+      await this._mongoDb.collection(TOMBSTONE_LOG).deleteMany({
+        collection,
+      } as never);
+    } catch (e) {
+      this._log(`forget tombstones ${collection} failed: ${String(e)}`);
+    }
+  }
+
   /** collection → the root most recently written to the trace log. */
   private readonly _lastLoggedRoot = new Map<string, string>();
 
@@ -368,6 +423,21 @@ export class MongoEditSync {
   /* v8 ignore next -- @preserve heartbeat interval, env-overridable */
   private readonly _heartbeatMs =
     Number(process.env['SL_EDIT_HEARTBEAT_MS']) || 10_000;
+  /**
+   * Receive-liveness watchdog window (ms). If no ref arrives for this long after
+   * we HAVE heard the fleet, the socket is treated as half-open and reconnected.
+   * `0` disables it. Explicit-undefined check so `0` really means off (a plain
+   * `|| default` would swallow it).
+   */
+  /* v8 ignore next 4 -- @preserve rx-watchdog window, env-overridable (0=off) */
+  private readonly _rxWatchdogMs =
+    process.env['SL_EDIT_RX_WATCHDOG_MS'] !== undefined
+      ? Number(process.env['SL_EDIT_RX_WATCHDOG_MS'])
+      : 45_000;
+  /** When any ref last arrived; `0` until the first, which arms the watchdog. */
+  private _lastInboundAt = 0;
+  /** Earliest time the rx watchdog may force another reconnect (cooldown). */
+  private _rxReconnectCooldownUntil = 0;
   /* v8 ignore next -- @preserve collection-discovery interval, env-overridable */
   private readonly _discoverMs =
     Number(process.env['SL_EDIT_DISCOVER_MS']) || 15_000;
@@ -477,6 +547,7 @@ export class MongoEditSync {
       manifestHash: (c, id) => this._manifestOf(c).get(id),
       hasTombstone: (c, id) => !!this._tombstones.get(c)?.has(id),
       pushTombstones: (c, ids) => this._pushTombstones(c, ids),
+      applyPeerTombstones: (c, ids) => this._applyPeerTombstones(c, ids),
       serveComponents: (c, ids) => this._serveComponents(c, ids),
       pullAndApply: (c, hs) => this._pullAndApply(c, hs),
       syncs: (c) => this._collections.has(c),
@@ -693,10 +764,24 @@ export class MongoEditSync {
     const want = new Set(buckets);
     const out = new Map<number, Array<[string, string]>>();
     for (const b of buckets) out.set(b, []);
-    for (const [key, hash] of this._manifestOf(collection)) {
+    const manifest = this._manifestOf(collection);
+    for (const [key, hash] of manifest) {
       const b = this._bucketOf(key);
       if (!want.has(b)) continue;
       (out.get(b) as Array<[string, string]>).push([key, hash]);
+    }
+    // Advertise our tombstones (as an empty-hash entry) so a peer that still
+    // holds live a doc WE deleted learns to drop it — the manifest-diff round is
+    // otherwise additive-only and can never converge such a SUPERSET peer down.
+    // A live doc always wins over a stale tombstone for the same id, so skip any
+    // id the live manifest still carries.
+    const tomb = this._tombstones.get(collection);
+    if (tomb) {
+      for (const key of tomb.keys()) {
+        const b = this._bucketOf(key);
+        if (!want.has(b) || manifest.has(key)) continue;
+        (out.get(b) as Array<[string, string]>).push([key, '']);
+      }
     }
     return out;
   }
@@ -755,11 +840,15 @@ export class MongoEditSync {
    * never move a document backwards or overwrite a concurrent local edit.
    * @param collection - The collection to upsert into.
    * @param hashes - The component row hashes to pull.
+   * @returns How many of `hashes` actually resolved via the peer read (not how
+   *   many were WRITTEN — a hash whose content we already hold resolves but
+   *   needs no write). Short of `hashes.length` is the caller's signal to retry
+   *   — see {@link MongoAntiEntropy}'s `_onHashes`.
    */
   private async _pullAndApply(
     collection: string,
     hashes: string[],
-  ): Promise<void> {
+  ): Promise<number> {
     const docs = await this._adapter.pullComponents(collection, hashes);
     const ops: Array<Record<string, unknown>> = [];
     for (const doc of docs) {
@@ -786,6 +875,7 @@ export class MongoEditSync {
       // round-completion chain drives the next one immediately.
       this._aeRoundProgress.set(collection, true);
     }
+    return docs.length;
   }
 
   /**
@@ -810,6 +900,35 @@ export class MongoEditSync {
       this._setAppliedTimeId(collection, id, put?.timeId);
     }
     if (head) this._connector.send(this._headRef(collection, head));
+  }
+
+  /**
+   * Requester side of a delete-wins reconciliation, mirror image of
+   * {@link _pushTombstones}: a PEER holds a tombstone for a doc THIS node still
+   * has live, so the peer's delete wins and we remove it locally. We delete
+   * straight from Mongo and let our own change stream ({@link _onDelete}) drop it
+   * from the manifest, record our tombstone, and re-propagate the delete under
+   * the mass-delete guard — so the fix converges a SUPERSET node down without
+   * ever bypassing the delete-storm circuit breaker. Idempotent: an id already
+   * gone deletes nothing.
+   * @param collection - The collection.
+   * @param sliceIds - The stringified `_id`s to drop locally.
+   */
+  private async _applyPeerTombstones(
+    collection: string,
+    sliceIds: string[],
+  ): Promise<void> {
+    const coll = this._mongoDb.collection(collection);
+    for (const sliceId of sliceIds) {
+      // The manifest key is the stringified id; the real Mongo `_id` may be a
+      // number or ObjectId, so try each candidate typed shape. Only the one that
+      // exists matches — the others are harmless no-op deletes. Mirrors the
+      // per-id `deleteOne` the head-apply delete path uses.
+      for (const id of this._typedIdCandidates(sliceId)) {
+        await coll.deleteOne({ _id: id } as never);
+      }
+      this._log(`ae ${collection} applied peer tombstone _id=${sliceId}`);
+    }
   }
 
   /**
@@ -1104,17 +1223,28 @@ export class MongoEditSync {
     /* v8 ignore next -- @preserve guarded by callers; defensive */
     if (!this._checkpoint) return;
     const manifest = this._manifestOf(collection);
-    // `save` normalizes an undefined token to null, so no `?? null` here.
-    await this._checkpoint.save(
-      collection,
-      manifest,
-      this._lastToken.get(collection),
-      // The head goes with the token: both describe where this collection had
-      // got to, and a restart that restores one without the other resumes the
-      // change stream onto a cake that forgot everything before it.
-      this._adapter.headRef(collection),
-    );
-    this._log(`checkpoint ${collection} saved`);
+    try {
+      // `save` normalizes an undefined token to null, so no `?? null` here.
+      await this._checkpoint.save(
+        collection,
+        manifest,
+        this._lastToken.get(collection),
+        // The head goes with the token: both describe where this collection had
+        // got to, and a restart that restores one without the other resumes the
+        // change stream onto a cake that forgot everything before it.
+        this._adapter.headRef(collection),
+      );
+      this._log(`checkpoint ${collection} saved`);
+    } catch (e) {
+      // Called fire-and-forget (`void this._saveCheckpoint(...)`) from the
+      // debounce timer, so an unhandled rejection here is an unhandled
+      // rejection at the process level — crashing the whole node, not just
+      // this checkpoint. The checkpoint is a resume-speed optimization, not a
+      // correctness requirement (a missing/stale one just costs a slower
+      // cold-start rescan next restart), so a failed write must never do more
+      // than that.
+      this._log(`checkpoint ${collection} save failed: ${String(e)}`);
+    }
   }
 
   /**
@@ -1176,6 +1306,15 @@ export class MongoEditSync {
         this._lastChangeAt = Date.now();
         queue.push(change as Record<string, unknown>);
         if (snapshotDone) void pump();
+        // MongoDB always follows a collection drop/rename with `invalidate` and
+        // then closes THIS cursor server-side — no further event ever arrives
+        // on it, live or not. Re-open a fresh cursor right away so the node
+        // keeps seeing changes once the collection exists again (the normal
+        // case right after a drop-based bulk reload); the queued `invalidate`
+        // still drives `_resyncFromMongo` through the ordinary pump below.
+        if ((change as Record<string, unknown>)['operationType'] === 'invalidate') {
+          open();
+        }
       });
       this._stop.push(() => {
         this._liveStreams.delete(collection);
@@ -1296,11 +1435,11 @@ export class MongoEditSync {
       this._log(
         `seed ${collection} ${seeded.size} document timeId(s) from the local chain`,
       );
-      /* v8 ignore start -- @preserve defensive: seeding must never stop a start-up */
     } catch (e) {
+      /* v8 ignore start -- @preserve defensive: seeding must never stop a start-up */
       this._log(`seed ${collection} failed: ${String(e)}`);
+      /* v8 ignore stop */
     }
-    /* v8 ignore stop */
   }
 
   /**
@@ -1449,10 +1588,46 @@ export class MongoEditSync {
       this._stop.push(() => clearInterval(disc));
     }
 
-    const hb = setInterval(() => this.announceHeads(), this._heartbeatMs);
+    const hb = setInterval(() => {
+      this.announceHeads();
+      // Same cadence heals a socket that stopped delivering inbound refs.
+      this._checkReceiveLiveness();
+    }, this._heartbeatMs);
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit/tests */
     (hb as unknown as { unref?: () => void }).unref?.();
     this._stop.push(() => clearInterval(hb));
+  }
+
+  /**
+   * Reconnects the socket when it has gone half-open: connected, but delivering
+   * no inbound refs. A node making no local edits produces no send timeouts, so
+   * the send-side watchdog never fires for it — it just silently stops receiving
+   * live heads (roots, heads, and even anti-entropy answers) and drifts until a
+   * pull happens to get through. Only arms once we have EVER heard the fleet, so
+   * a genuinely lone node never reconnect-loops, and holds a cooldown so a slow
+   * reconnect+resync is not yanked again mid-recovery.
+   */
+  private _checkReceiveLiveness(): void {
+    if (this._rxWatchdogMs <= 0 || !this._coldStartComplete) return;
+    const reconnect = this._connector.reconnect;
+    if (!reconnect) return;
+    const now = Date.now();
+    if (this._lastInboundAt === 0) return; // never heard a peer — maybe alone
+    if (now - this._lastInboundAt <= this._rxWatchdogMs) return;
+    if (now < this._rxReconnectCooldownUntil) return;
+    this._log(
+      `rx-watchdog: no inbound for ` +
+        `${Math.round((now - this._lastInboundAt) / 1000)}s -> reconnecting socket`,
+    );
+    try {
+      reconnect.call(this._connector);
+    } catch (e) {
+      this._log(`rx-watchdog reconnect threw: ${String(e)}`);
+    }
+    // Re-arm from now and hold off at least one window (min 30s) so the fresh
+    // transport gets time to resubscribe and resync before we could yank again.
+    this._lastInboundAt = now;
+    this._rxReconnectCooldownUntil = now + Math.max(this._rxWatchdogMs, 30_000);
   }
 
   private async _onChange(
@@ -1464,6 +1639,27 @@ export class MongoEditSync {
       this._onDelete(collection, change);
       return;
     }
+    // A collection-level drop/rename (e.g. an out-of-band `mongorestore --drop`)
+    // invalidates every manifest entry at once — no per-document delete event
+    // follows it. Left unhandled, the OLD entries never leave the manifest and
+    // stay XORed into the root/bucket accumulators forever, alongside whatever
+    // the restore re-inserts: a permanent, unresolvable false divergence against
+    // any peer whose accumulator was computed from the actual (post-drop)
+    // content. The anti-entropy backfill can never correct this on its own — it
+    // only ever ADDS a sliceId the manifest does not already claim to hold (see
+    // `_onEntries`), so a stale-but-present entry is invisible to it forever.
+    //
+    // `invalidate` deliberately does NOT also resync: MongoDB always emits it
+    // as the terminal event immediately after `drop`/`rename` on a
+    // single-collection watch (never on its own), so the resync above already
+    // ran — rescanning again here would cost a second full collection read
+    // for nothing on every drop, and that read is exactly what is too
+    // expensive to pay twice on a multi-hundred-thousand-row catalog.
+    if (op === 'drop' || op === 'rename') {
+      await this._resyncFromMongo(collection);
+      return;
+    }
+    if (op === 'invalidate') return;
     if (op !== 'insert' && op !== 'update' && op !== 'replace') return;
     const doc = change['fullDocument'] as
       | (Record<string, unknown> & { _id: unknown })
@@ -1503,6 +1699,49 @@ export class MongoEditSync {
   }
 
   /**
+   * Rebuilds a collection's manifest (and root/bucket accumulators) from a
+   * fresh full read of Mongo, discarding whatever the manifest claimed before.
+   * The only correct response to a collection-level drop/rename: unlike a
+   * per-document delete, it carries no list of which sliceIds are now gone, so
+   * the sole way to end up with an honest manifest is to re-derive it from the
+   * collection's actual current content rather than patch the old one.
+   *
+   * Every sliceId the OLD manifest held that the new one does not is recorded
+   * as a tombstone (not merely dropped locally). Without this, a peer that
+   * still holds those documents sees this node as "missing" content it used
+   * to have and additively backfills it right back — resurrecting exactly
+   * what the drop/rename was replacing. Advertising a tombstone instead makes
+   * the peer apply the delete (`_onEntries`'s `hash === ''` branch), the same
+   * mechanism an ordinary live delete already relies on.
+   * @param collection - The collection to rebuild.
+   */
+  private async _resyncFromMongo(collection: string): Promise<void> {
+    const stale = new Set(this._manifestOf(collection).keys());
+    this._manifestOf(collection).clear();
+    this._accOf(collection).fill(0);
+    this._bucketAccOf(collection).fill(0);
+    this._rootCache.delete(collection);
+    const cursor = this._mongoDb.collection(collection).find({});
+    let count = 0;
+    for await (const doc of cursor) {
+      count++;
+      const sliceId = (doc as { _id: unknown })._id;
+      stale.delete(String(sliceId));
+      this._setManifest(collection, sliceId, docHash(doc));
+    }
+    // Whatever sliceId remains in `stale` existed before the rebuild and does
+    // not exist now: tombstone it so peers converge down instead of backfilling
+    // it back in. The typed `_id` is gone (the manifest only ever kept the
+    // stringified form) — `_typedIdCandidates` reconstructs the candidate
+    // shapes from the string on both the advertise and the apply side, the
+    // same fallback the rest of the tombstone path already relies on.
+    for (const sliceId of stale) this._recordTombstone(collection, sliceId);
+    this._baselineCount.set(collection, count);
+    this._scheduleRoot(collection);
+    this._log(`resync ${collection} after drop/rename -> ${count} docs`);
+  }
+
+  /**
    * Builds the tombstone document for a deleted `_id`.
    * @param id - The deleted document's `_id`.
    * @returns The tombstone document.
@@ -1528,9 +1767,16 @@ export class MongoEditSync {
     if (id === undefined) return;
     // The doc is gone from Mongo → drop it from the manifest + refresh the root.
     this._setManifest(collection, id, null);
-    // Persist a tombstone so the manifest-diff backfill re-asserts this delete
-    // against a peer that still holds the doc, rather than resurrecting it.
-    this._recordTombstone(collection, id);
+    // Tombstoning happens in `_flushDeletes`, once the mass-delete guard has
+    // actually decided to let this id's delete through — NOT here. Recording it
+    // eagerly, per individual change-stream event, made `hasTombstone` true (and
+    // anti-entropy's bucket-serving advertise an empty hash for it) during the
+    // debounce window, BEFORE the guard ran — so a burst the guard went on to
+    // BLOCK had already leaked to a peer via anti-entropy's own tombstone
+    // convergence, moments ahead of the "blocked, not propagated" decision.
+    // Reproduced live: the E2E mass-delete-guard recipe deleted 8 docs, the
+    // guard correctly logged BLOCKED, and the very first id still vanished on
+    // the peer anyway.
     this._scheduleRoot(collection);
     this._checkpointAfter(collection, change);
     // Echo of a peer-applied delete -> do not re-propagate. Prune the
@@ -1593,6 +1839,11 @@ export class MongoEditSync {
 
     let head: string | null = null;
     for (const id of pending) {
+      // Persist a tombstone so the manifest-diff backfill re-asserts this
+      // delete against a peer that still holds the doc, rather than
+      // resurrecting it. Only reached once this id's delete is confirmed
+      // NOT blocked — see `_onDelete`.
+      this._recordTombstone(collection, id);
       const put = await this._adapter.putDoc(collection, this._tombstone(id));
       head = put?.head ?? null;
       this._setAppliedTimeId(collection, id, put?.timeId);
@@ -1602,6 +1853,10 @@ export class MongoEditSync {
   }
 
   private _onRef(ref: string): void {
+    // Any inbound ref — root heartbeat, head, or anti-entropy frame — proves the
+    // socket is still delivering. Stamp it so the receive-liveness watchdog can
+    // tell a half-open socket (silent) from a healthy one.
+    this._lastInboundAt = Date.now();
     // Anti-entropy protocol traffic (manifest-diff backfill) — route to the
     // engine and stop; these refs are neither roots nor heads. Ignored until our
     // own cold-start is complete: a node still hashing its baselines must neither
@@ -1621,7 +1876,29 @@ export class MongoEditSync {
       if (i < 0) return;
       const collection = body.slice(0, i);
       const root = body.slice(i + 1);
-      if (!this._collections.has(collection)) return;
+      if (!this._collections.has(collection)) {
+        // A collection that exists only on the PEER and whose only edits ever
+        // arrive as manifest-only baselines (a bulk import / cold-start delta
+        // produces no head, only this root broadcast) was permanently
+        // unreachable here: dropping it starved the adopt-on-demand path below
+        // from ever running, because nothing else announces this collection.
+        // Mirrors the head-ref adopt-on-demand fix above for the root-only case.
+        if (!this._shouldSync?.(collection)) {
+          this._log(`recv root ${collection} NOT syncable, drop`);
+          return;
+        }
+        if (!this._adoptingOnRef.has(collection)) {
+          this._adoptingOnRef.add(collection);
+          this._log(`recv root ${collection} unknown here -> adopting on demand`);
+          void this._adoptCollection(collection)
+            .then(() => this._maybeTriggerAe(collection))
+            .catch((e) =>
+              this._log(`adopt-on-ref ${collection} failed: ${String(e)}`),
+            )
+            .finally(() => this._adoptingOnRef.delete(collection));
+        }
+        return;
+      }
       this._log(`recv root ${collection} = ${root.slice(0, 12)}`);
       // A peer reporting a root different from ours means someone is ahead of
       // (or behind) us. Re-drive the last head we saw: its pull may have come
@@ -1791,11 +2068,33 @@ export class MongoEditSync {
       // document backwards, so a partial chain is safe — remember only the refs
       // whose whole ancestry resolved, and clear the received-dedup so a later
       // re-announce delivers the head again and completes the rest.
-      this._log(
-        `applyHead ${collection} head=${head} PARTIAL -> applying ` +
-          `${puts.length} resolvable put(s), re-arming the ref`,
-      );
-      this._connector.invalidateReceived?.(rawRef);
+      //
+      // But only while the walk still advances. A head whose chain is
+      // fundamentally incomplete (a bulk-imported collection stored chain-free
+      // by anti-entropy) resolves the same partial set on every re-announce and
+      // never completes; re-arming it forever is an event-loop-starving no-op
+      // that also stalls the anti-entropy path which alone can converge it. So
+      // re-arm while the floor moves; once it stops moving for `_headRearmCap`
+      // applies in a row, leave the head to anti-entropy.
+      const key = `${collection}|${head}`;
+      const advanced = sealed.some((ref) => !applied.has(ref));
+      const stalls = advanced ? 0 : (this._headNoProgress.get(key) ?? 0) + 1;
+      if (advanced) this._headNoProgress.delete(key);
+      else this._headNoProgress.set(key, stalls);
+      if (stalls <= this._headRearmCap) {
+        this._log(
+          `applyHead ${collection} head=${head} PARTIAL -> applying ` +
+            `${puts.length} resolvable put(s), re-arming the ref`,
+        );
+        this._connector.invalidateReceived?.(rawRef);
+      } else {
+        this._log(
+          `applyHead ${collection} head=${head} PARTIAL -> no floor progress ` +
+            `${stalls}x, leaving to anti-entropy (not re-arming)`,
+        );
+      }
+    } else {
+      this._headNoProgress.delete(`${collection}|${head}`);
     }
 
     if (puts.length === 0) {

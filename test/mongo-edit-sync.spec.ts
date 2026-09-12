@@ -36,8 +36,36 @@ class FakeChangeStream {
 
 class FakeCollection {
   stream = new FakeChangeStream();
+  /** Every cursor `watch()` has ever returned, oldest first (`stream` is the latest). */
+  readonly streams: FakeChangeStream[] = [this.stream];
+  /** How many times `watch()` was called (1 after the initial adopt). */
+  watchCalls = 0;
   replaceOne = vi.fn(async () => ({}));
   deleteOne = vi.fn(async () => ({}));
+  deleteMany = vi.fn(async (filter: Record<string, unknown>) => {
+    const before = this.docs.length;
+    this.docs = this.docs.filter(
+      (d) => !Object.entries(filter).every(([k, v]) => d[k] === v),
+    );
+    return { deletedCount: before - this.docs.length };
+  });
+  updateOne = vi.fn(
+    async (
+      filter: Record<string, unknown>,
+      update: { $set?: Record<string, unknown> },
+      opts?: { upsert?: boolean },
+    ) => {
+      const found = this.docs.find((d) =>
+        Object.entries(filter).every(([k, v]) => d[k] === v),
+      );
+      if (found) {
+        Object.assign(found, update.$set ?? {});
+      } else if (opts?.upsert) {
+        this.docs.push({ ...filter, ...(update.$set ?? {}) });
+      }
+      return {};
+    },
+  );
   /** The options passed to the most recent `watch()` (to assert `resumeAfter`). */
   watchOpts: Record<string, unknown> | undefined;
   /** How many times `find()` was called (0 ⇒ no full snapshot scan). */
@@ -60,8 +88,20 @@ class FakeCollection {
       },
     };
   }
+  /**
+   * A fresh cursor object per call, mirroring the real driver: the cursor
+   * MongoDB invalidates after a drop/rename is a dead object, not one that
+   * comes back to life — only a NEW `watch()` call yields a live one.
+   * `this.stream` always aliases the most recent, so existing single-watch
+   * tests (`cols.x.stream.emit(...)`) keep working unchanged.
+   */
   watch(_pipeline: unknown, opts?: Record<string, unknown>): FakeChangeStream {
     this.watchOpts = opts;
+    this.watchCalls++;
+    if (this.watchCalls > 1) {
+      this.stream = new FakeChangeStream();
+      this.streams.push(this.stream);
+    }
     return this.stream;
   }
 }
@@ -120,12 +160,14 @@ const mkConnector = (): EditSyncConnector & {
   send: ReturnType<typeof vi.fn>;
   reannounce: ReturnType<typeof vi.fn>;
   invalidateReceived: ReturnType<typeof vi.fn>;
+  reconnect: ReturnType<typeof vi.fn>;
 } => {
   let cb: ((r: string) => void | Promise<void>) | undefined;
   return {
     send: vi.fn(),
     reannounce: vi.fn(),
     invalidateReceived: vi.fn(),
+    reconnect: vi.fn(),
     listen: (fn) => {
       cb = fn;
     },
@@ -250,6 +292,123 @@ describe('MongoEditSync', () => {
     expect(cols.customers.stream.close).toHaveBeenCalledTimes(1);
   });
 
+  describe('receive-liveness watchdog', () => {
+    type Internals = {
+      _lastInboundAt: number;
+      _rxReconnectCooldownUntil: number;
+      _coldStartComplete: boolean;
+      _checkReceiveLiveness: () => void;
+    };
+    const mkSync = async (conn: ReturnType<typeof mkConnector>) => {
+      const cols = { customers: new FakeCollection([]) };
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        conn,
+        ['customers'],
+        'p',
+      );
+      await sync.start();
+      return sync;
+    };
+
+    it('an inbound ref stamps _lastInboundAt (arms the watchdog)', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._lastInboundAt = 0;
+      conn.fire('~R~customers:' + 'a'.repeat(12));
+      expect(i._lastInboundAt).toBeGreaterThan(0);
+      await sync.stop();
+    });
+
+    it('reconnects once inbound has been silent past the window', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = Date.now() - 120_000; // long past the 45s window
+      i._rxReconnectCooldownUntil = 0;
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      // Re-armed from now → an immediate second pass does nothing (window + cooldown).
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      await sync.stop();
+    });
+
+    it('does NOT reconnect when it has never heard the fleet (maybe alone)', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = 0; // never received anything
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).not.toHaveBeenCalled();
+      await sync.stop();
+    });
+
+    it('does NOT reconnect while inbound is recent or during cooldown', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      // Recent inbound → within window.
+      i._lastInboundAt = Date.now();
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).not.toHaveBeenCalled();
+      // Silent past window, but cooldown still in force.
+      i._lastInboundAt = Date.now() - 120_000;
+      i._rxReconnectCooldownUntil = Date.now() + 60_000;
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).not.toHaveBeenCalled();
+      await sync.stop();
+    });
+
+    it('is inert when the connector cannot reconnect', async () => {
+      const conn = mkConnector();
+      (conn as { reconnect?: unknown }).reconnect = undefined;
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = Date.now() - 120_000;
+      expect(() => i._checkReceiveLiveness()).not.toThrow();
+      await sync.stop();
+    });
+
+    it('is disabled by SL_EDIT_RX_WATCHDOG_MS=0', async () => {
+      process.env['SL_EDIT_RX_WATCHDOG_MS'] = '0';
+      try {
+        const conn = mkConnector();
+        const sync = await mkSync(conn);
+        const i = sync as unknown as Internals;
+        i._coldStartComplete = true;
+        i._lastInboundAt = Date.now() - 120_000;
+        i._checkReceiveLiveness();
+        expect(conn.reconnect).not.toHaveBeenCalled();
+        await sync.stop();
+      } finally {
+        delete process.env['SL_EDIT_RX_WATCHDOG_MS'];
+      }
+    });
+
+    it('swallows a throwing reconnect and still arms the cooldown', async () => {
+      const conn = mkConnector();
+      conn.reconnect.mockImplementation(() => {
+        throw new Error('socket gone');
+      });
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      i._lastInboundAt = Date.now() - 120_000;
+      i._rxReconnectCooldownUntil = 0;
+      expect(() => i._checkReceiveLiveness()).not.toThrow();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      expect(i._rxReconnectCooldownUntil).toBeGreaterThan(Date.now());
+      await sync.stop();
+    });
+  });
+
   it('broadcasts a new head on a live insert and suppresses the echo', async () => {
     const cols = { customers: new FakeCollection([]) };
     const mongo = new FakeMongoDb(cols);
@@ -332,6 +491,109 @@ describe('MongoEditSync', () => {
     conn.fire('unknownColl:someHead'); // not in collections
     await tick();
     expect(cols.customers.replaceOne).not.toHaveBeenCalled();
+    await sync.stop();
+  });
+
+  it('drops a root ref for an unsynced collection when no shouldSync predicate is given', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    await tick();
+
+    const internals = sync as unknown as { _collections: Set<string> };
+    expect(internals._collections.has('peerOnly')).toBe(false);
+    await sync.stop();
+  });
+
+  it('drops a root ref for a peer-only collection the shouldSync predicate rejects', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => false, // shouldSync rejects every peer-only collection
+    );
+    await sync.start();
+
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    await tick();
+
+    const internals = sync as unknown as { _collections: Set<string> };
+    expect(internals._collections.has('peerOnly')).toBe(false);
+    await sync.stop();
+  });
+
+  it('adopts a peer-only collection on an unknown root ref and triggers anti-entropy', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => true, // shouldSync accepts every peer-only collection
+    );
+    await sync.start();
+
+    const internals = sync as unknown as {
+      _collections: Set<string>;
+      _ae: { trigger: (c: string) => boolean };
+    };
+    const triggerSpy = vi.spyOn(internals._ae, 'trigger');
+
+    // A bulk import / cold-start delta never produces a head, only this root
+    // broadcast — the only signal this collection ever gets. Fire a second
+    // root ref for the SAME collection immediately (no await in between) so it
+    // lands while the first adoption is still in flight — the in-flight guard
+    // must skip starting a duplicate adoption.
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    conn.fire(`~R~peerOnly:${'b'.repeat(64)}`);
+    await tick(50);
+
+    expect(internals._collections.has('peerOnly')).toBe(true);
+    expect(triggerSpy).toHaveBeenCalledWith('peerOnly');
+    await sync.stop();
+  });
+
+  it('logs and clears the in-flight guard when adopt-on-ref (root path) fails', async () => {
+    class BrokenCollection extends FakeCollection {
+      watch(): FakeChangeStream {
+        throw new Error('boom');
+      }
+    }
+    const cols: Record<string, FakeCollection> = {
+      customers: new FakeCollection([]),
+      peerOnly: new BrokenCollection([]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => true,
+    );
+    await sync.start();
+
+    const internals = sync as unknown as { _adoptingOnRef: Set<string> };
+    conn.fire(`~R~peerOnly:${'a'.repeat(64)}`);
+    await tick(50);
+
+    expect(internals._adoptingOnRef.has('peerOnly')).toBe(false);
     await sync.stop();
   });
 
@@ -540,6 +802,74 @@ describe('MongoEditSync', () => {
     expect(conn.invalidateReceived).toHaveBeenCalledWith('customers:HEAD_P');
     // …and nothing was sealed, so the next walk still reaches the missing rows.
     expect(internals._applied.get('customers')?.size ?? 0).toBe(0);
+    await sync.stop();
+  });
+
+  it('stops re-arming a PARTIAL head once the walk floor stops moving', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+
+    const internals = sync as unknown as {
+      _adapter: { collectPuts: unknown };
+      _applyChain: Map<string, Promise<void>>;
+      _pullRetries: number;
+      _headRearmCap: number;
+    };
+    internals._pullRetries = 0; // one collectPuts per apply, no backoff wait
+    // Every walk resolves the same nothing and seals nothing: a head whose edit
+    // chain is fundamentally incomplete — the common case for a collection that
+    // was bulk-imported and therefore stored chain-free by anti-entropy. The
+    // walk floor never moves, so re-arming it on every re-announce forever is an
+    // event-loop-starving no-op that also stalls the anti-entropy path that
+    // alone can converge it.
+    internals._adapter.collectPuts = vi
+      .fn()
+      .mockResolvedValue({ puts: [], complete: false, sealed: [] });
+
+    const cap = internals._headRearmCap;
+    for (let i = 0; i < cap + 2; i++) {
+      conn.fire('customers:HEAD_STUCK');
+      await internals._applyChain.get('customers')?.catch(() => {});
+    }
+    // Re-armed while it might still be the transient fresh-connection race, then
+    // gave up and left the collection to anti-entropy — exactly `cap` re-arms,
+    // never an unbounded spin.
+    expect(conn.invalidateReceived).toHaveBeenCalledTimes(cap);
+    await sync.stop();
+  });
+
+  it('keeps re-arming a PARTIAL head while the walk floor still advances', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(new FakeMongoDb(cols) as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+
+    const internals = sync as unknown as {
+      _adapter: { collectPuts: unknown };
+      _applyChain: Map<string, Promise<void>>;
+      _pullRetries: number;
+      _headRearmCap: number;
+    };
+    internals._pullRetries = 0;
+    // Each walk is still partial but seals a NEW ref — the floor advances every
+    // time, the genuine "peer is serving the chain a chunk at a time" case. The
+    // no-progress count must reset on every advance, so re-arming continues well
+    // past the cap and the chain is never abandoned mid-heal.
+    let n = 0;
+    internals._adapter.collectPuts = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve({ puts: [], complete: false, sealed: [`S${n++}`] }),
+      );
+
+    const fires = internals._headRearmCap + 3;
+    for (let i = 0; i < fires; i++) {
+      conn.fire('customers:HEAD_ADV');
+      await internals._applyChain.get('customers')?.catch(() => {});
+    }
+    expect(conn.invalidateReceived).toHaveBeenCalledTimes(fires);
     await sync.stop();
   });
 
@@ -1202,18 +1532,75 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
-  // The tombstone persist is deliberately fire-and-forget: it runs inside
-  // `_onDelete`, before the delete's root re-broadcast, so a rejected write
-  // must be logged and swallowed rather than aborting delete propagation.
-  it('logs and swallows a rejected tombstone persist', async () => {
+  it('a rejected tombstone-log persist is swallowed, not a delete-breaking failure', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
-    const tombstoneLog = new FakeCollection() as FakeCollection & {
-      updateOne: ReturnType<typeof vi.fn>;
+    // Give the tombstone log collection a real `updateOne` that REJECTS —
+    // unlike a missing method (which throws synchronously, the other
+    // defensive branch _recordTombstone guards), this exercises the async
+    // `.catch()` on the persist call itself.
+    const tombstoneLog = {
+      updateOne: vi.fn(async () => {
+        throw new Error('mongo unavailable');
+      }),
     };
-    tombstoneLog.updateOne = vi.fn(() => Promise.reject(new Error('no log')));
     const cols = {
       customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
       sl_edit_tombstones: tombstoneLog,
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols as never) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    await tick(40);
+    // The delete itself still propagates — a failed BEST-EFFORT persist must
+    // never abort the delete it is trying to durably record.
+    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+    expect(tombstoneLog.updateOne).toHaveBeenCalled();
+    await sync.stop();
+  });
+
+  it('a tombstone persist that throws SYNCHRONOUSLY (not a function) is swallowed too', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    // No `updateOne` at all, unlike the rejected-promise case above: calling it
+    // throws synchronously, exercising the outer try/catch rather than the
+    // `.catch()` on the returned promise.
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      sl_edit_tombstones: {},
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols as never) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    await tick(40);
+    // The delete itself still propagates — a synchronously-throwing persist
+    // must never abort the delete it is trying to durably record.
+    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+    await sync.stop();
+  });
+
+  it('records a tombstone even when no tombstone map exists yet for the collection', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
     };
     const conn = mkConnector();
     const sync = new MongoEditSync(
@@ -1224,17 +1611,99 @@ describe('MongoEditSync', () => {
       'p',
     );
     await sync.start();
-    conn.send.mockClear();
-
+    // `_loadTombstones` (run during adopt) always pre-creates an EMPTY map for
+    // every synced collection, so `_recordTombstone`'s own "no map yet" branch
+    // is otherwise unreachable in the same process. Force that exact
+    // first-ever-tombstone state to exercise it directly.
+    (sync as unknown as { _tombstones: Map<string, unknown> })._tombstones.delete(
+      'customers',
+    );
     cols.customers.stream.emit({
       operationType: 'delete',
       documentKey: { _id: new Int32(1) },
     });
     await tick(40);
+    const tombstones = (
+      sync as unknown as { _tombstones: Map<string, Map<string, unknown>> }
+    )._tombstones.get('customers');
+    expect(tombstones?.has('1')).toBe(true);
+    await sync.stop();
+  });
 
-    // The write was attempted and rejected, and the delete still propagated.
-    expect(tombstoneLog.updateOne).toHaveBeenCalledTimes(1);
-    expect(lastRef(conn.send, 'customers')).toMatch(/^customers:/);
+  it('forgetTombstones clears the in-memory guard and the persistent log for that collection', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      products: new FakeCollection([{ _id: new Int32(9), name: 'Z' }]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers', 'products'],
+      'p',
+    );
+    await sync.start();
+    cols.customers.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(1) },
+    });
+    cols.products.stream.emit({
+      operationType: 'delete',
+      documentKey: { _id: new Int32(9) },
+    });
+    await tick(40);
+    const tombLog = new FakeMongoDb(cols).collection('sl_edit_tombstones');
+    // Both collections' deletes persisted a tombstone log entry.
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'customers'),
+    ).toHaveLength(1);
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'products'),
+    ).toHaveLength(1);
+
+    await sync.forgetTombstones('customers');
+
+    expect(
+      (sync as unknown as { _tombstones: Map<string, unknown> })._tombstones.has(
+        'customers',
+      ),
+    ).toBe(false);
+    // Only the forgotten collection's log entries are removed.
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'customers'),
+    ).toHaveLength(0);
+    expect(
+      tombLog.docs.filter((d) => d['collection'] === 'products'),
+    ).toHaveLength(1);
+    await sync.stop();
+  });
+
+  it('forgetTombstones swallows a failed persistent-log delete — the in-memory guard still clears', async () => {
+    const tombstoneLog = {
+      updateOne: vi.fn(async () => ({})),
+      deleteMany: vi.fn(async () => {
+        throw new Error('mongo unavailable');
+      }),
+    };
+    const cols = {
+      customers: new FakeCollection([{ _id: new Int32(1), name: 'A' }]),
+      sl_edit_tombstones: tombstoneLog,
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols as never) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    await expect(sync.forgetTombstones('customers')).resolves.toBeUndefined();
+    expect(tombstoneLog.deleteMany).toHaveBeenCalledWith({
+      collection: 'customers',
+    });
     await sync.stop();
   });
 
@@ -1272,6 +1741,91 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('a collection drop/rename discards the stale manifest and rebuilds it from Mongo, instead of leaving old entries XORed into the root forever', async () => {
+    const cols = {
+      customers: new FakeCollection([
+        { _id: new Int32(1), name: 'Alice' },
+        { _id: new Int32(2), name: 'Bob' },
+      ]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    expect(cols.customers.findCalls).toBe(1);
+
+    // Out-of-band `mongorestore --drop`: Mongo now holds a completely different
+    // set of documents. On the real driver a single-collection `drop` is
+    // ALWAYS immediately followed by `invalidate`, which kills this cursor
+    // server-side — no per-doc delete for the old rows, and no further event
+    // will ever arrive on it, live or not.
+    const deadStream = cols.customers.stream;
+    cols.customers.docs = [{ _id: new Int32(9), name: 'Zoe' }];
+    deadStream.emit({ operationType: 'drop' });
+    deadStream.emit({ operationType: 'invalidate' });
+    await tick();
+
+    // The manifest must be re-derived from Mongo's current content: exactly the
+    // new doc, none of the old ones lingering (which would XOR into the root
+    // forever and never match a peer that only ever saw the new content).
+    const manifest = (
+      sync as unknown as { _manifest: Map<string, Map<string, string>> }
+    )._manifest.get('customers');
+    expect(manifest ? [...manifest.keys()] : []).toEqual(['9']);
+    expect(cols.customers.findCalls).toBe(2);
+
+    // `invalidate` must have opened a FRESH cursor — the real driver never
+    // delivers another event on the dropped one (this is what MongoDB's own
+    // `invalidate` contract guarantees; the point under test is that OUR code
+    // reacts to it by opening a replacement instead of going quiet forever).
+    expect(cols.customers.watchCalls).toBe(2);
+    expect(cols.customers.stream).not.toBe(deadStream);
+
+    // A live change arriving on the new cursor still reaches the manifest —
+    // sync did not silently stop after the drop.
+    cols.customers.stream.emit({
+      operationType: 'insert',
+      fullDocument: { _id: new Int32(11), name: 'Nadia' },
+    });
+    await tick();
+    expect(
+      (
+        sync as unknown as { _manifest: Map<string, Map<string, string>> }
+      )._manifest.get('customers')?.has('11'),
+    ).toBe(true);
+
+    // The vanished sliceIds (1, 2) must be tombstoned, not just dropped — a
+    // peer that still holds them needs to be TOLD to delete them, or it
+    // additively backfills them right back the moment it sees this node as
+    // "missing" content it used to have (the exact resurrection this guards
+    // against).
+    const tombstones = (
+      sync as unknown as { _tombstones: Map<string, Map<string, unknown>> }
+    )._tombstones.get('customers');
+    expect(tombstones ? [...tombstones.keys()].sort() : []).toEqual(['1', '2']);
+
+    // A `rename` gets the same treatment as `drop` (both carry the same "the
+    // old content is gone" meaning); its own trailing `invalidate` only
+    // reopens the cursor, it does not re-trigger the scan this line already did.
+    cols.customers.docs = [{ _id: new Int32(10), name: 'Yara' }];
+    cols.customers.stream.emit({ operationType: 'rename' });
+    cols.customers.stream.emit({ operationType: 'invalidate' });
+    await tick();
+    expect(cols.customers.findCalls).toBe(3);
+    expect(cols.customers.watchCalls).toBe(3);
+    const manifest2 = (
+      sync as unknown as { _manifest: Map<string, Map<string, string>> }
+    )._manifest.get('customers');
+    expect(manifest2 ? [...manifest2.keys()] : []).toEqual(['10']);
+
+    await sync.stop();
+  });
+
   it('blocks a mass-delete burst (guard) and cancels timers on stop', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
     process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';
@@ -1298,6 +1852,17 @@ describe('MongoEditSync', () => {
     }
     await tick(40);
     expect(conn.send).not.toHaveBeenCalled();
+    // A blocked id must not be tombstoned either — that would leak the
+    // "blocked" delete to a peer via anti-entropy's own bucket-serving
+    // (`hasTombstone`), which the guard does not gate at all. Reproduced
+    // live: an 8-doc burst the guard correctly logged BLOCKED still cost the
+    // peer its first id, tombstoned the instant the change-stream event
+    // arrived — well before the debounced guard decision even ran.
+    expect(
+      (sync as unknown as { _tombstones: Map<string, Map<string, unknown>> })
+        ._tombstones.get('customers')
+        ?.has('0'),
+    ).toBe(false);
     await sync.stop();
   });
 

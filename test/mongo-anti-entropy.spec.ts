@@ -26,6 +26,7 @@ class FakeHost implements AntiEntropyHost {
   served: Array<{ collection: string; ids: string[] }> = [];
   pulled: Array<{ collection: string; hashes: string[] }> = [];
   pushedTombstones: Array<{ collection: string; ids: string[] }> = [];
+  droppedTombstones: Array<{ collection: string; ids: string[] }> = [];
   serveResult: string[] = [];
   syncable = new Set<string>(['customers']);
   readyCollections = new Set<string>(['customers']);
@@ -55,12 +56,20 @@ class FakeHost implements AntiEntropyHost {
   async pushTombstones(collection: string, ids: string[]): Promise<void> {
     this.pushedTombstones.push({ collection, ids });
   }
+  async applyPeerTombstones(collection: string, ids: string[]): Promise<void> {
+    this.droppedTombstones.push({ collection, ids });
+  }
   async serveComponents(collection: string, ids: string[]): Promise<string[]> {
     this.served.push({ collection, ids });
     return this.serveResult;
   }
-  async pullAndApply(collection: string, hashes: string[]): Promise<void> {
+  /** Overridable per test; defaults to "every hash resolved" (no retry needed). */
+  pullAndApplyResult?: (hashes: string[]) => number;
+  async pullAndApply(collection: string, hashes: string[]): Promise<number> {
     this.pulled.push({ collection, hashes });
+    return this.pullAndApplyResult
+      ? this.pullAndApplyResult(hashes)
+      : hashes.length;
   }
   syncs(collection: string): boolean {
     return this.syncable.has(collection);
@@ -113,6 +122,8 @@ describe('MongoAntiEntropy', () => {
     ae = new MongoAntiEntropy(host);
     delete process.env['SL_EDIT_AE_MAX_BUCKETS'];
     delete process.env['SL_EDIT_AE_MAX_DOCS'];
+    delete process.env['SL_EDIT_AE_PULL_RETRIES'];
+    delete process.env['SL_EDIT_AE_PULL_BACKOFF_MS'];
     delete process.env['SL_EDIT_AE_MSG_BYTES'];
     delete process.env['SL_EDIT_AE_HASHES_PER_MSG'];
   });
@@ -250,6 +261,18 @@ describe('MongoAntiEntropy', () => {
       await ae.onMessage(msg(AEH, `unsynced|${JSON.stringify(['x'])}`));
       expect(host.pulled).toHaveLength(0);
     });
+
+    it('AEH -> makes exactly one pull attempt and reports what it applied, even when short', async () => {
+      // Deliberately NOT retried — see `_onHashes`'s doc comment: a hash offer
+      // can predate a delete the origin has since recorded, and retrying
+      // immediately turns a rare "caught mid-reconnect" race into a reliable
+      // resurrection. One attempt per AEH; the bucket's own rotation is what
+      // gives a genuinely transient miss its next try.
+      host.pullAndApplyResult = () => 0;
+      await ae.onMessage(msg(AEH, `${COLL}|${JSON.stringify(['h'])}`));
+      expect(host.pulled).toHaveLength(1);
+      expect(host.logs.at(-1)).toBe(`ae ${COLL} <- AEH pull 1 applied=0`);
+    });
   });
 
   describe('requester half', () => {
@@ -286,6 +309,41 @@ describe('MongoAntiEntropy', () => {
       await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
       const asked = host.lastBodyOf(AEG)!.split('|')[1].split(',');
       expect(asked).toHaveLength(4);
+    });
+
+    it('AER rotates the requested window across rounds instead of always asking for the lowest indices', async () => {
+      // Ten buckets differ, the cap only covers four per round — a fixed
+      // slice would ask for [0,1,2,3] forever and never reach 4..9.
+      process.env['SL_EDIT_AE_MAX_BUCKETS'] = '4';
+      for (let b = 0; b < 10; b++) differAt(b);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+
+      ae.trigger(COLL);
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      expect(host.lastBodyOf(AEG)!.split('|')[1].split(',').map(Number)).toEqual([
+        0, 1, 2, 3,
+      ]);
+      // Drain round 1's pending buckets (empty entries, nothing wanted) so the
+      // round finishes and a new one can start.
+      await ae.onMessage(
+        msg(AEE, `${COLL}|${JSON.stringify([[0, []], [1, []], [2, []], [3, []]])}`),
+      );
+
+      ae.trigger(COLL);
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      expect(host.lastBodyOf(AEG)!.split('|')[1].split(',').map(Number)).toEqual([
+        4, 5, 6, 7,
+      ]);
+      await ae.onMessage(
+        msg(AEE, `${COLL}|${JSON.stringify([[4, []], [5, []], [6, []], [7, []]])}`),
+      );
+
+      // Wraps around once the window passes the end of the differing set.
+      ae.trigger(COLL);
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      expect(host.lastBodyOf(AEG)!.split('|')[1].split(',').map(Number)).toEqual([
+        8, 9, 0, 1,
+      ]);
     });
 
     it('AER with no session (never triggered) is ignored', async () => {
@@ -353,17 +411,63 @@ describe('MongoAntiEntropy', () => {
       expect(host.countOf(AEW)).toBe(0);
     });
 
-    it('AEE -> ignores an empty-hash entry (a manifest tombstone marker)', async () => {
+    it('AEE -> ignores a peer tombstone for a doc we do not hold', async () => {
       ae.trigger(COLL);
       const bucket = bucketOf('gone');
       host.roots[bucket] = 'f'.repeat(64);
       const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
       await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      // We do NOT hold 'gone' -> the peer's tombstone is a no-op for us.
       const entries: Array<[number, Array<[string, string]>]> = [
         [bucket, [['gone', '']]],
       ];
       await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
       expect(host.countOf(AEW)).toBe(0);
+      expect(host.droppedTombstones).toEqual([]);
+    });
+
+    it('AEE -> drops a doc we hold live when the peer advertises its tombstone (superset convergence)', async () => {
+      ae.trigger(COLL);
+      const bucket = bucketOf('orphan');
+      host.roots[bucket] = 'f'.repeat(64);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      // We still hold 'orphan' live; the peer deleted it (empty-hash entry).
+      host.manifest.set('orphan', 'oh');
+      const entries: Array<[number, Array<[string, string]>]> = [
+        [bucket, [['orphan', '']]],
+      ];
+      await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
+      expect(host.droppedTombstones).toEqual([
+        { collection: COLL, ids: ['orphan'] },
+      ]);
+      // A tombstone is never pulled as a body.
+      expect(host.countOf(AEW)).toBe(0);
+    });
+
+    it('AEE -> caps local tombstone drops per round via SL_EDIT_AE_MAX_DROPS', async () => {
+      process.env['SL_EDIT_AE_MAX_DROPS'] = '2';
+      ae.trigger(COLL);
+      const ids = ['o0', 'o1', 'o2', 'o3'];
+      for (const id of ids) {
+        host.roots[bucketOf(id)] = 'f'.repeat(64);
+        host.manifest.set(id, `${id}h`);
+      }
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      const byBucket = new Map<number, Array<[string, string]>>();
+      for (const id of ids) {
+        const b = bucketOf(id);
+        const list = byBucket.get(b) ?? [];
+        list.push([id, '']);
+        byBucket.set(b, list);
+      }
+      await ae.onMessage(
+        msg(AEE, `${COLL}|${JSON.stringify([...byBucket.entries()])}`),
+      );
+      expect(host.droppedTombstones).toHaveLength(1);
+      expect(host.droppedTombstones[0].ids).toHaveLength(2);
+      delete process.env['SL_EDIT_AE_MAX_DROPS'];
     });
 
     it('AEE with no session is ignored', async () => {
