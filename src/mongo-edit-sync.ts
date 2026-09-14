@@ -1641,6 +1641,17 @@ export class MongoEditSync {
         // next root visibly diverge, which arms the backfill. Same guard as
         // the head branch, so a burst of roots starts one adoption.
         if (!this._shouldSync?.(collection)) return;
+        // Arm the retry loop BEFORE adopting. The peer re-announces the SAME
+        // root string every heartbeat, so once this copy sits in the received-
+        // dedup every later one is swallowed and `_onRef` is never called for
+        // this collection again. The adoption below then gets exactly ONE
+        // backfill trigger, and on the lab that one round is routinely lost —
+        // it races the peer's own cold-start, which drops a request from a node
+        // that is not `ready` yet. Adoption succeeded and nothing followed it:
+        // both nodes watching the collection, roots visibly different, no
+        // traffic. Clearing the ref restores the ~heartbeat-interval retry the
+        // known-collection path below already relies on.
+        this._connector.invalidateReceived?.(ref);
         if (!this._adoptingOnRef.has(collection)) {
           this._adoptingOnRef.add(collection);
           this._log(`recv root ${collection} unknown here -> adopting on demand`);
