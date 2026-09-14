@@ -508,9 +508,17 @@ export class MeshConnector {
   }
 
   receive(ref: string): void {
+    // Not listening yet = not connected yet, and the relay does not deliver to
+    // a socket that is not there. Recording such a ref as "received" gave this
+    // node a permanent dedup entry for a message it never saw: the sender's
+    // heartbeat re-announces the SAME root every tick, so every later copy was
+    // swallowed and the node stayed diverged for the rest of the run. That is
+    // an artifact of a bus that can reach a node before its sync starts, not
+    // something a real connector can do.
+    if (!this._cb) return;
     if (this._received.has(ref)) return;
     this._received.add(ref);
-    void this._cb?.(ref);
+    void this._cb(ref);
   }
 }
 
@@ -548,6 +556,15 @@ export const buildMesh = async (
      * anti-entropy backfill (not head-pull) can reconcile to a peer.
      */
     seed?: (nodes: MeshNode[]) => void | Promise<void>;
+    /**
+     * Per-node override of the synced set, so a mesh can be ASYMMETRIC — one
+     * node holding a collection the others have never heard of. That is the
+     * ordinary state of affairs in Mongo, where a collection springs into
+     * existence on its first write and therefore exists on exactly one node.
+     */
+    collectionsFor?: (index: number) => string[];
+    /** The consumer-side syncable filter (`isSyncableCollection` in the app). */
+    shouldSync?: (collection: string) => boolean;
   },
 ): Promise<{ nodes: MeshNode[]; stop: () => Promise<void> }> => {
   const locals: IoMem[] = [];
@@ -578,8 +595,11 @@ export const buildMesh = async (
       mongo as never,
       db,
       connector,
-      collections,
+      opts?.collectionsFor?.(i) ?? collections,
       'p',
+      undefined,
+      undefined,
+      opts?.shouldSync,
     );
     nodes.push({
       id,

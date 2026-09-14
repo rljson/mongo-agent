@@ -1621,7 +1621,38 @@ export class MongoEditSync {
       if (i < 0) return;
       const collection = body.slice(0, i);
       const root = body.slice(i + 1);
-      if (!this._collections.has(collection)) return;
+      if (!this._collections.has(collection)) {
+        // A collection that exists only on the PEER, announced by its ROOT.
+        // The head branch below already adopts on demand; this branch used to
+        // `return`, and that asymmetry was a permanent data loss:
+        //
+        // A document written to a collection BEFORE this sync adopted it is
+        // baseline. Baseline never enters an edit chain (that is the whole
+        // point — see `fullSnapshot`), so the origin announces it as a ROOT
+        // and never as a head. If the peers do not have the collection at all
+        // — the ordinary case, because Mongo creates a collection on its first
+        // write, so only the writing node has it — every peer dropped that
+        // root here. No adoption, so no manifest; no manifest, so no
+        // divergence; no divergence, so the backfill that exists precisely to
+        // heal baseline-only data was never triggered. The document stayed on
+        // one machine forever, with every node reporting a healthy sync.
+        //
+        // Adopting makes the collection real here (empty), which makes the
+        // next root visibly diverge, which arms the backfill. Same guard as
+        // the head branch, so a burst of roots starts one adoption.
+        if (!this._shouldSync?.(collection)) return;
+        if (!this._adoptingOnRef.has(collection)) {
+          this._adoptingOnRef.add(collection);
+          this._log(`recv root ${collection} unknown here -> adopting on demand`);
+          void this._adoptCollection(collection)
+            .then(() => this._maybeTriggerAe(collection))
+            .catch((e) =>
+              this._log(`adopt-on-root ${collection} failed: ${String(e)}`),
+            )
+            .finally(() => this._adoptingOnRef.delete(collection));
+        }
+        return;
+      }
       this._log(`recv root ${collection} = ${root.slice(0, 12)}`);
       // A peer reporting a root different from ours means someone is ahead of
       // (or behind) us. Re-drive the last head we saw: its pull may have come
