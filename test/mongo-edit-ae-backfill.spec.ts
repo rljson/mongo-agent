@@ -85,6 +85,62 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     expect(state[oid]).toMatchObject({ name: 'ObjectIdish' });
   }, 40_000);
 
+  it('backfills into a node that does not have the collection at all', async () => {
+    // The lab failure, reduced. Mongo creates a collection on its FIRST WRITE,
+    // so a brand-new collection exists on exactly one machine — the one that
+    // was written to. Everywhere else it does not exist at all.
+    //
+    // That first document is baseline on the writing node (it was there before
+    // the sync adopted the collection), so the writer announces a ROOT and
+    // never a head. The peers, not having the collection, used to drop that
+    // root unread: no adoption, so no manifest; no manifest, so no divergence;
+    // no divergence, so the backfill that exists for exactly this case never
+    // ran. The document stayed on one machine forever while every node
+    // reported a perfectly healthy sync.
+    //
+    // Asymmetric mesh, because a symmetric one cannot express the bug: give B
+    // the collection and it converges even without the fix.
+    const { nodes, stop } = await buildMesh(2, [], {
+      collectionsFor: (i) => (i === 0 ? [COLLECTION] : []),
+      shouldSync: () => true,
+      seed: (ns) => {
+        ns[0].mongo
+          .collection(COLLECTION)
+          .docs.set('990900001', { _id: '990900001', name: 'First write' });
+      },
+    });
+    stopMesh = stop;
+
+    const state = await converge(nodes, COLLECTION);
+    expect(
+      state['990900001'],
+      'the peer never adopted the collection, so the doc never left node A',
+    ).toMatchObject({ _id: '990900001', name: 'First write' });
+  }, 40_000);
+
+  it('does not adopt an unknown collection the syncable filter rejects', async () => {
+    // The same path, refused. `shouldSync` is the node's own exclusion list
+    // (`__`-prefixed internals, per-machine settings); a root announcing one of
+    // those must not conjure the collection here.
+    const { nodes, stop } = await buildMesh(2, [], {
+      collectionsFor: (i) => (i === 0 ? [COLLECTION] : []),
+      shouldSync: () => false,
+      seed: (ns) => {
+        ns[0].mongo
+          .collection(COLLECTION)
+          .docs.set('990900002', { _id: '990900002', name: 'Excluded' });
+      },
+    });
+    stopMesh = stop;
+
+    await settle(nodes);
+    expect(docsOf(nodes[1], COLLECTION)).toEqual({});
+    expect(
+      (nodes[1].sync as unknown as { _collections: Set<string> })._collections
+        .has(COLLECTION),
+    ).toBe(false);
+  }, 40_000);
+
   it('backfills many baseline docs and still converges on later live edits', async () => {
     const seeded: Record<string, unknown> = {};
     const { nodes, stop } = await buildMesh(2, [COLLECTION], {

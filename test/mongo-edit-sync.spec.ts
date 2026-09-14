@@ -897,6 +897,53 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('releases the guard when an adoption driven by a ROOT fails', async () => {
+    // The root branch adopts on demand exactly like the head branch above, and
+    // needs the same release: a collection whose first adoption attempt throws
+    // must be retried on the next root, not blocked for the process lifetime.
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => true,
+    );
+    await sync.start();
+    (sync as unknown as { _adoptCollection: unknown })._adoptCollection = vi
+      .fn()
+      .mockRejectedValue(new Error('cake init failed'));
+
+    conn.fire('~R~brokenColl:deadbeef');
+    await tick(60);
+    const inflight = (sync as unknown as { _adoptingOnRef: Set<string> })
+      ._adoptingOnRef;
+    expect(inflight.has('brokenColl')).toBe(false);
+    await sync.stop();
+  });
+
+  it('drops a ROOT for an unknown collection when no predicate is supplied', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    conn.fire('~R~unknownColl:deadbeef');
+    await tick(40);
+    const known = (sync as unknown as { _collections: Set<string> })._collections;
+    expect(known.has('unknownColl')).toBe(false);
+    await sync.stop();
+  });
+
   it('does not adopt a peer collection the filter rejects', async () => {
     const cols = { customers: new FakeCollection([]) };
     const conn = mkConnector();
