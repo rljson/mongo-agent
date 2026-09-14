@@ -897,6 +897,59 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('arms the retry loop when a ROOT adopts an unknown collection', async () => {
+    // Without this the adoption gets exactly one backfill trigger, ever: the
+    // peer re-announces the same root string every heartbeat, so the first copy
+    // sitting in the received-dedup swallows every later one and `_onRef` never
+    // runs for this collection again. Observed on the lab as an adoption that
+    // succeeded and was followed by nothing at all.
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => true,
+    );
+    await sync.start();
+    conn.invalidateReceived.mockClear();
+
+    const ref = '~R~newColl:deadbeef';
+    conn.fire(ref);
+    await tick(60);
+    expect(conn.invalidateReceived).toHaveBeenCalledWith(ref);
+    await sync.stop();
+  });
+
+  it('does not arm a retry for a ROOT the syncable filter rejects', async () => {
+    // A collection this node excludes is not a divergence to heal, so its root
+    // stays deduped — no per-heartbeat wake-up for something we will never
+    // adopt.
+    const cols = { customers: new FakeCollection([]) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+      undefined,
+      undefined,
+      () => false,
+    );
+    await sync.start();
+    conn.invalidateReceived.mockClear();
+
+    conn.fire('~R~sync_internal:deadbeef');
+    await tick(60);
+    expect(conn.invalidateReceived).not.toHaveBeenCalled();
+    await sync.stop();
+  });
+
   it('releases the guard when an adoption driven by a ROOT fails', async () => {
     // The root branch adopts on demand exactly like the head branch above, and
     // needs the same release: a collection whose first adoption attempt throws
