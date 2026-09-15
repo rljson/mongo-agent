@@ -267,6 +267,61 @@ describe('MongoEditSync — anti-entropy host surface', () => {
     });
   });
 
+  describe('delete clears echo suppression', () => {
+    it('re-inserting the SAME id with the SAME content still broadcasts', async () => {
+      // The live failure, in order: a peer's doc is applied here, the doc is
+      // deleted locally, and the next run re-inserts the identical document.
+      // The stale suppression entry made `_onChange` call that insert an echo,
+      // so the head was never sent and the doc existed on one node only —
+      // `doc e2eProbe/990900002 not found on [every peer]`, every run.
+      const doc = { _id: 1, name: 'x', v: 'v1' };
+      const { sync, priv, conn } = await mkSync([]);
+      stop = () => sync.stop();
+      const p = priv as unknown as {
+        _appliedHash: Map<string, string>;
+        _key: (c: string, id: unknown) => string;
+        _onDelete: (c: string, change: Record<string, unknown>) => void;
+        _onChange: (c: string, change: Record<string, unknown>) => Promise<void>;
+      };
+      const key = p._key(COLL, 1);
+
+      // 1. applied from a peer
+      p._appliedHash.set(key, docHash(doc as never));
+      // 2. deleted locally (NOT an echo — no peer tombstone was applied)
+      p._onDelete(COLL, { documentKey: { _id: 1 } });
+      expect(p._appliedHash.has(key)).toBe(false);
+
+      // 3. re-inserted with byte-identical content
+      conn.send.mockClear();
+      await p._onChange(COLL, { operationType: 'insert', fullDocument: doc });
+
+      // 4. the head goes out, so peers can converge
+      const refs = conn.send.mock.calls.map((c) => c[0] as string);
+      expect(refs.some((r) => r.startsWith(`${COLL}:`))).toBe(true);
+    });
+
+    it('still treats a real peer-delete echo as an echo', async () => {
+      const { sync, priv, conn } = await mkSync([]);
+      stop = () => sync.stop();
+      const p = priv as unknown as {
+        _appliedHash: Map<string, string>;
+        _key: (c: string, id: unknown) => string;
+        _tombstone: (id: unknown) => Record<string, unknown>;
+        _pendingDeletes: Map<string, Set<unknown>>;
+        _onDelete: (c: string, change: Record<string, unknown>) => void;
+      };
+      const key = p._key(COLL, 2);
+      // A delete we applied because a PEER deleted it must still not be
+      // re-propagated — pruning the entry must not cost us that.
+      p._appliedHash.set(key, docHash(p._tombstone(2) as never));
+      conn.send.mockClear();
+      p._onDelete(COLL, { documentKey: { _id: 2 } });
+      expect(p._appliedHash.has(key)).toBe(false);
+      // Echoes return before the delete is queued for propagation.
+      expect(p._pendingDeletes.get(COLL)?.has(2) ?? false).toBe(false);
+    });
+  });
+
   describe('_loadTombstones', () => {
     it('is a no-op when the tombstone log is switched off', async () => {
       process.env['SL_EDIT_TOMBSTONE_LOG'] = '0';

@@ -1824,8 +1824,26 @@ export class MongoEditSync {
     // the map does not retain a slot per deleted _id forever.
     const key = this._key(collection, id);
     const tombHash = docHash(this._tombstone(id));
-    if (this._appliedHash.get(key) === tombHash) {
-      this._appliedHash.delete(key);
+    const wasEcho = this._appliedHash.get(key) === tombHash;
+    // Drop the echo-suppression entry for EVERY delete, not just an echoed one.
+    //
+    // It used to be pruned only on the echo branch, so a delete we performed
+    // ourselves left the entry holding the DOCUMENT's content hash. Re-inserting
+    // that same `_id` with the same content then hashed to the same value,
+    // `_onChange` matched it against this stale entry, called our own brand-new
+    // write an echo of a peer's, and returned without broadcasting the head. The
+    // document existed on the writer and nowhere else, and no peer had anything
+    // to converge toward.
+    //
+    // Repeating content is not exotic: a field set back to a previous value, a
+    // deleted record restored, and every E2E probe — which is how this was
+    // found. All five mongo recipes reuse fixed ids with fixed payloads, so
+    // after their first run the next insert of each id was silently swallowed.
+    //
+    // The document is gone; a hash recorded to suppress its echo cannot be
+    // anything but stale.
+    this._appliedHash.delete(key);
+    if (wasEcho) {
       this._log(`delete ${collection}/${String(id)} = echo, skip`);
       return;
     }
