@@ -436,6 +436,23 @@ export class MongoEditSync {
       : 45_000;
   /** When any ref last arrived; `0` until the first, which arms the watchdog. */
   private _lastInboundAt = 0;
+  /**
+   * Watchdog window (ms) for a node that has NEVER received a ref, measured
+   * from the end of cold start rather than from the last inbound.
+   *
+   * Deliberately longer than {@link _rxWatchdogMs}: this window is the one a
+   * genuinely lone node sits in permanently, so the reconnect it produces
+   * should be occasional, not a loop. Long enough that a fleet which is merely
+   * slow to say anything is not yanked; short enough that a deaf node heals in
+   * minutes rather than never.
+   */
+  /* v8 ignore next 4 -- @preserve cold rx-watchdog window, env-overridable */
+  private readonly _coldRxWatchdogMs =
+    process.env['SL_EDIT_RX_COLD_WATCHDOG_MS'] !== undefined
+      ? Number(process.env['SL_EDIT_RX_COLD_WATCHDOG_MS'])
+      : 180_000;
+  /** When cold start finished — the clock the cold window runs against. */
+  private _coldStartAt = 0;
   /** Earliest time the rx watchdog may force another reconnect (cooldown). */
   private _rxReconnectCooldownUntil = 0;
   /* v8 ignore next -- @preserve collection-discovery interval, env-overridable */
@@ -1565,6 +1582,7 @@ export class MongoEditSync {
     // stays gated so a small collection's backfill cannot starve a mega
     // collection still hashing its baseline.
     this._coldStartComplete = true;
+    this._coldStartAt = Date.now();
     // From here this node can say what it holds — including "nothing", which
     // is an answer and not an absence.
     this._started = true;
@@ -1612,12 +1630,30 @@ export class MongoEditSync {
     const reconnect = this._connector.reconnect;
     if (!reconnect) return;
     const now = Date.now();
-    if (this._lastInboundAt === 0) return; // never heard a peer — maybe alone
-    if (now - this._lastInboundAt <= this._rxWatchdogMs) return;
+    // A node that has NEVER received a ref used to be exempt here, on the
+    // reasoning that it might simply be alone. But "alone" and "connected to a
+    // fleet and deaf" look identical from inside, and the exemption applied to
+    // the worse of the two: a node whose receive path was broken from its first
+    // moment could never arm the watchdog, so it never reconnected. Seen live —
+    // a registered client of the hub's route (the hub counted it among four),
+    // sending fine, zero refs in, its content root stuck at all-zero while the
+    // fleet moved on. Anti-entropy cannot rescue that either, because AE is
+    // driven by noticing a PEER's root differs and this node sees no peer at
+    // all.
+    //
+    // So both cases are watched now, and the difference is only the window: a
+    // node that has heard the fleet is judged on the short one, and a node that
+    // never has waits out the long one before we spend a reconnect on it. The
+    // cost to a genuinely lone node is one reconnect per cold window.
+    const heardFleet = this._lastInboundAt !== 0;
+    const since = heardFleet ? this._lastInboundAt : this._coldStartAt;
+    const window = heardFleet ? this._rxWatchdogMs : this._coldRxWatchdogMs;
+    if (window <= 0) return;
+    if (now - since <= window) return;
     if (now < this._rxReconnectCooldownUntil) return;
     this._log(
-      `rx-watchdog: no inbound for ` +
-        `${Math.round((now - this._lastInboundAt) / 1000)}s -> reconnecting socket`,
+      `rx-watchdog: no inbound for ${Math.round((now - since) / 1000)}s` +
+        `${heardFleet ? '' : ' (none EVER received)'} -> reconnecting socket`,
     );
     try {
       reconnect.call(this._connector);
@@ -1626,8 +1662,12 @@ export class MongoEditSync {
     }
     // Re-arm from now and hold off at least one window (min 30s) so the fresh
     // transport gets time to resubscribe and resync before we could yank again.
-    this._lastInboundAt = now;
-    this._rxReconnectCooldownUntil = now + Math.max(this._rxWatchdogMs, 30_000);
+    // Re-arm BOTH clocks: `_lastInboundAt` stays 0 for a node that has still
+    // heard nothing, so the cold window has to be pushed forward too or the
+    // next heartbeat would reconnect again immediately.
+    if (heardFleet) this._lastInboundAt = now;
+    else this._coldStartAt = now;
+    this._rxReconnectCooldownUntil = now + Math.max(window, 30_000);
   }
 
   private async _onChange(
