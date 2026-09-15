@@ -53,9 +53,18 @@
 // each upserted doc into the content root.
 //
 // SAFETY
-// - ADDITIVE ONLY: we only ever pull docs the peer has and we lack; we never
-//   delete a peer's doc from here. Bulk deletes stay the job of the tombstone
-//   edit path + its mass-delete circuit breaker.
+// - PULL IS ADDITIVE: the body-pull path only ever fetches docs the peer has and
+//   we lack; it never overwrites live content. Bulk deletes stay the job of the
+//   tombstone edit path + its mass-delete circuit breaker.
+// - DELETE-WINS, BOTH DIRECTIONS (superset convergence): a live doc on one node
+//   that the other has TOMBSTONED must be dropped, or the two sit at different
+//   roots forever whenever a delete head is missed. Each side advertises its
+//   tombstones as an empty-hash bucket entry; a requester that still holds such a
+//   doc removes it locally (AEE → `applyPeerTombstones`), and a requester missing
+//   a doc it has itself tombstoned re-pushes that tombstone (AEE → `redelete`).
+//   The local removal runs through the host's ordinary delete path, so its
+//   re-propagation is still bounded by the mass-delete circuit breaker, and a
+//   per-round drop cap (`SL_EDIT_AE_MAX_DROPS`) bounds one pass.
 // - NO RESURRECTION: before asking to replay a missing doc we consult a
 //   persistent local tombstone log. A doc we deliberately deleted is NOT pulled
 //   back; instead we re-broadcast its tombstone so the delete wins on the peer.
@@ -109,6 +118,13 @@ export interface AntiEntropyHost {
   /** Re-broadcast tombstones for sliceIds we deleted (make delete win). */
   pushTombstones(collection: string, sliceIds: string[]): Promise<void>;
   /**
+   * Apply a PEER's tombstones locally: delete sliceIds we still hold live but
+   * the peer has deleted (superset convergence — the peer's delete wins). The
+   * host's own change stream records our tombstone and re-propagates the delete
+   * (under its mass-delete guard), so this only performs the local removal.
+   */
+  applyPeerTombstones(collection: string, sliceIds: string[]): Promise<void>;
+  /**
    * Read these sliceIds from Mongo, publish them as content-addressed components
    * for pull, and return the component row hashes the requester can pull by.
    */
@@ -116,8 +132,13 @@ export interface AntiEntropyHost {
   /**
    * Pull these component hashes over the flow-controlled read path and upsert
    * the decoded docs into Mongo (manifest-level, change-stream echo suppressed).
+   * @returns How many of the requested hashes actually resolved and were
+   *   applied — the caller retries the remainder (see `_onHashes`) because a
+   *   single relayed read can come back short with nothing thrown (a transient
+   *   peer-read hiccup, not a real absence), and there is otherwise no signal
+   *   to tell the two apart.
    */
-  pullAndApply(collection: string, hashes: string[]): Promise<void>;
+  pullAndApply(collection: string, hashes: string[]): Promise<number>;
   /** Whether a collection is one we sync (drop protocol refs for others). */
   syncs(collection: string): boolean;
   /**
@@ -163,6 +184,17 @@ export class MongoAntiEntropy {
   private readonly _sessions = new Map<string, Session>();
   /** Collections currently mid-round (suppresses re-trigger churn). */
   private readonly _busy = new Set<string>();
+  /**
+   * Per-collection rotation offset into the sorted `differing` bucket list.
+   * Without it, `_onRoots` always serves buckets `[0, cap)` — the LOWEST
+   * indices, every round. A handful of buckets that stay divergent (a stale
+   * entry neither side ever resolves, or genuinely never-ending churn) then
+   * permanently occupy the whole per-round cap, and the other thousands of
+   * buckets — including a fresh single-doc write that happens to land outside
+   * the first `cap` — are never requested again. Rotating the starting point
+   * each round guarantees every bucket eventually gets a turn.
+   */
+  private readonly _bucketCursor = new Map<string, number>();
   /**
    * Monotonic per-message nonce. The sync connector DEDUPS identical ref
    * strings (both the send side and the receiver's seen-set — the mechanism
@@ -341,6 +373,20 @@ export class MongoAntiEntropy {
   /**
    * AEH: a peer offered the component hashes for docs we asked for. Pull the
    * bodies by hash over the flow-controlled read path and upsert them.
+   *
+   * ONE attempt, deliberately not retried here. A retry loop sounds like a
+   * pure win for a relayed read that comes back short with nothing thrown
+   * (see `pullAndApply`'s doc) — but this hash offer can predate a delete: the
+   * AE *control* messages (AEQ..AEH) ride the same ref bus as heads/roots and
+   * are NOT blocked by a reader that is offline for BODY reads only, so a
+   * requester can hold a hash offered while a doc was still live and only
+   * complete the body pull once it reconnects — after the origin deleted it.
+   * A single attempt right at reconnect already has a real chance of hitting
+   * that window; retrying immediately turns "rare" into "reliable", which is
+   * how a delete-then-recreate test started resurrecting the delete's victim.
+   * Left to the bucket's normal rotation (see `_bucketCursor`) instead: the
+   * peer's NEXT answer reflects its post-delete tombstone, and `_onEntries`'s
+   * `hasTombstone` check keeps that round from re-asking for it at all.
    * @param body - The message body `<collection>|<json hash array>`.
    */
   private async _onHashes(body: string): Promise<void> {
@@ -348,8 +394,10 @@ export class MongoAntiEntropy {
     if (!this._host.syncs(collection)) return;
     const hashes = JSON.parse(json) as string[];
     if (hashes.length === 0) return;
-    await this._host.pullAndApply(collection, hashes);
-    this._host.log(`ae ${collection} <- AEH pull ${hashes.length}`);
+    const applied = await this._host.pullAndApply(collection, hashes);
+    this._host.log(
+      `ae ${collection} <- AEH pull ${hashes.length} applied=${applied}`,
+    );
   }
 
   // ------ requester half ------
@@ -382,7 +430,21 @@ export class MongoAntiEntropy {
     // capped chunk, and the still-differing remainder re-triggers next round,
     // converging incrementally (mirrors the per-round doc cap in `_complete`).
     const cap = Number(process.env['SL_EDIT_AE_MAX_BUCKETS']) || 128;
-    const chunk = differing.length > cap ? differing.slice(0, cap) : differing;
+    let chunk: number[];
+    if (differing.length > cap) {
+      // Rotate the window through `differing` each round instead of always
+      // starting at index 0 — see `_bucketCursor`'s doc comment for why a
+      // fixed slice starves every bucket past the cap.
+      const start = (this._bucketCursor.get(collection) ?? 0) % differing.length;
+      chunk = [
+        ...differing.slice(start),
+        ...differing.slice(0, start),
+      ].slice(0, cap);
+      this._bucketCursor.set(collection, start + chunk.length);
+    } else {
+      chunk = differing;
+      this._bucketCursor.delete(collection);
+    }
     for (const b of chunk) session.pending.add(b);
     this._host.log(
       `ae ${collection} <- AER: ${differing.length} differing bucket(s) -> AEG ${chunk.length}`,
@@ -404,14 +466,22 @@ export class MongoAntiEntropy {
     >;
     const want: string[] = [];
     const redelete: string[] = [];
+    const dropLocal: string[] = [];
     for (const [bucket, entries] of batch) {
       for (const [sliceId, hash] of entries) {
         const ours = this._host.manifestHash(collection, sliceId);
+        // An empty hash marks a TOMBSTONE the peer advertises. If we still hold
+        // the doc live, the peer's delete wins and we drop it locally — this is
+        // the only path that converges a SUPERSET node down (a doc whose delete
+        // head never reached us). If we do not hold it, there is nothing to do.
+        if (hash === '') {
+          if (ours !== undefined) dropLocal.push(sliceId);
+          continue;
+        }
         // Only ADD what we are missing. A sliceId we already hold (even at a
         // different hash — that is a concurrent-edit conflict handled
         // elsewhere) is left alone: backfill never overwrites live content.
         if (ours !== undefined) continue;
-        if (hash === '') continue;
         if (this._host.hasTombstone(collection, sliceId)) redelete.push(sliceId);
         else want.push(sliceId);
       }
@@ -423,10 +493,21 @@ export class MongoAntiEntropy {
     // buckets simply re-trigger next round. Each arriving batch makes forward
     // progress on its own.
     this._host.log(
-      `ae ${collection} <- AEE ${batch.length}b pending=${session.pending.size} want+=${want.length}`,
+      `ae ${collection} <- AEE ${batch.length}b pending=${session.pending.size} ` +
+        `want+=${want.length} drop+=${dropLocal.length}`,
     );
     if (redelete.length > 0) {
       void this._host.pushTombstones(collection, redelete);
+    }
+    if (dropLocal.length > 0) {
+      // Bound how many local drops one round applies, as defence-in-depth: a
+      // peer's tombstone set is already bounded by its real deletes, but a
+      // capped slice keeps a pathological advertisement from removing a large
+      // share of live docs in a single pass — the remainder re-triggers next
+      // round. (The re-propagation of these deletes stays under the host's own
+      // mass-delete circuit breaker.)
+      const cap = Number(process.env['SL_EDIT_AE_MAX_DROPS']) || 20000;
+      void this._host.applyPeerTombstones(collection, dropLocal.slice(0, cap));
     }
     if (want.length > 0) {
       const cap = Number(process.env['SL_EDIT_AE_MAX_DOCS']) || 20000;

@@ -5,6 +5,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
+import { randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -188,7 +189,16 @@ export class EditCheckpoint {
   ): Promise<void> {
     await mkdir(this._dir, { recursive: true });
     const file = this._file(collection);
-    const tmp = `${file}.tmp`;
+    // Unique per call, not `${file}.tmp`: a save large enough to still be
+    // streaming when the NEXT debounced save for the same collection fires
+    // (the timer clears itself from `_saveTimers` before the write it
+    // triggers finishes — see `_checkpointAfter` — so a slow save does not
+    // block a new one from starting) had both calls writing the same tmp
+    // path. Whichever renamed first left the second's `rename` target
+    // gone — an ENOENT that was thrown, not caught, and crashed the process
+    // outright. Live on a 20k-document bulk import: two overlapping saves,
+    // reproduced every time.
+    const tmp = `${file}.${randomBytes(6).toString('hex')}.tmp`;
     const out = createWriteStream(tmp, { encoding: 'utf8' });
     const write = (chunk: string): Promise<void> =>
       out.write(chunk)

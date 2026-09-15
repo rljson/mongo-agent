@@ -7,7 +7,11 @@
 
 import { Db } from '@rljson/db';
 import { IoMem } from '@rljson/io';
-import { Int32 } from 'bson';
+import {
+  deserialize as bsonDeserialize,
+  Int32,
+  serialize as bsonSerialize,
+} from 'bson';
 import { describe, expect, it } from 'vitest';
 
 import { MongoEditAdapter } from '../src/mongo-edit-adapter.ts';
@@ -65,12 +69,22 @@ describe('MongoEditAdapter — manifest-level backfill (import/pullComponents)',
 
     const pulled = await consumer.pullComponents('customers', hashes);
     expect(pulled).toHaveLength(2);
-    // The Int32 _id survives the EJSON round-trip as an Int32, not a JS number.
     const byId = new Map(pulled.map((d) => [String(d['_id']), d]));
     const alice = byId.get('2400042')!;
-    expect(alice['_id']).toBeInstanceOf(Int32);
     expect(alice['name']).toBe('Alice');
-    expect(alice['n']).toBeInstanceOf(Int32);
+    expect(Number(alice['_id'])).toBe(2400042);
+    expect(Number(alice['n'])).toBe(7);
+    // A pulled doc comes back in the exact shape Mongo returns on a read (numbers
+    // promoted, so the content hash matches the same doc read natively on every
+    // peer — the invariant anti-entropy convergence depends on). Its integer
+    // fields still WRITE BACK as Int32: re-serializing to BSON and decoding
+    // without promotion shows the on-disk type is preserved, so CARAT's integer
+    // ids never land as doubles.
+    const onDisk = bsonDeserialize(bsonSerialize(alice), {
+      promoteValues: false,
+    });
+    expect(onDisk['_id']).toBeInstanceOf(Int32);
+    expect(onDisk['n']).toBeInstanceOf(Int32);
     const bob = byId.get('string-id')!;
     expect((bob['nested'] as { when: Date }).when).toBeInstanceOf(Date);
   });
