@@ -297,6 +297,7 @@ describe('MongoEditSync', () => {
       _lastInboundAt: number;
       _rxReconnectCooldownUntil: number;
       _coldStartComplete: boolean;
+      _coldStartAt: number;
       _checkReceiveLiveness: () => void;
     };
     const mkSync = async (conn: ReturnType<typeof mkConnector>) => {
@@ -337,14 +338,38 @@ describe('MongoEditSync', () => {
       await sync.stop();
     });
 
-    it('does NOT reconnect when it has never heard the fleet (maybe alone)', async () => {
+    it('leaves a node that has never heard the fleet alone inside the cold window', async () => {
       const conn = mkConnector();
       const sync = await mkSync(conn);
       const i = sync as unknown as Internals;
       i._coldStartComplete = true;
       i._lastInboundAt = 0; // never received anything
+      i._coldStartAt = Date.now(); // ...but only just started
+      i._rxReconnectCooldownUntil = 0;
       i._checkReceiveLiveness();
+      // A fleet that is merely slow to say anything must not be yanked, and a
+      // genuinely lone node must not reconnect-loop.
       expect(conn.reconnect).not.toHaveBeenCalled();
+      await sync.stop();
+    });
+
+    it('reconnects a node that has received NOTHING since cold start', async () => {
+      const conn = mkConnector();
+      const sync = await mkSync(conn);
+      const i = sync as unknown as Internals;
+      i._coldStartComplete = true;
+      // The live shape: connected, registered on the hub's route, sending
+      // fine, and not one ref ever delivered. This used to be exempt from the
+      // watchdog forever, which made it the one case that could never heal.
+      i._lastInboundAt = 0;
+      i._coldStartAt = Date.now() - 600_000; // past the 180s cold window
+      i._rxReconnectCooldownUntil = 0;
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
+      // Re-armed on the COLD clock (_lastInboundAt is still 0), so the next
+      // heartbeat does not immediately reconnect again.
+      i._checkReceiveLiveness();
+      expect(conn.reconnect).toHaveBeenCalledTimes(1);
       await sync.stop();
     });
 
