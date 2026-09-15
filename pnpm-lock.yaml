@@ -7,10 +7,10 @@ settings:
 overrides:
   '@rljson/bs': 0.0.26
   '@rljson/db': 0.0.42
-  '@rljson/fs-agent': 0.0.74
+  '@rljson/fs-agent': 0.0.75
   '@rljson/io': 0.0.78
   '@rljson/rljson': 0.0.81
-  '@rljson/server': 0.0.62
+  '@rljson/server': 0.0.63
 
 importers:
 
@@ -23,8 +23,8 @@ importers:
         specifier: 0.0.42
         version: 0.0.42
       '@rljson/fs-agent':
-        specifier: 0.0.74
-        version: 0.0.74
+        specifier: 0.0.75
+        version: 0.0.75
       '@rljson/hash':
         specifier: 0.0.19
         version: 0.0.19
@@ -38,8 +38,8 @@ importers:
         specifier: 0.0.81
         version: 0.0.81
       '@rljson/server':
-        specifier: 0.0.62
-        version: 0.0.62
+        specifier: 0.0.63
+        version: 0.0.63
       bson:
         specifier: ^7.2.0
         version: 7.2.0
@@ -578,8 +578,8 @@ packages:
     resolution: {integrity: sha512-jd1B6xv6/cyzzw80W2ydG85oXpIJP3vetkAbpdmdUY1rAjOw7++UM1VuGTttu0GnB/1u5dTkj68WMXCqrdKqDg==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/fs-agent@0.0.74':
-    resolution: {integrity: sha512-1RBTi5nicVF10AKp1TwoPXSdR0imwIj2bSXeQpl+oy9cLod5rs0qfnVxslRP4BzznPQS9D0tpN84sIVuhO5gAw==}
+  '@rljson/fs-agent@0.0.75':
+    resolution: {integrity: sha512-JiFxo6+4DHdJC1ag/II5dHgILbVNOQSWHI2LUGt/nhYa3TfioVoRO/fRnoTOHMLv2fCVUR96qBL54okaet6fMA==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/hash@0.0.16':
@@ -614,8 +614,8 @@ packages:
     resolution: {integrity: sha512-e+ha2nWl1oH2SC3G6ih1pbgHwJ2fJL6US+SIEs7aQkDpZbo0pHkea61BCZLf3u2o2j1LGdxUDcHznNUoHEsNkQ==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/server@0.0.62':
-    resolution: {integrity: sha512-fs4pP15K8TmrMetyeGhNxFIfEycua99Ra2Qh2zGEMKNHrFJBDcBWxoCK5Q5/PeFp69qi4/37Rb8d74bYNo/a8Q==}
+  '@rljson/server@0.0.63':
+    resolution: {integrity: sha512-/AUj1/70BtEr/SmkLGH1wAt5L9/C6C50lr9IyreHECdfA1TxFWWdf46z53TI3q67692/LbandYsZIBkPfFrziA==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.11':
@@ -2464,7 +2464,7 @@ snapshots:
       filtrex: 3.1.0
       object-traversal: 1.0.1
 
-  '@rljson/fs-agent@0.0.74':
+  '@rljson/fs-agent@0.0.75':
     dependencies:
       '@rljson/bs': 0.0.26
       '@rljson/db': 0.0.42
@@ -2511,7 +2511,7 @@ snapshots:
       '@rljson/json': 0.0.23
       nanoid: 5.1.16
 
-  '@rljson/server@0.0.62':
+  '@rljson/server@0.0.63':
     dependencies:
       '@rljson/bs': 0.0.26
       '@rljson/db': 0.0.42
