@@ -1,6 +1,6 @@
 {
   "name": "@rljson/mongo-agent",
-  "version": "0.0.38",
+  "version": "0.0.39",
   "description": "Rljson mongo-agent description",
   "homepage": "https://github.com/rljson/mongo-agent",
   "bugs": "https://github.com/rljson/mongo-agent/issues",
@@ -50,13 +50,13 @@
   },
   "dependencies": {
     "@rljson/bs": "0.0.26",
-    "@rljson/db": "0.0.41",
-    "@rljson/fs-agent": "0.0.72",
+    "@rljson/db": "0.0.42",
+    "@rljson/fs-agent": "0.0.73",
     "@rljson/hash": "0.0.19",
-    "@rljson/io": "0.0.77",
+    "@rljson/io": "0.0.78",
     "@rljson/json": "0.0.23",
     "@rljson/rljson": "0.0.81",
-    "@rljson/server": "0.0.60",
+    "@rljson/server": "0.0.61",
     "bson": "^7.2.0",
     "mongodb": "^7.1.0"
   },
@@ -66,11 +66,11 @@
     ],
     "overrides": {
       "@rljson/bs": "0.0.26",
-      "@rljson/db": "0.0.41",
-      "@rljson/fs-agent": "0.0.72",
-      "@rljson/io": "0.0.77",
+      "@rljson/db": "0.0.42",
+      "@rljson/fs-agent": "0.0.73",
+      "@rljson/io": "0.0.78",
       "@rljson/rljson": "0.0.81",
-      "@rljson/server": "0.0.60"
+      "@rljson/server": "0.0.61"
     }
   },
   "packageManager": "pnpm@10.11.0"
