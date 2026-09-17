@@ -397,7 +397,7 @@ export class MongoEditSync {
         collection,
       } as never);
     } catch (e) {
-      this._log(`forget tombstones ${collection} failed: ${String(e)}`);
+      this._fail(`forget tombstones ${collection} failed: ${String(e)}`);
     }
   }
 
@@ -505,8 +505,38 @@ export class MongoEditSync {
   private readonly _trace = process.env['SL_EDIT_TRACE'] === '1';
 
   /* v8 ignore start -- @preserve diagnostic logging only */
+  /**
+   * Progress. **Never stderr.**
+   *
+   * Every line this class emitted used to go to `console.error`, so a healthy
+   * node describing itself — `recv root kunden = bbec…`, `checkpoint saved` —
+   * arrived in the operator's log panel as ERROR. On the testlab that was 96
+   * errors on a node with nothing wrong, and the cost is not the noise: ten of
+   * these call sites report a REAL failure, and they were indistinguishable
+   * from the other thirty-three. A wall of red teaches people to stop reading
+   * it, which is exactly when the one line that mattered goes past.
+   *
+   * The tag says what an operator calls this, not what the engine is called
+   * internally: the process list, the config and the route all say
+   * `sl-mongo`, and `edit-sync` appears nowhere a reader has seen before.
+   * @param msg - What happened.
+   */
   private _log(msg: string): void {
-    if (this._trace) console.error(`[edit-sync] ${msg}`);
+    if (this._trace) console.log(`[sl-mongo] ${msg}`);
+  }
+
+  /**
+   * A failure. **Always stderr, and always logged.**
+   *
+   * Not behind `_trace`: a tombstone that could not be persisted or a resume
+   * that fell back to a full snapshot is worth knowing about on a node nobody
+   * happened to start with tracing on. These are rare by construction — if one
+   * of them becomes chatty, that is a defect in the thing it reports, not a
+   * reason to silence it.
+   * @param msg - What failed.
+   */
+  private _fail(msg: string): void {
+    console.error(`[sl-mongo] ${msg}`);
   }
   /* v8 ignore stop */
 
@@ -1046,9 +1076,9 @@ export class MongoEditSync {
           { $set: { collection, id, at: Date.now() } },
           { upsert: true },
         )
-        .catch((e) => this._log(`tombstone persist failed: ${String(e)}`));
+        .catch((e) => this._fail(`tombstone persist failed: ${String(e)}`));
     } catch (e) {
-      this._log(`tombstone persist threw: ${String(e)}`);
+      this._fail(`tombstone persist threw: ${String(e)}`);
     }
   }
 
@@ -1074,7 +1104,7 @@ export class MongoEditSync {
         if (r.id !== undefined) log.set(String(r.id), r.id);
       }
     } catch (e) {
-      this._log(`tombstone load failed: ${String(e)}`);
+      this._fail(`tombstone load failed: ${String(e)}`);
     }
   }
 
@@ -1260,7 +1290,7 @@ export class MongoEditSync {
       // correctness requirement (a missing/stale one just costs a slower
       // cold-start rescan next restart), so a failed write must never do more
       // than that.
-      this._log(`checkpoint ${collection} save failed: ${String(e)}`);
+      this._fail(`checkpoint ${collection} save failed: ${String(e)}`);
     }
   }
 
@@ -1401,7 +1431,7 @@ export class MongoEditSync {
       stream.on('error', (err: unknown) => {
         if (fellBack) return;
         fellBack = true;
-        this._log(`resume ${collection} failed (${String(err)}) -> snapshot`);
+        this._fail(`resume ${collection} failed (${String(err)}) -> snapshot`);
         // The errored stream is dead but still closed on sync.stop (via _stop).
         // Open a fresh stream + run a full snapshot so we still converge.
         void (async () => {
@@ -1454,7 +1484,7 @@ export class MongoEditSync {
       );
     } catch (e) {
       /* v8 ignore start -- @preserve defensive: seeding must never stop a start-up */
-      this._log(`seed ${collection} failed: ${String(e)}`);
+      this._fail(`seed ${collection} failed: ${String(e)}`);
       /* v8 ignore stop */
     }
   }
@@ -1598,7 +1628,7 @@ export class MongoEditSync {
       const discover = this._discover;
       const disc = setInterval(() => {
         void this._reconcile(discover).catch((e) =>
-          this._log(`reconcile failed: ${String(e)}`),
+          this._fail(`reconcile failed: ${String(e)}`),
         );
       }, this._discoverMs);
       /* v8 ignore next -- @preserve unref keeps the timer from blocking exit/tests */
@@ -1658,7 +1688,7 @@ export class MongoEditSync {
     try {
       reconnect.call(this._connector);
     } catch (e) {
-      this._log(`rx-watchdog reconnect threw: ${String(e)}`);
+      this._fail(`rx-watchdog reconnect threw: ${String(e)}`);
     }
     // Re-arm from now and hold off at least one window (min 30s) so the fresh
     // transport gets time to resubscribe and resync before we could yank again.
@@ -1974,7 +2004,7 @@ export class MongoEditSync {
           void this._adoptCollection(collection)
             .then(() => this._maybeTriggerAe(collection))
             .catch((e) =>
-              this._log(`adopt-on-root ${collection} failed: ${String(e)}`),
+              this._fail(`adopt-on-root ${collection} failed: ${String(e)}`),
             )
             .finally(() => this._adoptingOnRef.delete(collection));
         }
