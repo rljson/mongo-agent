@@ -18,6 +18,8 @@
 export { MongoEditSync } from './mongo-edit-sync.ts';
 export type {
   EditSyncConnector,
+  MongoCollectionStat,
+  MongoCollectionStats,
   MongoEditSyncHealth,
 } from './mongo-edit-sync.ts';
 export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';

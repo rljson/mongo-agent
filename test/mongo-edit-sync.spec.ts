@@ -42,6 +42,8 @@ class FakeCollection {
   watchCalls = 0;
   replaceOne = vi.fn(async () => ({}));
   deleteOne = vi.fn(async () => ({}));
+  /** Counting is a database operation; `collectionStats()` is what calls it. */
+  countDocuments = vi.fn(async () => this.docs.length);
   deleteMany = vi.fn(async (filter: Record<string, unknown>) => {
     const before = this.docs.length;
     this.docs = this.docs.filter(
@@ -2814,5 +2816,91 @@ describe('MongoEditSync — the tombstone log', () => {
       if (previous === undefined) delete process.env['SL_EDIT_TOMBSTONE_LOG'];
       else process.env['SL_EDIT_TOMBSTONE_LOG'] = previous;
     }
+  });
+});
+
+describe('collectionStats', () => {
+  it('counts each synced collection, on request', async () => {
+    // `health()` reports the roots continuously because they are a by-product
+    // of syncing. A COUNT is a database operation, so it happens when somebody
+    // asks and never on a timer — a sync agent counting on a loop competes
+    // with the application it syncs for.
+    const cols = {
+      customers: new FakeCollection([{ _id: 'a' }, { _id: 'b' }]),
+      orders: new FakeCollection([{ _id: 'c' }]),
+    };
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers', 'orders'],
+      'p',
+    );
+    await sync.start();
+
+    const stats = await sync.collectionStats();
+
+    expect(stats.collections.map((one) => one.collection)).toEqual([
+      'customers',
+      'orders',
+    ]);
+    expect(stats.collections.map((one) => one.documents)).toEqual([2, 1]);
+    // A count is a measurement, so it carries when it was taken.
+    expect(stats.measuredAt).toBeGreaterThan(0);
+  });
+
+  it('carries the same root health reports, so the two cannot disagree', async () => {
+    const cols = { customers: new FakeCollection([{ _id: 'a' }]) };
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const stats = await sync.collectionStats();
+
+    expect(stats.collections[0]?.root).toBe(sync.health().roots['customers']);
+  });
+
+  it('counts nothing before anything is adopted', async () => {
+    const sync = new MongoEditSync(
+      new FakeMongoDb({}) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      [],
+      'p',
+    );
+
+    expect((await sync.collectionStats()).collections).toEqual([]);
+  });
+
+  it('reports a collection it could not count as null, never as zero', async () => {
+    // A count that failed and a collection that is empty are opposite
+    // findings, and `0` is the one an operator acts on. One collection the
+    // server would not count also must not make the others unreadable.
+    const broken = new FakeCollection([{ _id: 'a' }]);
+    broken.countDocuments = vi.fn(async () => {
+      throw new Error('not authorized');
+    });
+    const cols = { customers: broken, orders: new FakeCollection([{ _id: 'b' }]) };
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers', 'orders'],
+      'p',
+    );
+    await sync.start();
+
+    const stats = await sync.collectionStats();
+
+    expect(stats.collections[0]).toMatchObject({
+      collection: 'customers',
+      documents: null,
+    });
+    expect(stats.collections[1]).toMatchObject({ documents: 1 });
   });
 });

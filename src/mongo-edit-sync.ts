@@ -138,6 +138,24 @@ interface MongoChangeStream {
  * breaker) so a full restore / empty-DB load on one node can't wipe the peer.
  */
 /** How the components/edits sync is doing, and what it holds. */
+/** What one synced collection holds. */
+export interface MongoCollectionStat {
+  /** Its name in the database. */
+  collection: string;
+  /** How many documents it holds, or `null` when the count failed. */
+  documents: number | null;
+  /** The content root this node holds for it — the same hash `health()` reports. */
+  root: string;
+}
+
+/** What every synced collection holds, and when it was counted. */
+export interface MongoCollectionStats {
+  /** One entry per synced collection, by name. */
+  collections: MongoCollectionStat[];
+  /** When the count was taken — a count is a measurement. */
+  measuredAt: number;
+}
+
 export interface MongoEditSyncHealth {
   /** Collections this node is syncing. */
   watching: number;
@@ -1596,6 +1614,46 @@ export class MongoEditSync {
       stateRef,
       roots,
     };
+  }
+
+  /**
+   * What each synced collection holds, counted **now**.
+   *
+   * `health()` reports the roots continuously, because they are a by-product
+   * of syncing and cost nothing to read. A document COUNT is not: it is a
+   * database operation, and a sync agent that runs one on a loop competes with
+   * the application it is syncing for.
+   *
+   * So this is on request and only on request. Nothing calls it on a timer,
+   * nothing caches it, and it is not in the change stream's path — the caller
+   * asks when somebody is looking, and the answer carries the time it was
+   * taken so a stale one can say so.
+   *
+   * A collection that cannot be counted reports `null` rather than `0`: a
+   * count that failed and a collection that is empty are opposite findings,
+   * and `0` is the one an operator acts on.
+   * @returns One entry per synced collection, plus when it was measured.
+   */
+  async collectionStats(): Promise<MongoCollectionStats> {
+    const collections = [...this._rootAcc.keys()].sort();
+    const stats: MongoCollectionStat[] = [];
+
+    for (const collection of collections) {
+      let documents: number | null = null;
+      try {
+        documents = await this._mongoDb.collection(collection).countDocuments();
+      } catch {
+        // Left null. One collection the server would not count does not make
+        // the others unreadable, and the row says which.
+      }
+      stats.push({
+        collection,
+        documents,
+        root: this._contentRoot(collection),
+      });
+    }
+
+    return { collections: stats, measuredAt: Date.now() };
   }
 
   async start(): Promise<void> {
