@@ -21,6 +21,8 @@ export type {
   MongoCollectionStat,
   MongoCollectionStats,
   MongoEditSyncHealth,
+  MongoManifestBuckets,
+  MongoManifestEntry,
 } from './mongo-edit-sync.ts';
 export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';
 export type { CollectPutsResult } from './mongo-edit-adapter.ts';
