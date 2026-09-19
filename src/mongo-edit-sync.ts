@@ -156,6 +156,26 @@ export interface MongoCollectionStats {
   measuredAt: number;
 }
 
+/** One collection's manifest, folded for comparison. */
+export interface MongoManifestBuckets {
+  /** The collection. */
+  collection: string;
+  /** Its content root — the same value `health()` reports for it. */
+  root: string;
+  /** How many buckets the manifest folds into. */
+  bucketCount: number;
+  /** One 64-hex root per bucket, in bucket order. */
+  buckets: string[];
+}
+
+/** One document, as the manifest holds it. */
+export interface MongoManifestEntry {
+  /** The document's `_id`, stringified — the sliceId. */
+  id: string;
+  /** Its content hash, or empty for a tombstone this node holds. */
+  hash: string;
+}
+
 export interface MongoEditSyncHealth {
   /** Collections this node is syncing. */
   watching: number;
@@ -1654,6 +1674,75 @@ export class MongoEditSync {
     }
 
     return { collections: stats, measuredAt: Date.now() };
+  }
+
+  /**
+   * The per-bucket roots of one synced collection — for COMPARING two nodes.
+   *
+   * The same folding anti-entropy reconciles with, exposed so that something
+   * other than the protocol can answer *which documents do these two machines
+   * disagree about*. A collection root already answers "do they agree at all",
+   * and it is free; this is the next level down, and it is nearly free — the
+   * accumulator is maintained incrementally as edits arrive, so reading it is
+   * a buffer slice per bucket and no database work whatsoever.
+   *
+   * Compare the roots first and fetch entries only for the buckets that
+   * differ. Two nodes that agree exchange one hash; two that differ by one
+   * document exchange one bucket.
+   *
+   * `null` for a collection this node does not sync — which is not the same as
+   * a collection it syncs and finds empty, and the difference decides whether
+   * an operator is looking at a gap or at a finding.
+   * @param collection - The collection.
+   * @returns Its root and per-bucket roots, or `null` if it is not synced.
+   */
+  manifestBuckets(collection: string): MongoManifestBuckets | null {
+    if (!this._rootAcc.has(collection)) return null;
+    return {
+      collection,
+      root: this._contentRoot(collection),
+      bucketCount: AE_BUCKET_COUNT,
+      buckets: this._bucketRoots(collection),
+    };
+  }
+
+  /**
+   * What the named buckets of one collection hold, document by document.
+   *
+   * One manifest pass for however many buckets are asked for, so comparing a
+   * mega collection costs `O(size)` once rather than `O(size × buckets)`.
+   *
+   * A tombstone this node holds is reported with an empty hash: "I had this
+   * document and it is deleted" is an answer, and a peer that still holds it
+   * live is a finding rather than a gap.
+   * @param collection - The collection.
+   * @param buckets - Which buckets to read.
+   * @returns Bucket index to its entries, or `null` if the collection is not
+   *   synced here.
+   */
+  manifestEntries(
+    collection: string,
+    buckets: readonly number[],
+  ): Record<number, MongoManifestEntry[]> | null {
+    if (!this._rootAcc.has(collection)) return null;
+
+    // Bounded to the buckets that exist, and de-duplicated: the caller derives
+    // these from a peer's answer, and a peer is not something to take indexes
+    // from unchecked.
+    const wanted = [
+      ...new Set(
+        buckets.filter(
+          (b) => Number.isInteger(b) && b >= 0 && b < AE_BUCKET_COUNT,
+        ),
+      ),
+    ];
+
+    const found = this._bucketEntries(collection, wanted);
+    const out: Record<number, MongoManifestEntry[]> = {};
+    for (const [bucket, entries] of found) {
+      out[bucket] = entries.map(([id, hash]) => ({ id, hash }));
+    }
+    return out;
   }
 
   async start(): Promise<void> {

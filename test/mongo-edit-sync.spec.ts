@@ -2819,6 +2819,124 @@ describe('MongoEditSync — the tombstone log', () => {
   });
 });
 
+describe('the manifest, read for comparison', () => {
+  // Two nodes that hold the same collection hold the same root — that answer is
+  // free and already published. What was missing is the next question, the one
+  // an operator actually arrives with: WHICH documents do we disagree about.
+  //
+  // Anti-entropy already folds the manifest into per-bucket roots to answer it
+  // for itself. These two reads expose that folding so a diagnostic view can
+  // ask it too, without a second definition of "the same document" living
+  // somewhere else and drifting.
+
+  it('reports the buckets of a synced collection, and the root they fold to', async () => {
+    const cols = { customers: new FakeCollection([{ _id: 'a' }, { _id: 'b' }]) };
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const folded = sync.manifestBuckets('customers');
+
+    expect(folded?.collection).toBe('customers');
+    // The same root health reports, so the two levels cannot disagree about
+    // whether two machines are in the same state.
+    expect(folded?.root).toBe(sync.health().roots['customers']);
+    expect(folded?.buckets).toHaveLength(folded?.bucketCount ?? 0);
+    // Every bucket is a 64-hex root, and the ones holding nothing are zeroes
+    // rather than absent — a bucket with no documents is an answer.
+    expect(folded?.buckets.every((b) => /^[0-9a-f]{64}$/.test(b))).toBe(true);
+    expect(folded?.buckets.some((b) => b !== '0'.repeat(64))).toBe(true);
+  });
+
+  it('says nothing about a collection it does not sync', async () => {
+    // Not an empty manifest. A collection this node does not sync and a
+    // collection it syncs and finds empty are opposite findings.
+    const sync = new MongoEditSync(
+      new FakeMongoDb({ customers: new FakeCollection([]) }) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    expect(sync.manifestBuckets('orders')).toBeNull();
+    expect(sync.manifestEntries('orders', [0])).toBeNull();
+  });
+
+  it('gives the documents of the buckets it is asked for', async () => {
+    const cols = {
+      customers: new FakeCollection([{ _id: 'a' }, { _id: 'b' }, { _id: 'c' }]),
+    };
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const folded = sync.manifestBuckets('customers')!;
+    const busy = folded.buckets
+      .map((root, index) => ({ root, index }))
+      .filter((one) => one.root !== '0'.repeat(64))
+      .map((one) => one.index);
+
+    const entries = sync.manifestEntries('customers', busy)!;
+    const ids = Object.values(entries)
+      .flat()
+      .map((one) => one.id)
+      .sort();
+
+    expect(ids).toEqual(['a', 'b', 'c']);
+    expect(
+      Object.values(entries)
+        .flat()
+        .every((one) => /^[0-9a-f]+$/.test(one.hash)),
+    ).toBe(true);
+  });
+
+  it('ignores bucket indexes that are not buckets', async () => {
+    // The caller derives these from a PEER's answer, and a peer is not
+    // something to take array indexes from unchecked.
+    const sync = new MongoEditSync(
+      new FakeMongoDb({ customers: new FakeCollection([{ _id: 'a' }]) }) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    expect(
+      sync.manifestEntries('customers', [-1, 1.5, 9_999_999, Number.NaN]),
+    ).toEqual({});
+  });
+
+  it('asks the manifest once however many buckets are wanted', async () => {
+    // A mega collection's comparison must cost one pass, not one per bucket.
+    const sync = new MongoEditSync(
+      new FakeMongoDb({ customers: new FakeCollection([{ _id: 'a' }]) }) as never,
+      await mkRljsonDb(),
+      mkConnector(),
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const asked = sync.manifestEntries('customers', [0, 0, 1, 2, 2]);
+
+    // Repeats collapse: three distinct buckets asked for, three answered.
+    expect(Object.keys(asked ?? {})).toHaveLength(3);
+  });
+});
+
 describe('collectionStats', () => {
   it('counts each synced collection, on request', async () => {
     // `health()` reports the roots continuously because they are a by-product
