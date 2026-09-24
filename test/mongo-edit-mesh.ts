@@ -466,6 +466,12 @@ export class MeshBus {
   private readonly _nodes: MeshConnector[] = [];
   /** Every ref ever delivered, in order (`from → ref`), for diagnostics. */
   readonly traffic: Array<{ from: string; ref: string }> = [];
+  /**
+   * Loses a message on purpose: a ref this returns `true` for reaches no node,
+   * exactly as when one socket.io packet is lost. For
+   * `heals-after-forced-divergence`.
+   */
+  drop: ((from: string, ref: string) => boolean) | undefined;
 
   connector(id: string): MeshConnector {
     const connector = new MeshConnector(id, this);
@@ -474,6 +480,7 @@ export class MeshBus {
   }
 
   deliver(from: string, ref: string): void {
+    if (this.drop?.(from, ref)) return;
     this.traffic.push({ from, ref });
     for (const node of this._nodes) {
       if (node.id === from) continue;
