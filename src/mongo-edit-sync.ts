@@ -11,7 +11,7 @@ import type { Db as MongoDb, Document } from 'mongodb';
 import { ObjectId } from 'mongodb';
 
 import { AE_BUCKET_COUNT, MongoAntiEntropy } from './mongo-anti-entropy.ts';
-import type { AntiEntropyHost } from './mongo-anti-entropy.ts';
+import type { AeEntry, AntiEntropyHost } from './mongo-anti-entropy.ts';
 import { docHash } from './mongo-component-codec.ts';
 import type { CollectPutsResult } from './mongo-edit-adapter.ts';
 import { compareTimeId, MongoEditAdapter } from './mongo-edit-adapter.ts';
@@ -986,13 +986,14 @@ export class MongoEditSync {
             ? this._connector.reannounce(r)
             : this._connector.send(r),
       bucketRoots: (c) => this._bucketRoots(c),
-      bucketEntries: (c, bs) => this._bucketEntries(c, bs),
+      bucketEntries: (c, bs) => this._withTimeIds(c, this._bucketEntries(c, bs)),
       manifestHash: (c, id) => this._manifestOf(c).get(id),
+      timeIdOf: (c, id) => this._timeIdsOf(c).get(id),
       hasTombstone: (c, id) => !!this._tombstones.get(c)?.has(id),
       pushTombstones: (c, ids) => this._pushTombstones(c, ids),
       applyPeerTombstones: (c, ids) => this._applyPeerTombstones(c, ids),
       serveComponents: (c, ids) => this._serveComponents(c, ids),
-      pullAndApply: (c, hs) => this._pullAndApply(c, hs),
+      pullAndApply: (c, hs, contested) => this._pullAndApply(c, hs, contested),
       syncs: (c) => this._collections.has(c),
       ready: (c) => this._baselineReady.has(c),
       onRoundComplete: (c) => this._onAeRoundComplete(c),
@@ -1230,6 +1231,34 @@ export class MongoEditSync {
   }
 
   /**
+   * The same entries with each live document's `timeId` appended, for the
+   * anti-entropy only — **ONE-443**. A peer deciding a content conflict needs
+   * to know which version was edited last (see `peerVersionWins`). Kept apart
+   * from {@link _bucketEntries} on purpose: `manifestEntries` serves those to
+   * a diagnostics screen in their `[id, hash]` shape.
+   * @param collection - The collection.
+   * @param entries - bucket → `[sliceId, docHash]` entries.
+   * @returns bucket → entries, a known `timeId` appended to live ones.
+   */
+  private _withTimeIds(
+    collection: string,
+    entries: Map<number, Array<[string, string]>>,
+  ): Map<number, AeEntry[]> {
+    const timeIds = this._timeIdsOf(collection);
+    const out = new Map<number, AeEntry[]>();
+    for (const [bucket, list] of entries) {
+      out.set(
+        bucket,
+        list.map(([id, hash]): AeEntry => {
+          const timeId = hash === '' ? undefined : timeIds.get(id);
+          return timeId ? [id, hash, timeId] : [id, hash];
+        }),
+      );
+    }
+    return out;
+  }
+
+  /**
    * Candidate typed `_id`s for a sliceId (the string; a 24-hex ObjectId; an
    * all-digit number) so a Mongo `_id: {$in: …}` resolves the common CARAT `_id`
    * shapes (ObjectId / Int32 / string). Over-matching only ever replays a
@@ -1279,10 +1308,16 @@ export class MongoEditSync {
    * so the change stream folds it into the content root WITHOUT re-broadcasting
    * a fresh edit. No chain is walked and nothing is pushed over the wire in bulk
    * — this is the O(size), scale-independent path a large baseline import needs.
-   * Additive only: a sliceId whose content we already hold is skipped, so it can
-   * never move a document backwards or overwrite a concurrent local edit.
+   * A sliceId whose content we already hold is skipped. A sliceId we hold at
+   * DIFFERENT content is only written when the anti-entropy decided the peer's
+   * version wins (`contested`, ONE-443) — and that decision is re-checked here,
+   * against our state at apply time: a local edit made since then carries a
+   * newer `timeId` and wins, so this can never overwrite a concurrent local
+   * edit or move a document backwards.
    * @param collection - The collection to upsert into.
    * @param hashes - The component row hashes to pull.
+   * @param contested - sliceId → winning `timeId`, for docs taken because the
+   *   peer's version won a content conflict. Consumed entries are deleted.
    * @returns How many of `hashes` actually resolved via the peer read (not how
    *   many were WRITTEN — a hash whose content we already hold resolves but
    *   needs no write). Short of `hashes.length` is the caller's signal to retry
@@ -1291,15 +1326,36 @@ export class MongoEditSync {
   private async _pullAndApply(
     collection: string,
     hashes: string[],
+    contested?: Map<string, string | undefined>,
   ): Promise<number> {
     const docs = await this._adapter.pullComponents(collection, hashes);
     const ops: Array<Record<string, unknown>> = [];
+    const adopted: Array<[unknown, string | undefined]> = [];
     for (const doc of docs) {
       const d = doc as Record<string, unknown> & { _id: unknown };
       const hash = docHash(d);
+      const sliceId = String(d._id);
       // Idempotent: we already hold this exact content. Skipping keeps the
       // upsert count — and the change stream it drives — bounded to real change.
-      if (this._manifestOf(collection).get(String(d._id)) === hash) continue;
+      if (this._manifestOf(collection).get(sliceId) === hash) {
+        contested?.delete(sliceId);
+        continue;
+      }
+      if (contested?.has(sliceId)) {
+        const winner = contested.get(sliceId);
+        contested.delete(sliceId);
+        // Re-decide against what we hold NOW. The decision was made a round
+        // trip ago; a local edit since then has a timeId of its own, and an
+        // edit the peer's version cannot show to be older than wins.
+        const mine = this._timeIdsOf(collection).get(sliceId);
+        if (mine && (!winner || compareTimeId(winner, mine) < 0)) {
+          this._log(
+            `ae ${collection} keep local _id=${sliceId}: edited here since the decision`,
+          );
+          continue;
+        }
+        adopted.push([d._id, winner]);
+      }
       // Suppress the re-broadcast of the echo this write is about to emit; the
       // change stream then folds each upserted doc into the manifest/content root.
       this._appliedHash.set(this._key(collection, d._id), hash);
@@ -1314,6 +1370,11 @@ export class MongoEditSync {
       await this._mongoDb
         .collection(collection)
         .bulkWrite(ops as never, { ordered: false });
+      // The winner's edit is now ours: record its timeId, so the edit chain's
+      // last-writer-wins orders the next edit against the version we hold.
+      for (const [id, timeId] of adopted) {
+        this._setAppliedTimeId(collection, id, timeId);
+      }
       // This round pulled + applied real docs -> mark progress so the
       // round-completion chain drives the next one immediately.
       this._aeRoundProgress.set(collection, true);
