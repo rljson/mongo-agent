@@ -20,6 +20,18 @@ only thing broadcast. Full picture:
   standalone `MongoCakeAgent`/`MongoCakeSync`, not cakes.
 - Tree + blob Mongo sync is gone. Do not reintroduce a tree walk for flat
   document data.
+- **Anti-entropy rules (ONE-443):**
+  - A document both sides hold at different content is **decided** by
+    `peerVersionWins` (newer edit `timeId` → edited over loaded → greater
+    hash). It must stay symmetric: both nodes reach the same answer from the
+    same two versions, or they overwrite each other in turn.
+  - An `AER`/`AEE` answer that **agrees** must never end a round or complete
+    a bucket — every query reaches every peer, and the agreeing answer is
+    usually first.
+  - Protocol nonces must be unique **across nodes** (random start), not only
+    per node: identical frames from two nodes are dropped as repeats.
+  - Always test the anti-entropy with **three** nodes as well as two. Both of
+    the last two defects were invisible with two.
 
 ---
 
