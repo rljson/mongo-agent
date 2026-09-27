@@ -70,6 +70,24 @@ jobs:
             echo "$NAME@$VERSION is not on npm — publishing."
           fi
 
+      # Checked BEFORE the suite runs, not left to npm. npm answers a missing
+      # credential with a 404 on the package — a message that reads as "this
+      # package does not exist" and sends whoever is looking at it entirely the
+      # wrong way — and it would say so three minutes in, after a full test run
+      # spent on a release that could never land.
+      - name: Require the npm token
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::No NPM_TOKEN secret on this repository, so this" \
+              "release cannot be published. Create an npm Automation token" \
+              "(npmjs.com → Access Tokens → Generate → Automation) and add it" \
+              "as the repository secret NPM_TOKEN, then re-run this workflow."
+            exit 1
+          fi
+
       # The gate, as its own step. `npm publish` would run the same thing
       # through `prepublishOnly`, but a test failure would then arrive as a
       # publish failure — and the two want different reactions.
