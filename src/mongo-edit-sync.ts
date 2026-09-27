@@ -54,6 +54,87 @@ const ROOT_PREFIX = '~R~';
 const ROOT_SEP = '|';
 
 /**
+ * How many identical, still-diverged root receipts pass before the trace says
+ * so again.
+ *
+ * The divergent path re-delivers the same announcement every heartbeat on
+ * purpose, so this is a count of RETRY ROUNDS rather than of seconds. Twenty
+ * is roughly a minute of heartbeats: often enough that a stall is visible
+ * while somebody is still looking at the screen, rare enough that it cannot
+ * bury anything.
+ */
+const ROOT_STUCK_EVERY = 20;
+
+/** What was last traced for one collection's received root. */
+export interface RootReceiptState {
+  /** The root that was traced. */
+  root: string;
+  /** Whether it differed from ours at the time. */
+  diverged: boolean;
+  /** How many identical receipts have arrived since that line. */
+  seen: number;
+}
+
+/**
+ * What to trace for a received root, and what to remember.
+ *
+ * **The line that flooded every console on the lab.** It used to be written on
+ * every receipt, and a diverged collection receives the identical root on every
+ * heartbeat BY DESIGN: the divergent path deliberately clears the connector's
+ * received-dedup so the same announcement is delivered again and re-drives the
+ * retry. Correct, and it meant `recv root kunden = bbec…` every few seconds per
+ * collection per peer for as long as the divergence lasted — which buried the
+ * thirty-odd lines the trace flag exists to show. The send side already learned
+ * this (`_broadcastRoot` logs only when the root MOVES, after a lab where all
+ * 500 buffered lines on all four nodes were unchanged-root announcements); the
+ * receive side never did, and it is the worse of the two.
+ *
+ * So the trace says what CHANGED:
+ *
+ * - a root this node has not traced for that collection, or
+ * - divergence beginning or ending, or
+ * - every {@link ROOT_STUCK_EVERY} identical repeats — the line an operator
+ *   actually needs, because a retry that has run two hundred rounds without
+ *   converging is a finding rather than progress, and the count says which.
+ *
+ * A converged repeat says nothing at all, which is the ordinary case.
+ * @param last - What was traced last for this collection, if anything.
+ * @param collection - Which collection.
+ * @param root - The content root the peer announced.
+ * @param diverged - Whether it differs from ours.
+ * @returns The state to remember, and the line to trace or `null`.
+ */
+export const rootReceiptLine = (
+  last: RootReceiptState | undefined,
+  collection: string,
+  root: string,
+  diverged: boolean,
+): { next: RootReceiptState; line: string | null } => {
+  const changed = last?.root !== root || last.diverged !== diverged;
+  const seen = changed ? 1 : last.seen + 1;
+  const next: RootReceiptState = { root, diverged, seen };
+  const short = root.slice(0, 12);
+
+  if (changed) {
+    return {
+      next,
+      line: `recv root ${collection} = ${short}${diverged ? ' (diverged)' : ''}`,
+    };
+  }
+  if (!diverged || seen % ROOT_STUCK_EVERY !== 0) return { next, line: null };
+
+  // Not a failure line: nothing has failed, and painting a backfill that is
+  // still working red would be the same lie in the other direction. It is a
+  // COUNT, and the count is what tells a reader whether to wait or to look.
+  return {
+    next,
+    line:
+      `recv root ${collection} = ${short} — unchanged and still diverged ` +
+      `after ${seen} rounds`,
+  };
+};
+
+/**
  * Above this manifest size a collection checkpoints on a LONGER interval
  * (`SL_EDIT_CHECKPOINT_LARGE_DEBOUNCE_MS`, a minute by default) rather than on
  * the ordinary one.
@@ -442,6 +523,15 @@ export class MongoEditSync {
   /** collection → the root most recently written to the trace log. */
   private readonly _lastLoggedRoot = new Map<string, string>();
 
+  /**
+   * collection → the head whose short-circuit was most recently traced.
+   *
+   * Same job as the two maps around it: the root handler re-drives the pending
+   * head on every heartbeat while diverged, and a head that short-circuits says
+   * nothing new the second time it does so.
+   */
+  private readonly _lastLoggedSkip = new Map<string, string>();
+
   /** collection → pending debounced root recompute+broadcast timer. */
   private readonly _rootTimers = new Map<
     string,
@@ -542,6 +632,24 @@ export class MongoEditSync {
   /* v8 ignore next -- @preserve diagnostic gate, off in tests */
   private readonly _trace = process.env['SL_EDIT_TRACE'] === '1';
 
+  /**
+   * The last root RECEIVED and logged per collection, so a repeat stays quiet.
+   *
+   * The twin of `_lastLoggedRoot`, which does the same job for the send side —
+   * and which carries the note about a lab where all 500 buffered lines on all
+   * four nodes were unchanged-root announcements. The send side was fixed; the
+   * receive side was not, and it is worse: the divergent path deliberately
+   * re-delivers the identical announcement every heartbeat, so one diverged
+   * collection emits this line for as long as the divergence lasts.
+   *
+   * See {@link _logRootReceipt}. `seen` counts the identical repeats since the
+   * last line, which is what turns a flood into a finding.
+   */
+  private readonly _lastLoggedRecvRoot = new Map<
+    string,
+    { root: string; diverged: boolean; seen: number }
+  >();
+
   /* v8 ignore start -- @preserve diagnostic logging only */
   /**
    * Progress. **Never stderr.**
@@ -561,6 +669,30 @@ export class MongoEditSync {
    */
   private _log(msg: string): void {
     if (this._trace) console.log(`[sl-mongo] ${msg}`);
+  }
+
+  /**
+   * Traces a received root, as a STATE rather than as a tick.
+   *
+   * The decision lives in {@link rootReceiptLine}, which is a pure function and
+   * therefore tested; this is the two lines that touch the map and the log.
+   * @param collection - Which collection the root is for.
+   * @param root - The content root the peer announced.
+   * @param diverged - Whether it differs from ours.
+   */
+  private _logRootReceipt(
+    collection: string,
+    root: string,
+    diverged: boolean,
+  ): void {
+    const { next, line } = rootReceiptLine(
+      this._lastLoggedRecvRoot.get(collection),
+      collection,
+      root,
+      diverged,
+    );
+    this._lastLoggedRecvRoot.set(collection, next);
+    if (line !== null) this._log(line);
   }
 
   /**
@@ -2157,13 +2289,13 @@ export class MongoEditSync {
         }
         return;
       }
-      this._log(`recv root ${collection} = ${root.slice(0, 12)}`);
       // A peer reporting a root different from ours means someone is ahead of
       // (or behind) us. Re-drive the last head we saw: its pull may have come
       // back empty/partial because the origin's rows were not resolvable yet.
       // `_applyHead` no-ops when the head was already applied, and skips when
       // its tagged root is already ours — so this is cheap when converged.
       const diverged = root !== this._contentRoot(collection);
+      this._logRootReceipt(collection, root, diverged);
       const pending = this._lastPeerHead.get(collection);
       if (pending && diverged) {
         this._scheduleApply(
@@ -2308,7 +2440,16 @@ export class MongoEditSync {
     // this head — losing inserts and deletes, and leaving the fleet permanently
     // diverged with no repair path (verified live on four nodes, 2026-08-17).
     if (targetRoot !== undefined && targetRoot === this._contentRoot(collection)) {
-      this._log(`applyHead ${collection} SKIP — head's root already ours`);
+      // **Once per head, not once per re-drive.** The root handler re-schedules
+      // the pending head on every heartbeat while diverged, so a head whose
+      // root is already ours reports "I did nothing" on every one of them —
+      // the same flood as the root receipt beside it, and with even less to
+      // say. The head is the key: a genuinely new head that short-circuits is
+      // worth one line.
+      if (this._lastLoggedSkip.get(collection) !== head) {
+        this._lastLoggedSkip.set(collection, head);
+        this._log(`applyHead ${collection} SKIP — head's root already ours`);
+      }
       return;
     }
     const { puts, complete, sealed } = await this._collectWithRetry(

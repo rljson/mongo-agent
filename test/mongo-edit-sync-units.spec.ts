@@ -12,7 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { docHash } from '../src/mongo-component-codec.ts';
 import { bucketOf } from '../src/mongo-manifest-hash.ts';
 import type { EditSyncConnector } from '../src/mongo-edit-sync.ts';
-import { MongoEditSync } from '../src/mongo-edit-sync.ts';
+import { MongoEditSync, rootReceiptLine } from '../src/mongo-edit-sync.ts';
+import type { RootReceiptState } from '../src/mongo-edit-sync.ts';
 
 /**
  * DETERMINISTIC unit cover for the anti-entropy host surface.
@@ -353,5 +354,76 @@ describe('MongoEditSync — anti-entropy host surface', () => {
         ['5'],
       );
     });
+  });
+});
+
+describe('tracing a received root', () => {
+  /**
+   * Feeds the same receipt n times, collecting every line it produced.
+   * @param times - How many identical receipts arrive.
+   * @param diverged - Whether the root differs from ours throughout.
+   * @returns The lines, in order.
+   */
+  const repeat = (times: number, diverged: boolean): string[] => {
+    const lines: string[] = [];
+    let last: RootReceiptState | undefined;
+    for (let i = 0; i < times; i++) {
+      const out = rootReceiptLine(last, 'kunden', 'bbec1c829146aa', diverged);
+      last = out.next;
+      if (out.line !== null) lines.push(out.line);
+    }
+    return lines;
+  };
+
+  it('says a root it has not traced before', () => {
+    const { line } = rootReceiptLine(undefined, 'kunden', 'bbec1c829146aa', false);
+
+    expect(line).toBe('recv root kunden = bbec1c829146');
+  });
+
+  it('marks a root that differs from ours', () => {
+    const { line } = rootReceiptLine(undefined, 'kunden', 'bbec1c829146aa', true);
+
+    expect(line).toContain('(diverged)');
+  });
+
+  it('says NOTHING about a converged repeat', () => {
+    // The ordinary case on a healthy cluster: the reconcile loop re-announces
+    // every collection every few seconds whether or not anything changed.
+    expect(repeat(50, false)).toHaveLength(1);
+  });
+
+  it('does not flood while diverged — it COUNTS', () => {
+    // **The line that flooded every console on the lab.** A diverged
+    // collection receives the identical root on every heartbeat by design: the
+    // divergent path clears the connector's received-dedup so the same
+    // announcement is delivered again and re-drives the retry. Logging each one
+    // buried the thirty-odd lines the trace flag exists to show.
+    const lines = repeat(60, true);
+
+    // One for the first receipt, then one per stuck interval — not sixty.
+    expect(lines).toHaveLength(4);
+    expect(lines[1]).toContain('still diverged after 20 rounds');
+    expect(lines[3]).toContain('after 60 rounds');
+  });
+
+  it('says so the moment divergence ENDS, at the same root', () => {
+    // The root has not changed — ours caught up to it. That is the line
+    // somebody waiting for convergence is waiting for, and keying the dedup on
+    // the root alone would have swallowed it.
+    const first = rootReceiptLine(undefined, 'kunden', 'aaaa', true);
+    const after = rootReceiptLine(first.next, 'kunden', 'aaaa', false);
+
+    expect(after.line).toBe('recv root kunden = aaaa');
+    expect(after.next.seen).toBe(1);
+  });
+
+  it('starts counting again when the root moves', () => {
+    const first = rootReceiptLine(undefined, 'kunden', 'aaaa', true);
+    const second = rootReceiptLine(first.next, 'kunden', 'aaaa', true);
+    const moved = rootReceiptLine(second.next, 'kunden', 'bbbb', true);
+
+    expect(moved.line).toContain('bbbb');
+    expect(moved.next.seen).toBe(1);
   });
 });
