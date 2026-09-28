@@ -14,6 +14,10 @@ import { bucketOf } from '../src/mongo-manifest-hash.ts';
 import type { EditSyncConnector } from '../src/mongo-edit-sync.ts';
 import {
   headReceiptLine,
+  noProgressDelayMs,
+  pairLabel,
+  notSyncableLine,
+  stuckDecision,
   MongoEditSync,
   rootReceiptLine,
 } from '../src/mongo-edit-sync.ts';
@@ -478,5 +482,86 @@ describe('tracing a received head', () => {
 
     expect(moved.line).toBe('recv ref e2eProbe:bbbb');
     expect(moved.next.seen).toBe(1);
+  });
+  describe('notSyncableLine', () => {
+    it('says it once, then stays quiet', () => {
+      expect(notSyncableLine('root', 'e2eProbe', 1)).toContain('NOT syncable');
+      for (const n of [2, 3, 17, 499]) {
+        expect(notSyncableLine('root', 'e2eProbe', n), `n=${n}`).toBeNull();
+      }
+    });
+
+    it('reports the COUNT every 500th, because that is the only new part', () => {
+      const line = notSyncableLine('ref', 'e2eProbe', 500);
+      expect(line).toContain('500 dropped so far');
+      expect(line).toContain('a peer still syncs it; this node does not');
+      expect(notSyncableLine('ref', 'e2eProbe', 501)).toBeNull();
+      expect(notSyncableLine('ref', 'e2eProbe', 1000)).toContain('1000 dropped');
+    });
+
+    it('names whether it was a ref or a root', () => {
+      expect(notSyncableLine('ref', 'x', 1)).toContain('recv ref x');
+      expect(notSyncableLine('root', 'x', 1)).toContain('recv root x');
+    });
+  });
+  describe('stuckDecision', () => {
+    it('keeps retrying under the cap', () => {
+      for (const n of [1, 2, 5]) {
+        expect(stuckDecision(n, 6, 'p', undefined), `n=${n}`).toEqual({
+          pause: false,
+          announce: false,
+        });
+      }
+    });
+
+    it('pauses at the cap and announces once per pair', () => {
+      expect(stuckDecision(6, 6, 'p', undefined)).toEqual({
+        pause: true,
+        announce: true,
+      });
+      // Same pair again: still paused, and NOT said a second time — that
+      // repetition is the whole thing being fixed.
+      expect(stuckDecision(7, 6, 'p', 'p')).toEqual({
+        pause: true,
+        announce: false,
+      });
+      // A different pair is new information, so it is worth a line.
+      expect(stuckDecision(9, 6, 'q', 'p')).toEqual({
+        pause: true,
+        announce: true,
+      });
+    });
+  });
+
+  describe('noProgressDelayMs', () => {
+    it('doubles per consecutive failure', () => {
+      expect(noProgressDelayMs(1, 5_000, 300_000)).toBe(5_000);
+      expect(noProgressDelayMs(2, 5_000, 300_000)).toBe(10_000);
+      expect(noProgressDelayMs(4, 5_000, 300_000)).toBe(40_000);
+    });
+
+    it('caps, so the retry never grows past a useful interval', () => {
+      expect(noProgressDelayMs(20, 5_000, 300_000)).toBe(300_000);
+    });
+
+    it('treats a zero or negative count as the first failure', () => {
+      // Guards the `?? 1` at the call site against ever producing 2**-1.
+      expect(noProgressDelayMs(0, 5_000, 300_000)).toBe(5_000);
+    });
+  });
+  describe('pairLabel', () => {
+    it('trims both roots the way every other line trims them', () => {
+      expect(pairLabel(`${'a'.repeat(64)}|${'b'.repeat(64)}`)).toBe(
+        'local=aaaaaaaaaaaa peer=bbbbbbbbbbbb',
+      );
+    });
+
+    it('names an absent peer root instead of printing a blank', () => {
+      // A peer too old to tag its root: the pause still bounds the retry, and
+      // the line has to say which half it could not read.
+      expect(pairLabel(`${'a'.repeat(64)}|`)).toBe(
+        'local=aaaaaaaaaaaa peer=untagged',
+      );
+    });
   });
 });
