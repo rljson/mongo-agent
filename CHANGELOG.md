@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.54]
+
+**Declare what the client actually forces.** 0.0.53 declared `fs-agent` 0.0.80
+and `rljson` 0.0.83 while the One Client's `pnpm.overrides` install 0.0.81 and
+0.0.84 on top of it. So the suite that gated the release ran against a stack
+nobody ships — the same trap this repo already has on record from PR #2, where
+green tests against `db` 0.0.28 / `server` 0.0.42 proved nothing about what
+shipped.
+
+Lifted to the full current set, and the suite re-run on it: `db` 0.0.47, `io`
+0.0.80, `rljson` 0.0.84, `server` 0.0.68, `fs-agent` 0.0.81, `bs` 0.0.26,
+`hash` 0.0.19, `json` 0.0.23 — every one of them npm-latest, and every rljson
+repo's `main` currently equals its published version, so there is no newer fixed
+state sitting unpublished anywhere.
+
+`rljson` 0.0.84 adds cake layer/slice-id validation, which is the kind of change
+that rejects data that used to pass. 249 tests say it does not reject anything
+this package produces.
+
+249 tests, 99.55 / 98.04 / 100 / 99.83.
+
 ## [0.0.53]
 
 **Quiet about a route it does not serve.** The other half of what a MIXED fleet
