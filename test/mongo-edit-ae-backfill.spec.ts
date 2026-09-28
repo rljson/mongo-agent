@@ -55,6 +55,8 @@ describe('MongoEditSync — anti-entropy backfill', () => {
       'SL_EDIT_AE_ROUND_TIMEOUT_MS',
       'SL_EDIT_AE_MAX_BUCKETS',
       'SL_EDIT_AE_NOPROGRESS_BACKOFF_MS',
+      'SL_EDIT_AE_STUCK_CAP',
+      'SL_EDIT_AE_STUCK_MAX_BACKOFF_MS',
     ]) {
       delete process.env[k];
     }
@@ -434,5 +436,77 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     expect(Object.keys(bFinal).sort()).toEqual(
       freshDocs.map((d) => d._id).sort(),
     );
+  }, 40_000);
+  it('STOPS retrying a divergence it can never resolve, and says so once', async () => {
+    // THE UNBOUNDED LOOP. A divergence anti-entropy can detect but never close
+    // is not hypothetical: the codec documents it (equal content, unequal hash
+    // — see `mongoCanonical`), and a doc outside what the codec round-trips
+    // cannot converge at all. Before the cap, such a collection retried every
+    // 5 s FOR EVER, each round broadcasting AEQ and drawing a full ~256 kB AER
+    // manifest back from every peer, every message nonce-stamped so the ref
+    // dedup could not swallow it. That is the loop that took a workstation to
+    // 3.5 GB over a collection nothing was using.
+    //
+    // Reads that never work model it exactly: divergence is visible, every
+    // round moves nothing. The assertion is about the TRAFFIC, not a log line:
+    // after the cap the retries must stop.
+    process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS'] = '10';
+    process.env['SL_EDIT_AE_STUCK_CAP'] = '3';
+    const { nodes, bus, stop } = await buildMesh(2, [COLLECTION], {
+      seed: (ns) => {
+        const col = ns[1].mongo.collection(COLLECTION);
+        for (let i = 0; i < 5; i++) col.docs.set(`s${i}`, { _id: `s${i}`, v: i });
+      },
+    });
+    stopMesh = stop;
+    const [a] = nodes;
+    a.peer.blockReads = true; // nothing will EVER be pullable
+
+    const queries = (): number =>
+      bus.traffic.filter((t) => t.from === a.id && t.ref.startsWith('~AEQ~'))
+        .length;
+
+    await settle(nodes, 1500);
+    const afterPause = queries();
+    // It gave up rather than spinning: a handful of rounds, not one per 10 ms.
+    expect(afterPause, 'the loop never stopped').toBeLessThan(12);
+    expect(afterPause, 'it never even tried').toBeGreaterThan(0);
+    // And it stays stopped. This is the part that matters — the old code would
+    // keep adding a round every back-off for the life of the process.
+    await settle(nodes, 1500);
+    expect(queries(), 'it resumed on its own with nothing new to go on').toBe(
+      afterPause,
+    );
+    // Still diverged, deliberately: paused is not converged, and pretending
+    // otherwise would hide a real defect.
+    expect(docsOf(a, COLLECTION)['s0']).toBeUndefined();
+  }, 40_000);
+
+  it('resumes a paused collection as soon as a root changes, and converges', async () => {
+    // The pause is keyed to the root PAIR that got stuck, so it lifts itself on
+    // new information and needs no operator. Without that, bounding the retry
+    // would trade a hot loop for a node that never heals — a worse bug.
+    process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS'] = '10';
+    process.env['SL_EDIT_AE_STUCK_CAP'] = '3';
+    const { nodes, stop } = await buildMesh(2, [COLLECTION], {
+      seed: (ns) => {
+        const col = ns[1].mongo.collection(COLLECTION);
+        for (let i = 0; i < 5; i++) col.docs.set(`r${i}`, { _id: `r${i}`, v: i });
+      },
+    });
+    stopMesh = stop;
+    const [a, b] = nodes;
+    a.peer.blockReads = true;
+    await settle(nodes, 1500); // reach the pause
+    expect(docsOf(a, COLLECTION)['r0']).toBeUndefined();
+
+    // Reads work again AND a write moves B's root: the pair is new, so the
+    // backfill restarts on its own.
+    a.peer.blockReads = false;
+    b.put(COLLECTION, { _id: 'wake', v: 1 });
+
+    const state = await converge(nodes, COLLECTION);
+    for (let i = 0; i < 5; i++) expect(state[`r${i}`]).toMatchObject({ v: i });
+    expect(state['wake']).toMatchObject({ v: 1 });
   }, 40_000);
 });

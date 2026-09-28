@@ -1,5 +1,77 @@
 # Changelog
 
+## [0.0.52]
+
+**A divergence anti-entropy cannot resolve retried every five seconds for
+ever.** That is the mechanism behind a workstation at 3.5 GB and a console
+scrolling one collection's name past everything else — and the collection it
+happened to be was `e2eProbe`, which nothing was using.
+
+### What was unbounded
+
+The no-progress back-off has been there a while: a round that finds divergence
+but moves no documents waits 5 s instead of re-chaining immediately. Flat, and
+**with no end**. So a divergence that can be *detected* but never *closed*
+retried at that rate for the life of the process. Two ways to get one, both
+already documented in this package:
+
+- the phantom-differing bucket — equal content, unequal hash (see
+  `mongoCanonical`), the case that produced `ae … want+=0 drop+=0` looping live
+  on 2026-09-09;
+- a document outside what the codec can round-trip, which the same comment
+  records as a known limit.
+
+Each retry broadcasts `AEQ`, and every peer answers with a full `AER` manifest
+of `AE_BUCKET_COUNT` × 64 hex ≈ **256 kB**. Every one of those messages is
+nonce-stamped, deliberately, so the connector's ref-dedup cannot swallow it.
+Nothing in that loop is wrong per round. What was wrong is that it had no end.
+
+### The bound
+
+Consecutive rounds that move nothing while the roots still differ now double
+the back-off (capped at 5 min) and, after `SL_EDIT_AE_STUCK_CAP` of them,
+**pause** the collection's backfill. One log line says so, naming both roots.
+
+The pause is keyed to the root PAIR that got stuck, not to the collection, so
+it lifts itself: any change on either side is new information and the backfill
+resumes on its own. A pause needing an operator to clear it would be a worse
+bug than the loop.
+
+While paused, the receive side also stops clearing the diverged root from the
+received-dedup. That deliberate dedup defeat exists to re-drive a TRANSIENT
+divergence on the next heartbeat; on a permanent one it is what put the same
+line on the console for ever.
+
+Same shape as the `_headRearmCap` directly above it in the file, for the same
+reason: re-arming work that provably cannot progress is not resilience.
+
+### Where the accounting had to go, and why the first attempt did nothing
+
+Bounding the round-completion chain alone changed **nothing measurable** — the
+test still counted 33 broadcasts where it expected under 12. The accounting sat
+below `_onAeRoundComplete`'s "no peer head recorded" early return, and a
+collection whose documents live only in a peer's cold-start baseline has no peer
+head. That is *precisely* the collection anti-entropy exists to serve. So the
+rounds that could never progress were the ones never counted, and the retries
+were arriving from the heartbeat path the whole time.
+
+The peer root therefore cannot be read from `_lastPeerHead`, which is about edit
+chains; it is tracked where the divergence is actually measured.
+
+### Measured, not argued
+
+`test/mongo-edit-ae-backfill.spec.ts` asserts on the TRAFFIC, not on a log line:
+reads that never succeed, then count the `AEQ` broadcasts. With the cap lifted
+the control run reproduces the loop in two seconds — 34 and climbing. With the
+bound: a handful, then a flat line across the next window. A second test proves
+a paused collection resumes and converges the moment a root changes.
+
+### Also
+
+Dependencies lifted to the set the One Client now runs — `db` 0.0.47, `io`
+0.0.80, `rljson` 0.0.83, `server` 0.0.68, `fs-agent` 0.0.80 — so the suite
+tests the stack that ships.
+
 ## [0.0.51]
 
 **`recv ref` said the same thing thousands of times and buried everything
