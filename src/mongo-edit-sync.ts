@@ -65,6 +65,12 @@ const ROOT_SEP = '|';
  */
 const ROOT_STUCK_EVERY = 20;
 
+/**
+ * How many dropped refs for an unsynced collection pass between log lines. The
+ * first is reported immediately; the rest only prove the peer is still talking.
+ */
+const NOT_SYNCABLE_EVERY = 500;
+
 /** What was last traced for one collection's received root. */
 export interface RootReceiptState {
   /** The root that was traced. */
@@ -112,6 +118,106 @@ export interface HeadReceiptState {
   seen: number;
 }
 
+/**
+ * A stuck root pair, shortened for a human. Separate from the pair itself,
+ * which is a map key and must stay exact: a key and a label want different
+ * things, and trimming the key would make two different divergences that share
+ * a prefix read as one.
+ * @param pair - The `local|peer` key, with full roots.
+ * @returns `local=… peer=…`, each root trimmed as every other log line trims
+ *   them, and an absent peer root named rather than left blank.
+ */
+export const pairLabel = (pair: string): string => {
+  const [local, peer] = pair.split(ROOT_SEP);
+  return `local=${local.slice(0, 12)} peer=${(peer || 'untagged').slice(0, 12)}`;
+};
+
+// .............................................................................
+/**
+ * How a stuck anti-entropy round is accounted for, as pure arithmetic.
+ *
+ * Extracted so every path is directly testable — the same reason
+ * {@link headReceiptLine} and {@link rootReceiptLine} are functions rather than
+ * branches buried in a method. What it decides:
+ *
+ * - under the cap → keep retrying, with the doubled back-off;
+ * - at or over it → pause, and say so ONCE per root pair.
+ *
+ * The pair is the key, not the collection: a pause keyed on the collection would
+ * need something to lift it, and nothing in a stuck fleet is in a position to
+ * know when. A different pair is, by definition, new information.
+ * @param n - Consecutive rounds that have now moved nothing, including this one.
+ * @param cap - Rounds after which the collection is paused.
+ * @param pair - The `local|peer` root pair this round measured.
+ * @param lastPaused - The pair a pause was last announced for, if any.
+ * @returns Whether to pause, and the pair to remember if it is newly paused.
+ */
+export const stuckDecision = (
+  n: number,
+  cap: number,
+  pair: string,
+  lastPaused: string | undefined,
+): { pause: boolean; announce: boolean } => {
+  if (n < cap) return { pause: false, announce: false };
+  return { pause: true, announce: lastPaused !== pair };
+};
+
+// .............................................................................
+/**
+ * The escalating delay before re-chaining a round that moved nothing: the flat
+ * back-off doubled per consecutive failure, capped. A transient unservable pull
+ * still resumes in seconds; a hopeless one stops asking several times a minute
+ * long before the cap pauses it outright.
+ * @param n - Consecutive rounds that have moved nothing.
+ * @param baseMs - The flat back-off to grow from.
+ * @param capMs - The ceiling.
+ * @returns The delay in milliseconds.
+ */
+export const noProgressDelayMs = (
+  n: number,
+  baseMs: number,
+  capMs: number,
+): number => Math.min(baseMs * 2 ** (Math.max(1, n) - 1), capMs);
+
+// .............................................................................
+/**
+ * The line to trace for the nth ref dropped because this node does not sync the
+ * collection — or `null` for the ones that say nothing new.
+ *
+ * Both drop sites are correct and neither is news the second time. A peer that
+ * syncs a collection we do not announces its root on every heartbeat, and while
+ * diverged it clears its own dedup so every one of those really does arrive. On
+ * a MIXED fleet mid-rollout that is a line per tick per peer about a route this
+ * node has nothing to do with — and the E2E sandbox is exactly that case by
+ * design, because the route deliberately stops existing between runs while
+ * older peers still talk about it.
+ *
+ * So: say it once, then every {@link NOT_SYNCABLE_EVERY}th time with the count,
+ * which is the only part that carries information.
+ * @param kind - Whether the dropped ref was a `ref` or a `root`.
+ * @param collection - The collection that is not synced here.
+ * @param n - How many have now been dropped for it, including this one.
+ * @returns The line to trace, or `null` to stay quiet.
+ */
+export const notSyncableLine = (
+  kind: 'ref' | 'root',
+  collection: string,
+  n: number,
+): string | null => {
+  if (n === 1) {
+    return (
+      `recv ${kind} ${collection} NOT syncable here, dropping — and staying ` +
+      'quiet about it from now on'
+    );
+  }
+  if (n % NOT_SYNCABLE_EVERY !== 0) return null;
+  return (
+    `recv ${kind} ${collection} NOT syncable — ${n} dropped so far ` +
+    '(a peer still syncs it; this node does not)'
+  );
+};
+
+// .............................................................................
 /**
  * What to trace for a received head, and what to remember.
  *
@@ -470,6 +576,18 @@ export class MongoEditSync {
    * peer root in exactly that case, so it cannot read it from there.
    */
   private readonly _aeLastDivergedRoot = new Map<string, string | undefined>();
+  /**
+   * `collection` → how many refs have been dropped for a collection this node
+   * does not sync, so the fact is stated once rather than once per heartbeat.
+   *
+   * A peer that syncs a collection we do not announces its root on every tick,
+   * and it clears its own dedup while diverged, so every tick really does
+   * arrive. Both drops below are correct and neither is news the second time.
+   * This is what a MIXED fleet looks like from the new side during a rollout —
+   * and during the E2E rollout specifically, where the route deliberately
+   * stops existing between runs while older peers still talk about it.
+   */
+  private readonly _notSyncableDrops = new Map<string, number>();
   /**
    * Collections whose backfill is PAUSED, keyed to the exact root pair that got
    * stuck (`<local>|<peer>`). See {@link _aeStuckCap} for why, and
@@ -1349,6 +1467,19 @@ export class MongoEditSync {
   }
 
   /**
+   * Reports a ref dropped for a collection this node does not sync — once, then
+   * only every {@link NOT_SYNCABLE_EVERY}th time. See {@link notSyncableLine}.
+   * @param kind - Whether the dropped ref was a `ref` or a `root`.
+   * @param collection - The collection that is not synced here.
+   */
+  private _logNotSyncable(kind: 'ref' | 'root', collection: string): void {
+    const n = (this._notSyncableDrops.get(collection) ?? 0) + 1;
+    this._notSyncableDrops.set(collection, n);
+    const line = notSyncableLine(kind, collection, n);
+    if (line) this._log(line);
+  }
+
+  /**
    * The key a pause is remembered under: this node's root and the peer's,
    * together. Not the collection alone — a pause keyed on the collection would
    * have to be lifted by something, and nothing in a stuck fleet is in a
@@ -1360,6 +1491,9 @@ export class MongoEditSync {
    * @returns The pause key.
    */
   private _rootPair(collection: string, peerRoot: string | undefined): string {
+    // FULL roots, not the 12 characters the logs show. This is a map key that
+    // decides whether a pause still applies; two different roots that happen to
+    // share a prefix must not read as the same divergence.
     return `${this._contentRoot(collection)}${ROOT_SEP}${peerRoot ?? ''}`;
   }
 
@@ -1384,14 +1518,19 @@ export class MongoEditSync {
   ): boolean {
     const n = (this._aeNoProgress.get(collection) ?? 0) + 1;
     this._aeNoProgress.set(collection, n);
-    if (n < this._aeStuckCap) return false;
     const pair = this._rootPair(collection, peerRoot);
-    if (this._aeStuck.get(collection) !== pair) {
-      this._aeStuck.set(collection, pair);
+    const { pause, announce } = stuckDecision(
+      n,
+      this._aeStuckCap,
+      pair,
+      this._aeStuck.get(collection),
+    );
+    if (!pause) return false;
+    this._aeStuck.set(collection, pair);
+    if (announce) {
       this._log(
         `ae ${collection} STUCK — ${n} rounds moved nothing and the roots ` +
-          `still differ (local=${this._contentRoot(collection).slice(0, 12)} ` +
-          `peer=${(peerRoot ?? 'untagged').slice(0, 12)}); backfill PAUSED ` +
+          `still differ (${pairLabel(pair)}); backfill PAUSED ` +
           'until either root changes. ' +
           'A divergence anti-entropy cannot resolve is a defect to report, ' +
           'not a round to repeat.',
@@ -1409,9 +1548,12 @@ export class MongoEditSync {
    * @returns The delay in milliseconds.
    */
   private _noProgressDelayMs(collection: string): number {
-    const n = this._aeNoProgress.get(collection) ?? 1;
-    const grown = this._aeNoProgressBackoffMs * 2 ** (n - 1);
-    return Math.min(grown, this._aeStuckMaxBackoffMs);
+    return noProgressDelayMs(
+      /* v8 ignore next -- @preserve `_notePauseIfStuck` always set it first */
+      this._aeNoProgress.get(collection) ?? 1,
+      this._aeNoProgressBackoffMs,
+      this._aeStuckMaxBackoffMs,
+    );
   }
 
   /**
@@ -2487,7 +2629,7 @@ export class MongoEditSync {
         // next root visibly diverge, which arms the backfill. Same guard as
         // the head branch, so a burst of roots starts one adoption.
         if (!this._shouldSync?.(collection)) {
-          this._log(`recv root ${collection} NOT syncable, drop`);
+          this._logNotSyncable('root', collection);
           return;
         }
         // Arm the retry loop BEFORE adopting. The peer re-announces the SAME
@@ -2581,7 +2723,7 @@ export class MongoEditSync {
       // The producer side of that deadlock was fixed earlier; this is the
       // consumer side.
       if (!this._shouldSync?.(collection)) {
-        this._log(`recv ref ${collection} NOT syncable, drop`);
+        this._logNotSyncable('ref', collection);
         return;
       }
       if (!this._adoptingOnRef.has(collection)) {

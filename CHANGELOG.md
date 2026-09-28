@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.53]
+
+**Quiet about a route it does not serve.** The other half of what a MIXED fleet
+looks like from the new side, and the direct consequence of 0.0.52's companion
+change in the One Client: the E2E sandbox route deliberately stops existing
+between runs, while older peers keep talking about it.
+
+A peer that syncs a collection this node does not announces its root on every
+heartbeat — and while diverged it clears its own dedup, so every one of those
+really does arrive. Both drop sites were correct and both said so every time.
+Now: once, then every `NOT_SYNCABLE_EVERY`th with the count, which is the only
+part that carries information. Same rule `recv ref` and `recv root` already
+follow.
+
+### Pulled into pure functions, because branches buried in a method are branches
+### nobody tests
+
+`notSyncableLine`, `stuckDecision`, `noProgressDelayMs` and `pairLabel` are now
+exported functions beside `headReceiptLine` and `rootReceiptLine`, for the
+reason those two are: every path is directly testable. 0.0.52 shipped the bound
+with three of its own decision branches uncovered — the cap boundary, the
+announce-once suppression, and the back-off growth — which is exactly where a
+later change would break it silently.
+
+Branch coverage went UP doing this, 97.68 → 98.04, and the new code has no
+uncovered branch of its own.
+
+### One correctness fix inside 0.0.52's own work
+
+The pause key briefly carried 12-character roots, because the log line wanted
+short ones. A key and a label want different things: the key decides whether a
+pause still applies, and two different roots sharing a prefix must not read as
+the same divergence. The key holds the FULL roots; `pairLabel` trims for
+display, and names an untagged peer root rather than printing a blank.
+
+249 tests, 99.55 / 98.04 / 100 / 99.83.
+
 ## [0.0.52]
 
 **A divergence anti-entropy cannot resolve retried every five seconds for
