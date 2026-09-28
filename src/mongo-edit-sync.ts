@@ -104,6 +104,59 @@ export interface RootReceiptState {
  * @param diverged - Whether it differs from ours.
  * @returns The state to remember, and the line to trace or `null`.
  */
+/** What was last traced for one collection's received head. */
+export interface HeadReceiptState {
+  /** The head that was traced. */
+  head: string;
+  /** How many identical receipts have arrived since that line. */
+  seen: number;
+}
+
+/**
+ * What to trace for a received head, and what to remember.
+ *
+ * **The other half of the flood** `rootReceiptLine` fixed. `recv ref` was
+ * written on every receipt, and the same head arrives over and over by
+ * design: a head that applies only partially re-arms by clearing the
+ * connector's received-dedup, so the next announcement delivers it again — and
+ * a peer announces on every heartbeat regardless.
+ *
+ * On 2026-09-28 a lab console was nothing but two `e2eProbe` heads alternating
+ * for minutes, at a rate that buried every other line on the node while it ran
+ * itself out of memory. The information content of the thousandth repeat is
+ * the COUNT, not the line.
+ *
+ * So the same rule as the root: a head this node has not traced, or every
+ * {@link ROOT_STUCK_EVERY} identical repeats, with the count — because a head
+ * that has been re-delivered two hundred times without converging is a finding
+ * rather than progress.
+ * @param last - What was traced last for this collection, if anything.
+ * @param collection - Which collection.
+ * @param head - The head the peer announced.
+ * @returns The state to remember, and the line to trace or `null`.
+ */
+export const headReceiptLine = (
+  last: HeadReceiptState | undefined,
+  collection: string,
+  head: string,
+): { next: HeadReceiptState; line: string | null } => {
+  const changed = last?.head !== head;
+  const seen = changed ? 1 : last.seen + 1;
+  const next: HeadReceiptState = { head, seen };
+
+  if (changed) return { next, line: `recv ref ${collection}:${head}` };
+  if (seen % ROOT_STUCK_EVERY !== 0) return { next, line: null };
+
+  // A COUNT, not a failure: the re-delivery is how a partial apply retries.
+  // What a reader needs is whether it is still getting anywhere.
+  return {
+    next,
+    line:
+      `recv ref ${collection}:${head} — same head ${seen}x, ` +
+      'still not converged',
+  };
+};
+
 export const rootReceiptLine = (
   last: RootReceiptState | undefined,
   collection: string,
@@ -645,6 +698,15 @@ export class MongoEditSync {
    * See {@link _logRootReceipt}. `seen` counts the identical repeats since the
    * last line, which is what turns a flood into a finding.
    */
+  /**
+   * What was last traced for each collection's received HEAD.
+   *
+   * Beside {@link _lastLoggedRecvRoot} and for the same reason: the same
+   * announcement arrives over and over by design, and a line per receipt
+   * buries everything else on the console.
+   */
+  private readonly _lastLoggedRecvHead = new Map<string, HeadReceiptState>();
+
   private readonly _lastLoggedRecvRoot = new Map<
     string,
     { root: string; diverged: boolean; seen: number }
@@ -2332,7 +2394,13 @@ export class MongoEditSync {
     const sep = rest.lastIndexOf(ROOT_SEP);
     const head = sep < 0 ? rest : rest.slice(0, sep);
     const targetRoot = sep < 0 ? undefined : rest.slice(sep + 1);
-    this._log(`recv ref ${collection}:${head}`);
+    const receipt = headReceiptLine(
+      this._lastLoggedRecvHead.get(collection),
+      collection,
+      head,
+    );
+    this._lastLoggedRecvHead.set(collection, receipt.next);
+    if (receipt.line !== null) this._log(receipt.line);
     if (!this._collections.has(collection)) {
       // A collection that exists only on the PEER. Dropping the ref here made
       // such a collection permanently unreachable: this node's synced set is

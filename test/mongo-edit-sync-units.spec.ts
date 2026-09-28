@@ -12,8 +12,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { docHash } from '../src/mongo-component-codec.ts';
 import { bucketOf } from '../src/mongo-manifest-hash.ts';
 import type { EditSyncConnector } from '../src/mongo-edit-sync.ts';
-import { MongoEditSync, rootReceiptLine } from '../src/mongo-edit-sync.ts';
-import type { RootReceiptState } from '../src/mongo-edit-sync.ts';
+import {
+  headReceiptLine,
+  MongoEditSync,
+  rootReceiptLine,
+} from '../src/mongo-edit-sync.ts';
+import type {
+  HeadReceiptState,
+  RootReceiptState,
+} from '../src/mongo-edit-sync.ts';
 
 /**
  * DETERMINISTIC unit cover for the anti-entropy host surface.
@@ -424,6 +431,52 @@ describe('tracing a received root', () => {
     const moved = rootReceiptLine(second.next, 'kunden', 'bbbb', true);
 
     expect(moved.line).toContain('bbbb');
+    expect(moved.next.seen).toBe(1);
+  });
+});
+
+describe('tracing a received head', () => {
+  /**
+   * Feeds the same receipt n times, collecting every line it produced.
+   * @param times - How many identical receipts arrive.
+   * @returns The lines, in order.
+   */
+  const repeat = (times: number): string[] => {
+    const lines: string[] = [];
+    let last: HeadReceiptState | undefined;
+    for (let i = 0; i < times; i++) {
+      const out = headReceiptLine(last, 'e2eProbe', 'ouQleSfcoQOJS');
+      last = out.next;
+      if (out.line !== null) lines.push(out.line);
+    }
+    return lines;
+  };
+
+  it('says a head it has not traced before', () => {
+    const { line } = headReceiptLine(undefined, 'e2eProbe', 'ouQleSfcoQOJS');
+
+    expect(line).toBe('recv ref e2eProbe:ouQleSfcoQOJS');
+  });
+
+  it('does not flood on a re-announced head — it COUNTS', () => {
+    // 2026-09-28: a lab console was nothing but two `e2eProbe` heads
+    // alternating for minutes. A head that applies only partially re-arms by
+    // clearing the received-dedup, so the next announcement delivers it again,
+    // and a peer announces on every heartbeat regardless.
+    const lines = repeat(60);
+
+    expect(lines).toHaveLength(4);
+    expect(lines[1]).toContain('same head 20x');
+    expect(lines[3]).toContain('same head 60x');
+    expect(lines[1]).toContain('still not converged');
+  });
+
+  it('starts counting again when the head moves', () => {
+    const first = headReceiptLine(undefined, 'e2eProbe', 'aaaa');
+    const same = headReceiptLine(first.next, 'e2eProbe', 'aaaa');
+    const moved = headReceiptLine(same.next, 'e2eProbe', 'bbbb');
+
+    expect(moved.line).toBe('recv ref e2eProbe:bbbb');
     expect(moved.next.seen).toBe(1);
   });
 });

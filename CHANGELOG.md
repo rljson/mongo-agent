@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.51]
+
+**`recv ref` said the same thing thousands of times and buried everything
+else.** The other half of the flood 0.0.50 fixed for `recv root`.
+
+A head that applies only partially re-arms by clearing the connector's
+received-dedup, so the next announcement delivers it again — and a peer
+announces on every heartbeat regardless. The line was written on every receipt.
+
+On 2026-09-28 a lab console was nothing but two `e2eProbe` heads alternating,
+for minutes, while the node worked itself up to `rss=7087MB … ab=5542MB` and
+died on `Ineffective mark-compacts near heap limit`. The one thing the console
+could not be used for was working out why.
+
+So the same rule as the root: a head this node has not traced, or every
+twentieth identical repeat, **with the count** — because a head re-delivered
+two hundred times without converging is a finding rather than progress, and
+only the count says which.
+
+The decision is `headReceiptLine`, a pure function beside `rootReceiptLine`,
+so the rule is testable without a mongo, a peer or a socket.
+
+### Considered and withdrawn
+
+A responder-side window on `_onQuery`, suppressing an unchanged bucket manifest
+for a couple of seconds. The intent was to bound the anti-entropy amplification
+— N peers, N distinct asks (every AE message carries a nonce so the ref-dedup
+cannot drop a retry), every node answering every ask, every answer broadcast to
+every peer: N² manifests at ~256 KB each.
+
+**It broke chained backfill, and the test caught it.** A large baseline delta
+converges by chaining rounds, and each round re-asks the same question and needs
+the same unchanged answer; suppressing the repeat stalled the chain after one
+capped chunk. The amplification is real and still unbounded — but the fix is not
+this one, and shipping it would have traded a noisy console for a sync that
+stops halfway.
+
 ## [0.0.48]
 
 **`collectionStats()` — what each synced collection holds, counted on request.**

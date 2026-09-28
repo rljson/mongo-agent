@@ -11,6 +11,23 @@
 # release process rested on one machine either way — a package nobody else can
 # publish is a package with a single point of failure wearing a laptop.
 #
+# ## Why no token
+#
+# The first cut of this used a stored `NPM_TOKEN`, and npm refused it: the
+# publish built its tarball and then answered `EOTP` — *this operation requires
+# a one-time password from your authenticator* — while every call printed
+#
+#     npm tokens that bypass 2FA are being restricted for account changes and
+#     direct publishing
+#
+# That is npm's GAT bypass-2FA deprecation, already in force on this account.
+# No token of any kind can publish here any more, so there is no token to store:
+# the job proves who it is with the OIDC identity GitHub gives it, and npm
+# checks that against the trusted publisher configured on the package.
+#
+# It needs npm >= 11.5.1, which is newer than the one Node 22 ships, hence the
+# explicit upgrade below.
+#
 # ## Why a version check rather than a tag
 #
 # These repos already bump the version inside the PR that makes the change, so
@@ -28,9 +45,16 @@ jobs:
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
-    # Never from a fork: a fork's push cannot reach this repo's secrets anyway,
+    # Never from a fork: a fork cannot hold this repo's OIDC identity anyway,
     # and failing loudly there would be noise on somebody else's clone.
     if: github.repository == 'rljson/mongo-agent'
+
+    permissions:
+      # What replaces the token. GitHub mints a short-lived OIDC identity for
+      # this job, npm verifies it against the trusted publisher on the package,
+      # and nothing long-lived exists anywhere to leak or expire.
+      id-token: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -46,9 +70,6 @@ jobs:
         with:
           node-version: 22.x
           cache: 'pnpm'
-          # Writes the registry line into the runner's .npmrc so `npm publish`
-          # reads NODE_AUTH_TOKEN below. Without it the publish is anonymous
-          # and fails with a 404 that reads like a missing package.
           registry-url: 'https://registry.npmjs.org'
 
       - run: pnpm install --frozen-lockfile
@@ -70,23 +91,12 @@ jobs:
             echo "$NAME@$VERSION is not on npm — publishing."
           fi
 
-      # Checked BEFORE the suite runs, not left to npm. npm answers a missing
-      # credential with a 404 on the package — a message that reads as "this
-      # package does not exist" and sends whoever is looking at it entirely the
-      # wrong way — and it would say so three minutes in, after a full test run
-      # spent on a release that could never land.
-      - name: Require the npm token
+      # Trusted publishing landed in npm 11.5.1 and Node 22 ships an older one.
+      # Pinned to `latest` rather than to a version, because the thing being
+      # tracked is npm's own auth mechanism and it is npm that is moving it.
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
         if: steps.decide.outputs.publish == 'true'
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "::error::No NPM_TOKEN secret on this repository, so this" \
-              "release cannot be published. Create an npm Automation token" \
-              "(npmjs.com → Access Tokens → Generate → Automation) and add it" \
-              "as the repository secret NPM_TOKEN, then re-run this workflow."
-            exit 1
-          fi
+        run: npm install -g npm@latest
 
       # The gate, as its own step. `npm publish` would run the same thing
       # through `prepublishOnly`, but a test failure would then arrive as a
@@ -105,5 +115,3 @@ jobs:
       - name: Publish
         if: steps.decide.outputs.publish == 'true'
         run: npm publish --access public --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
