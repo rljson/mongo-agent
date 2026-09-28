@@ -557,7 +557,9 @@ export interface MeshNode {
  * Builds an n-node mesh, each node syncing `collections`.
  * @param count - Number of nodes.
  * @param collections - The collections every node syncs.
- * @returns The started nodes and a `stop()` that shuts them all down.
+ * @returns The started nodes, the shared `bus` (whose `traffic` is every ref
+ *   delivered, so a test can measure how much work a behaviour causes), and a
+ *   `stop()` that shuts them all down.
  */
 export const buildMesh = async (
   count: number,
@@ -580,7 +582,12 @@ export const buildMesh = async (
     /** The consumer-side syncable filter (`isSyncableCollection` in the app). */
     shouldSync?: (collection: string) => boolean;
   },
-): Promise<{ nodes: MeshNode[]; stop: () => Promise<void> }> => {
+): Promise<{
+  nodes: MeshNode[];
+  /** The shared bus, so a test can measure the traffic a behaviour produces. */
+  bus: MeshBus;
+  stop: () => Promise<void>;
+}> => {
   const locals: IoMem[] = [];
   const nodes: MeshNode[] = [];
   const bus = new MeshBus();
@@ -634,6 +641,7 @@ export const buildMesh = async (
 
   return {
     nodes,
+    bus,
     stop: async () => {
       for (const node of nodes) await node.sync.stop();
     },

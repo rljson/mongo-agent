@@ -456,6 +456,52 @@ export class MongoEditSync {
   private readonly _aeNoProgressBackoffMs =
     Number(process.env['SL_EDIT_AE_NOPROGRESS_BACKOFF_MS']) || 5_000;
   /**
+   * `collection` → consecutive rounds that moved NOTHING while the roots still
+   * differed. Escalates {@link _aeNoProgressBackoffMs} and, at
+   * {@link _aeStuckCap}, quarantines the collection.
+   */
+  private readonly _aeNoProgress = new Map<string, number>();
+  /**
+   * `collection` → the peer root a divergence was last measured against.
+   *
+   * Separate from {@link _lastPeerHead}, which is about edit-chain HEADS and is
+   * empty for the case anti-entropy exists to serve: docs that live only in a
+   * peer's cold-start baseline and in no chain at all. The pause below needs a
+   * peer root in exactly that case, so it cannot read it from there.
+   */
+  private readonly _aeLastDivergedRoot = new Map<string, string | undefined>();
+  /**
+   * Collections whose backfill is PAUSED, keyed to the exact root pair that got
+   * stuck (`<local>|<peer>`). See {@link _aeStuckCap} for why, and
+   * {@link _clearStuckIfPairChanged} for what lifts it.
+   */
+  private readonly _aeStuck = new Map<string, string>();
+  /**
+   * Consecutive no-progress rounds after which a collection's backfill is
+   * PAUSED rather than retried again.
+   *
+   * **This is the bound that was missing, and it is what let one unusable
+   * collection take a workstation to 3.5 GB.** The no-progress back-off above
+   * is flat and uncapped: a divergence anti-entropy can detect but never
+   * resolve — the documented phantom-differing bucket (see
+   * {@link mongoCanonical}: equal content, unequal hash) or a doc outside what
+   * the codec can round-trip — retried every 5 s **for ever**. Each retry
+   * broadcasts AEQ, and every peer answers with a full AER manifest of
+   * {@link AE_BUCKET_COUNT} × 64 hex ≈ 256 kB, every message nonce-stamped
+   * precisely so the connector's ref-dedup CANNOT swallow it. Nothing in that
+   * loop is wrong per round; what was wrong is that it had no end.
+   *
+   * The same shape as {@link _headRearmCap} directly above, for the same
+   * reason: re-arming work that provably cannot progress is not resilience.
+   */
+  /* v8 ignore next -- @preserve stuck-round cap, env-overridable */
+  private readonly _aeStuckCap =
+    Number(process.env['SL_EDIT_AE_STUCK_CAP']) || 6;
+  /** Ceiling on the escalating no-progress back-off. */
+  /* v8 ignore next -- @preserve stuck back-off ceiling, env-overridable */
+  private readonly _aeStuckMaxBackoffMs =
+    Number(process.env['SL_EDIT_AE_STUCK_MAX_BACKOFF_MS']) || 300_000;
+  /**
    * `collection|head` → consecutive PARTIAL applies that moved the walk floor
    * nowhere. A head whose edit chain is fundamentally incomplete — the common
    * case for a collection that was bulk-imported and therefore stored
@@ -1256,6 +1302,31 @@ export class MongoEditSync {
    * @param collection - The collection whose round just finished.
    */
   private _onAeRoundComplete(collection: string): void {
+    // The accounting comes FIRST, and that placement is the fix. It used to sit
+    // below the `no peer head` early return — and a collection whose docs live
+    // only in a peer's baseline has no peer head, which is precisely the
+    // collection anti-entropy is for. So the rounds that could never progress
+    // were the ones never counted, and the retries kept arriving from the
+    // heartbeat path instead: each diverged root deliberately cleared from the
+    // received-dedup, re-delivered next tick, re-triggering. Bounding the chain
+    // alone left that untouched.
+    const progressed = this._aeRoundProgress.get(collection) === true;
+    this._aeRoundProgress.delete(collection);
+    const peerRoot =
+      this._lastPeerHead.get(collection)?.root ??
+      this._aeLastDivergedRoot.get(collection);
+    const converged =
+      peerRoot !== undefined && peerRoot === this._contentRoot(collection);
+    if (progressed || converged) {
+      // Reconcilable after all: forget the count and any pause, so a large
+      // delta keeps chaining at full speed.
+      this._aeNoProgress.delete(collection);
+      this._aeStuck.delete(collection);
+    } else if (this._notePauseIfStuck(collection, peerRoot)) {
+      // Paused. Nothing is scheduled, and the receive side stops re-driving it
+      // too — only a changed root restarts this collection.
+      return;
+    }
     const peer = this._lastPeerHead.get(collection);
     if (!peer || peer.root === this._contentRoot(collection)) return; // converged
     // Progress gate: a round that applied docs chains straight into the next
@@ -1265,18 +1336,109 @@ export class MongoEditSync {
     // event loop so the pulls that DO arrive are never applied — the exact
     // 4000-empty-rounds saturation seen live. The back-off retries at a trickle
     // so a transiently-unservable pull resumes without spinning.
-    const madeProgress = this._aeRoundProgress.get(collection) === true;
-    this._aeRoundProgress.delete(collection);
     // `_maybeTriggerAe` is cooldown-gated (armed when this round started), so a
     // fast round would otherwise be dropped and break the chain; wait out the
     // cooldown on progress, or the longer back-off when the round pulled nothing.
-    const base = madeProgress
+    const base = progressed
       ? (this._aeCooldownUntil.get(collection) ?? 0) - Date.now()
-      : this._aeNoProgressBackoffMs;
+      : this._noProgressDelayMs(collection);
     const delay = Math.max(0, base);
     const t = setTimeout(() => this._maybeTriggerAe(collection), delay);
     /* v8 ignore next -- @preserve unref keeps the timer from blocking exit */
     (t as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * The key a pause is remembered under: this node's root and the peer's,
+   * together. Not the collection alone — a pause keyed on the collection would
+   * have to be lifted by something, and nothing in a stuck fleet is in a
+   * position to know when to lift it. The pair answers that by itself: a
+   * different pair is, by definition, new information.
+   * @param collection - The collection being keyed.
+   * @param peerRoot - The peer root (`undefined` from a peer too old to tag
+   *   one, which still keys usefully on the local root).
+   * @returns The pause key.
+   */
+  private _rootPair(collection: string, peerRoot: string | undefined): string {
+    return `${this._contentRoot(collection)}${ROOT_SEP}${peerRoot ?? ''}`;
+  }
+
+  /**
+   * Counts one no-progress round and decides whether to keep retrying.
+   *
+   * Pausing is keyed to the ROOT PAIR that got stuck, not to the collection, so
+   * the pause is self-lifting: the moment either side's root changes — a local
+   * write, a peer that converged, an operator clearing the offending document —
+   * {@link _clearStuckIfPairChanged} sees a different pair and the backfill
+   * resumes on its own. A pair that keeps saying the same unreconcilable thing
+   * gets one log line, not one every five seconds for ever.
+   * @param collection - The collection whose round moved nothing.
+   * @param peerRoot - The peer root this round was measured against
+   *   (`undefined` from a peer too old to tag one — see {@link _lastPeerHead};
+   *   the pause then keys on the local root alone, which still bounds it).
+   * @returns True when the collection is now paused and must not be rescheduled.
+   */
+  private _notePauseIfStuck(
+    collection: string,
+    peerRoot: string | undefined,
+  ): boolean {
+    const n = (this._aeNoProgress.get(collection) ?? 0) + 1;
+    this._aeNoProgress.set(collection, n);
+    if (n < this._aeStuckCap) return false;
+    const pair = this._rootPair(collection, peerRoot);
+    if (this._aeStuck.get(collection) !== pair) {
+      this._aeStuck.set(collection, pair);
+      this._log(
+        `ae ${collection} STUCK — ${n} rounds moved nothing and the roots ` +
+          `still differ (local=${this._contentRoot(collection).slice(0, 12)} ` +
+          `peer=${(peerRoot ?? 'untagged').slice(0, 12)}); backfill PAUSED ` +
+          'until either root changes. ' +
+          'A divergence anti-entropy cannot resolve is a defect to report, ' +
+          'not a round to repeat.',
+      );
+    }
+    return true;
+  }
+
+  /**
+   * The escalating delay before re-chaining a round that moved nothing: the
+   * flat back-off doubled per consecutive failure, capped. A transient
+   * unservable pull still resumes in seconds; a hopeless one stops asking
+   * several times a minute long before the cap pauses it outright.
+   * @param collection - The collection being re-chained.
+   * @returns The delay in milliseconds.
+   */
+  private _noProgressDelayMs(collection: string): number {
+    const n = this._aeNoProgress.get(collection) ?? 1;
+    const grown = this._aeNoProgressBackoffMs * 2 ** (n - 1);
+    return Math.min(grown, this._aeStuckMaxBackoffMs);
+  }
+
+  /**
+   * Lifts a pause when the root pair is no longer the one that got stuck, and
+   * reports whether the collection is currently paused.
+   *
+   * Called on every diverged root receipt. While paused we also stop clearing
+   * the connector's received-dedup for that root: that deliberate dedup defeat
+   * exists to re-drive a TRANSIENT divergence on the next heartbeat, and on a
+   * permanent one it is what fills the console with the same line for ever.
+   * @param collection - The collection the root arrived for.
+   * @param peerRoot - The peer root just received.
+   * @returns True when the collection is paused and this root must not re-drive.
+   */
+  private _clearStuckIfPairChanged(
+    collection: string,
+    peerRoot: string | undefined,
+  ): boolean {
+    const stuck = this._aeStuck.get(collection);
+    if (stuck === undefined) return false;
+    if (stuck === this._rootPair(collection, peerRoot)) return true;
+    this._aeStuck.delete(collection);
+    this._aeNoProgress.delete(collection);
+    this._log(
+      `ae ${collection} resumed — the roots changed since it was paused`,
+    );
+    return false;
   }
 
   /**
@@ -2377,12 +2539,21 @@ export class MongoEditSync {
       // delivered again and re-drives the pending head, giving a deterministic
       // ~heartbeat-interval retry until we converge. When roots already match we
       // let the dedup swallow it — no work, no chatter on a healthy cluster.
-      if (diverged) this._connector.invalidateReceived?.(ref);
+      //
+      // UNLESS this collection's backfill is paused for exactly this root pair.
+      // Then the divergence is known-unresolvable, re-delivering the same root
+      // every heartbeat re-drives a head that cannot resolve, and the dedup we
+      // are defeating is the only thing keeping that off the console. A pause
+      // lifts itself the moment either root changes, which is also the only
+      // thing that could make this retry worth making.
+      if (diverged) this._aeLastDivergedRoot.set(collection, root);
+      const paused = diverged && this._clearStuckIfPairChanged(collection, root);
+      if (diverged && !paused) this._connector.invalidateReceived?.(ref);
       // Backfill: a persistent root mismatch the head re-drive cannot close —
       // the divergent docs live only in a peer's manifest baseline, never in an
       // edit chain (a bulk import, a cold-start delta) — is healed by the
       // bucketed manifest-diff backfill.
-      if (diverged) this._maybeTriggerAe(collection);
+      if (diverged && !paused) this._maybeTriggerAe(collection);
       return;
     }
     const idx = ref.indexOf(':');
