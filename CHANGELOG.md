@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.0.55]
+
+**Two machines that hold the same document with different content now agree
+on one (ONE-443).** The anti-entropy backfilled only documents a node lacked
+entirely; a document both held at different content was skipped as "a
+concurrent-edit conflict handled elsewhere" — true only for documents the
+edit chain carries. Two nodes loaded from different backups sat on two
+contents for good, and every screen reported the sync healthy.
+
+### What now works that did not
+
+- **Different content is decided.** Entries carry the document's edit
+  `timeId`; both sides apply `peerVersionWins` to the same two versions — the
+  newer edit wins, an edited version beats one that was only loaded, two loads
+  decide by content hash — and the loser pulls the winner. A local edit made
+  between the decision and the pull is kept.
+- **Three or more nodes converge.** Two defects hid behind two-node tests:
+  every node numbered its protocol messages from 0, so two nodes' queries were
+  identical and the second was dropped as a repeat; and the first answer that
+  agreed ended the round, discarding the peer that did not. Nonces now start
+  at a random value per node, and only an answer that shows a difference
+  completes a bucket.
+
+### Tests
+
+- `two-different-initial-loads` — two nodes seeded from different backups
+  converge; three nodes likewise.
+- `heals-after-forced-divergence` (mongo) — an edit whose head is lost still
+  wins through the anti-entropy.
+- The two unit tests that asserted "an all-equal answer ends the round" now
+  assert the opposite; they described the defect.
+
+### Still open
+
+- Which version wins between two unedited loads is arbitrary (the greater
+  hash). Nothing tells an operator that a document was decided that way; the
+  losing version is not kept.
+
 ## [0.0.54]
 
 **Declare what the client actually forces.** 0.0.53 declared `fs-agent` 0.0.80

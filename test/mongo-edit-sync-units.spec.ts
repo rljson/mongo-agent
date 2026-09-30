@@ -245,6 +245,29 @@ describe('MongoEditSync — anti-entropy host surface', () => {
         ),
       ).toEqual([]);
     });
+
+    // Reached through the anti-entropy only when the node holding the
+    // tombstone happens to ask first. Since every node numbers its protocol
+    // messages from a random start (ONE-443), which side asks first is not
+    // fixed, and the integration tests pass either way — the other side then
+    // applies the tombstone itself. So the wiring is pinned here directly.
+    it('is what the anti-entropy calls to re-drive a delete', async () => {
+      const { sync, priv, conn } = await mkSync();
+      stop = () => sync.stop();
+      const p = priv as unknown as {
+        _tombstones: Map<string, Map<string, unknown>>;
+        _ae: {
+          _host: {
+            pushTombstones: (c: string, ids: string[]) => Promise<void>;
+          };
+        };
+      };
+      p._tombstones.set(COLL, new Map<string, unknown>([['7', 7]]));
+      conn.send.mockClear();
+      await p._ae._host.pushTombstones(COLL, ['7']);
+      const refs = conn.send.mock.calls.map((c) => c[0] as string);
+      expect(refs.some((r) => r.startsWith(`${COLL}:`))).toBe(true);
+    });
   });
 
   describe('_maybeTriggerAe', () => {

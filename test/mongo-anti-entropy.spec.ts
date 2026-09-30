@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   AE_BUCKET_COUNT,
   AntiEntropyHost,
+  peerVersionWins,
   MongoAntiEntropy,
 } from '../src/mongo-anti-entropy';
 import { bucketOf } from '../src/mongo-manifest-hash';
@@ -63,10 +64,19 @@ class FakeHost implements AntiEntropyHost {
     this.served.push({ collection, ids });
     return this.serveResult;
   }
+  /** Per-doc edit timeIds; `timeIdOf` is only present when a test sets it. */
+  timeIdOf?: (collection: string, sliceId: string) => string | undefined;
+  /** The `contested` map each pull was handed, as a snapshot. */
+  contestedSeen: Array<Map<string, string | undefined> | undefined> = [];
   /** Overridable per test; defaults to "every hash resolved" (no retry needed). */
   pullAndApplyResult?: (hashes: string[]) => number;
-  async pullAndApply(collection: string, hashes: string[]): Promise<number> {
+  async pullAndApply(
+    collection: string,
+    hashes: string[],
+    contested?: Map<string, string | undefined>,
+  ): Promise<number> {
     this.pulled.push({ collection, hashes });
+    this.contestedSeen.push(contested ? new Map(contested) : undefined);
     return this.pullAndApplyResult
       ? this.pullAndApplyResult(hashes)
       : hashes.length;
@@ -282,12 +292,22 @@ describe('MongoAntiEntropy', () => {
       host.roots[bucket] = 'f'.repeat(64); // our root for this bucket
     };
 
-    it('AER all-equal -> finishes the round without asking for entries', async () => {
+    // ONE-443. The query went to every peer; an answer that agrees is from a
+    // peer that is not the reason for the round. Closing on it discarded the
+    // one that differed — three nodes where two agreed never converged.
+    it('AER all-equal -> asks for nothing, and keeps the round open for the peer that differs', async () => {
       ae.trigger(COLL);
-      const roots = host.roots.join('');
-      await ae.onMessage(msg(AER, `${COLL}|${roots}`));
+      await ae.onMessage(msg(AER, `${COLL}|${host.roots.join('')}`));
       expect(host.countOf(AEG)).toBe(0);
-      // Round finished: a fresh trigger is accepted.
+      // Still in flight: no second round starts over it…
+      expect(ae.trigger(COLL)).toBe(false);
+      // …and the differing answer that arrives next is still acted on.
+      differAt(5);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      expect(host.lastBodyOf(AEG)).toBe(`${COLL}|5`);
+      // Only the host's round timeout ends a round that saw nothing to do.
+      ae.abort(COLL);
       expect(ae.trigger(COLL)).toBe(true);
     });
 
@@ -502,9 +522,12 @@ describe('MongoAntiEntropy', () => {
     const flush = (): Promise<void> =>
       new Promise((r) => queueMicrotask(() => r()));
 
-    it('calls onRoundComplete when a round finishes all-equal', async () => {
+    it('does not complete a round on an all-equal answer — the timeout does', async () => {
       ae.trigger(COLL);
       await ae.onMessage(msg(AER, `${COLL}|${host.roots.join('')}`));
+      await flush();
+      expect(host.roundsCompleted).not.toContain(COLL);
+      ae.abort(COLL);
       await flush();
       expect(host.roundsCompleted).toContain(COLL);
     });
@@ -521,8 +544,8 @@ describe('MongoAntiEntropy', () => {
       (bare as { onRoundComplete?: unknown }).onRoundComplete = undefined;
       const ae2 = new MongoAntiEntropy(bare);
       ae2.trigger(COLL);
-      // all-equal round -> _finish, must not throw with the hook absent
-      await ae2.onMessage(msg(AER, `${COLL}|${bare.roots.join('')}`));
+      // an ended round -> _finish, must not throw with the hook absent
+      ae2.abort(COLL);
       await flush();
       expect(bare.roundsCompleted).toEqual([]);
     });
@@ -539,5 +562,114 @@ describe('MongoAntiEntropy', () => {
       await ae.onMessage(`~R~${COLL}|root`);
       expect(host.sent).toHaveLength(0);
     });
+  });
+});
+
+// .............................................................................
+// ONE-443: a document both sides hold at DIFFERENT content is decided, not
+// skipped — and an answer that agrees no longer closes the round on the one
+// that does not.
+describe('MongoAntiEntropy — content conflicts (ONE-443)', () => {
+  let host: FakeHost;
+  let ae: MongoAntiEntropy;
+  const bucket = bucketOf('k1');
+
+  beforeEach(() => {
+    host = new FakeHost();
+    ae = new MongoAntiEntropy(host);
+  });
+
+  /** Opens a round whose only differing bucket is k1's. */
+  const openRound = async (): Promise<void> => {
+    ae.trigger(COLL);
+    host.roots[bucket] = 'f'.repeat(64);
+    const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+    await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+  };
+  const answer = (entries: Array<[string, string] | [string, string, string]>) =>
+    ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify([[bucket, entries]])}`));
+  const wanted = (): string[] =>
+    host.countOf(AEW) === 0
+      ? []
+      : (JSON.parse(host.lastBodyOf(AEW)!.split('|')[1]) as string[]);
+
+  describe('peerVersionWins', () => {
+    const t = (ms: number) => `${ms}:x`;
+    it('the newer edit wins', () => {
+      expect(peerVersionWins({ hash: 'a', timeId: t(1) }, { hash: 'b', timeId: t(2) })).toBe(true);
+      expect(peerVersionWins({ hash: 'a', timeId: t(2) }, { hash: 'b', timeId: t(1) })).toBe(false);
+    });
+    it('an edited version beats one that was only loaded', () => {
+      expect(peerVersionWins({ hash: 'z' }, { hash: 'a', timeId: t(1) })).toBe(true);
+      expect(peerVersionWins({ hash: 'a', timeId: t(1) }, { hash: 'z' })).toBe(false);
+    });
+    it('two loads decide by hash — the same answer from either side', () => {
+      expect(peerVersionWins({ hash: 'a' }, { hash: 'b' })).toBe(true);
+      expect(peerVersionWins({ hash: 'b' }, { hash: 'a' })).toBe(false);
+      // Equal timeIds are no information: the hash decides.
+      expect(peerVersionWins({ hash: 'a', timeId: t(1) }, { hash: 'b', timeId: t(1) })).toBe(true);
+    });
+    it('equal content never wins', () => {
+      expect(peerVersionWins({ hash: 'a' }, { hash: 'a', timeId: t(9) })).toBe(false);
+    });
+  });
+
+  it('takes the peer version that wins, and hands its timeId to the pull', async () => {
+    host.manifest.set('k1', 'aaaa');
+    await openRound();
+    await answer([['k1', 'bbbb', '5:x']]);
+    expect(wanted()).toEqual(['k1']);
+    // The pull that follows carries the winner's timeId for the re-check.
+    await ae.onMessage(msg(AEH, `${COLL}|["h1"]`));
+    expect(host.contestedSeen.at(-1)?.get('k1')).toBe('5:x');
+    expect(host.logs.some((l) => l.includes('contested=1'))).toBe(true);
+  });
+
+  it('keeps its own version when it wins, and the bucket is done', async () => {
+    host.manifest.set('k1', 'zzzz');
+    host.timeIdOf = () => '9:x';
+    await openRound();
+    await answer([['k1', 'bbbb', '5:x']]);
+    expect(wanted()).toEqual([]);
+    // The difference was seen and decided: the round is over.
+    expect(ae.trigger(COLL)).toBe(true);
+  });
+
+  it('an answer that only agrees leaves the bucket to the peer that differs', async () => {
+    host.manifest.set('k1', 'aaaa');
+    await openRound();
+    // A peer that agrees answers first…
+    await answer([['k1', 'aaaa']]);
+    expect(ae.trigger(COLL)).toBe(false);
+    // …a tombstone for a doc neither of us holds is agreement too…
+    await answer([['gone', '']]);
+    expect(ae.trigger(COLL)).toBe(false);
+    // …and the one that differs still gets its turn.
+    await answer([['k1', 'bbbb']]);
+    expect(wanted()).toEqual(['k1']);
+    expect(ae.trigger(COLL)).toBe(true);
+  });
+
+  it('bounds what it remembers about contested docs', () => {
+    const contest = (ae as unknown as {
+      _contest: (c: string, id: string, t: string | undefined) => void;
+      _contested: Map<string, Map<string, string | undefined>>;
+    });
+    for (let i = 0; i <= MongoAntiEntropy.CONTESTED_MAX; i++) {
+      contest._contest(COLL, `d${i}`, undefined);
+    }
+    const map = contest._contested.get(COLL)!;
+    expect(map.size).toBe(MongoAntiEntropy.CONTESTED_MAX);
+    expect(map.has('d0')).toBe(false);
+  });
+
+  // Two nodes numbering their messages from 0 sent byte-identical queries,
+  // and a third node — or the hub's dedup — dropped the second as a repeat.
+  it('numbers its messages apart from another node', () => {
+    const other = new FakeHost();
+    ae.trigger(COLL);
+    new MongoAntiEntropy(other).trigger(COLL);
+    expect(host.sent[0]).not.toBe(other.sent[0]);
+    expect(host.sent[0]).toMatch(/^~AEQ~\d+\|customers$/);
   });
 });

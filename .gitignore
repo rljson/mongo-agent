@@ -23,7 +23,6 @@ tnc-*.txt
 fw-rules.txt
 ports.txt
 query
-package-lock.json
 # Any file/script starting with an underscore is treated as a per-laptop
 # scratch/diagnostic dump (insert scripts, peek tools, hash run logs, …).
 _*
