@@ -410,8 +410,9 @@ export class MongoAntiEntropy {
     let batch: Array<[number, AeEntry[]]> = [];
     let size = 0;
     let msgs = 0;
+    // Only ever called with something in `batch`: a full batch flushes before
+    // the next bucket is added, and the final flush follows at least one.
     const flush = (): void => {
-      if (batch.length === 0) return;
       this._send(AEE, `${collection}${SEP}${JSON.stringify(batch)}`);
       batch = [];
       size = 0;
@@ -562,6 +563,10 @@ export class MongoAntiEntropy {
     const redelete: string[] = [];
     const dropLocal: string[] = [];
     let contested = 0;
+    const ours = this._host.bucketEntries(
+      collection,
+      batch.map(([bucket]) => bucket),
+    );
     for (const [bucket, entries] of batch) {
       // Whether THIS answer disagrees with us about the bucket. The entries
       // request goes to every peer, and a peer that agrees answers too — often
@@ -608,6 +613,17 @@ export class MongoAntiEntropy {
         }
         if (this._host.hasTombstone(collection, sliceId)) redelete.push(sliceId);
         else want.push(sliceId);
+      }
+      // A peer that LACKS something we hold disagrees too, even though there
+      // is nothing here for us to take. Counting only what we take left the
+      // node that already held everything waiting on the round timeout for
+      // every bucket it was ahead in — 30 s per chunk in production, and the
+      // pause that bounds a stuck divergence was never reached in time.
+      if (!differs) {
+        const listed = new Set(entries.map(([sliceId]) => sliceId));
+        differs = (ours.get(bucket) ?? []).some(
+          ([sliceId, hash]) => hash !== '' && !listed.has(sliceId),
+        );
       }
       if (differs) session.pending.delete(bucket);
     }

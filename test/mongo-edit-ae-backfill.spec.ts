@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { bucketOf } from '../src/mongo-manifest-hash.ts';
-import { buildMesh, converge, docsOf, settle } from './mongo-edit-mesh.ts';
+import { buildMesh, converge, docsOf, settle, wait } from './mongo-edit-mesh.ts';
 
 /**
  * Manifest-diff BACKFILL ("anti-entropy") over the real `MongoEditSync`.
@@ -497,7 +497,14 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     stopMesh = stop;
     const [a, b] = nodes;
     a.peer.blockReads = true;
-    await settle(nodes, 1500); // reach the pause
+    // Wait for the PAUSE itself, not for a quiet moment. `settle` returns on
+    // the first 60 ms without traffic, and a round that waits for its timeout
+    // is exactly such a moment — the test then unblocked a node that had never
+    // paused, passed, and the resume path went untested.
+    const stuck = (a.sync as unknown as { _aeStuck: Map<string, string> })
+      ._aeStuck;
+    for (let i = 0; i < 100 && !stuck.has(COLLECTION); i++) await wait(30);
+    expect(stuck.has(COLLECTION), 'A never paused').toBe(true);
     expect(docsOf(a, COLLECTION)['r0']).toBeUndefined();
 
     // Reads work again AND a write moves B's root: the pair is new, so the
@@ -506,6 +513,7 @@ describe('MongoEditSync — anti-entropy backfill', () => {
     b.put(COLLECTION, { _id: 'wake', v: 1 });
 
     const state = await converge(nodes, COLLECTION);
+    expect(stuck.has(COLLECTION), 'the pause was never lifted').toBe(false);
     for (let i = 0; i < 5; i++) expect(state[`r${i}`]).toMatchObject({ v: i });
     expect(state['wake']).toMatchObject({ v: 1 });
   }, 40_000);

@@ -490,6 +490,78 @@ describe('MongoAntiEntropy', () => {
       delete process.env['SL_EDIT_AE_MAX_DROPS'];
     });
 
+    // The node that already holds everything. Its peer's answer lists nothing
+    // it lacks, so it takes nothing — but the peer LACKS something, and that is
+    // a disagreement. Counting only what we take left this side waiting on the
+    // round timeout for every bucket it was ahead in (30 s per chunk in
+    // production), and kept the stuck-pause from being reached in time.
+    it('AEE -> a peer that lacks what we hold completes the bucket', async () => {
+      ae.trigger(COLL);
+      const bucket = bucketOf('ours-only');
+      differAt(bucket);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      host.manifest.set('ours-only', 'oh');
+      host.entriesByBucket.set(bucket, [['ours-only', 'oh']]);
+
+      await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify([[bucket, []]])}`));
+      await Promise.resolve();
+
+      expect(host.countOf(AEW)).toBe(0);
+      expect(host.roundsCompleted).toEqual([COLL]);
+    });
+
+    // ...but an answer that matches us exactly still does NOT end the round:
+    // that is the agreeing peer whose early answer used to discard the one
+    // that differed (ONE-443, three nodes).
+    it('AEE -> an answer identical to ours leaves the bucket pending', async () => {
+      ae.trigger(COLL);
+      const bucket = bucketOf('same');
+      differAt(bucket);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      host.manifest.set('same', 'sh');
+      host.entriesByBucket.set(bucket, [['same', 'sh']]);
+
+      await ae.onMessage(
+        msg(AEE, `${COLL}|${JSON.stringify([[bucket, [['same', 'sh']]]])}`),
+      );
+      await Promise.resolve();
+
+      expect(host.roundsCompleted).toEqual([]);
+    });
+
+    // Our own tombstone is not something the peer lacks: both sides are
+    // without the doc. It must not complete the bucket on its own.
+    it('AEE -> our tombstone the peer does not list is not a disagreement', async () => {
+      ae.trigger(COLL);
+      const bucket = bucketOf('gone');
+      differAt(bucket);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      host.entriesByBucket.set(bucket, [['gone', '']]);
+
+      await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify([[bucket, []]])}`));
+      await Promise.resolve();
+
+      expect(host.roundsCompleted).toEqual([]);
+    });
+
+    // A bucket the host has no entries for at all counts as empty here too.
+    it('AEE -> a bucket the host omits counts as holding nothing', async () => {
+      ae.trigger(COLL);
+      const bucket = bucketOf('nothing');
+      differAt(bucket);
+      const peerRoots = new Array(AE_BUCKET_COUNT).fill('0'.repeat(64)).join('');
+      await ae.onMessage(msg(AER, `${COLL}|${peerRoots}`));
+      host.bucketEntries = (): Map<number, Array<[string, string]>> => new Map();
+
+      await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify([[bucket, []]])}`));
+      await Promise.resolve();
+
+      expect(host.roundsCompleted).toEqual([]);
+    });
+
     it('AEE with no session is ignored', async () => {
       const entries: Array<[number, Array<[string, string]>]> = [[0, []]];
       await ae.onMessage(msg(AEE, `${COLL}|${JSON.stringify(entries)}`));
