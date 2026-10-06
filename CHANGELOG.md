@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.0.55]
+
+**Two machines that hold the same document with different content now agree
+on one (ONE-443).** The anti-entropy backfilled only documents a node lacked
+entirely; a document both held at different content was skipped as "a
+concurrent-edit conflict handled elsewhere" — true only for documents the
+edit chain carries. Two nodes loaded from different backups sat on two
+contents for good, and every screen reported the sync healthy.
+
+### What now works that did not
+
+- **Different content is decided.** Entries carry the document's edit
+  `timeId`; both sides apply `peerVersionWins` to the same two versions — the
+  newer edit wins, an edited version beats one that was only loaded, two loads
+  decide by content hash — and the loser pulls the winner. A local edit made
+  between the decision and the pull is kept.
+- **Three or more nodes converge.** Two defects hid behind two-node tests:
+  every node numbered its protocol messages from 0, so two nodes' queries were
+  identical and the second was dropped as a repeat; and the first answer that
+  agreed ended the round, discarding the peer that did not. Nonces now start
+  at a random value per node, and only an answer that shows a difference
+  completes a bucket — including a peer that **lacks** something we hold.
+
+### Found in review, fixed before release
+
+- **The node that already held everything waited out the round timeout.** The
+  first cut counted only what this side TAKES as a difference. A peer missing
+  documents we hold takes nothing from us, so its answer left the bucket
+  pending until the host's round timeout — 30 s per chunk in production — and
+  the stuck-pause from 0.0.52 was no longer reached in time. The pause/resume
+  test went on passing because `settle` returned in exactly that quiet gap,
+  before the node had paused, so `_clearStuckIfPairChanged` went untested. The
+  test now waits for the pause itself and asserts it was lifted.
+- **Coverage is 100 % in all four metrics**, and the gate in
+  `vitest.config.mts` and `CLAUDE.md` says so (it was 99/97/99/99). The edges
+  that were left to chance are driven directly in
+  `mongo-edit-sync-units.spec.ts`; an unreachable guard in the AEE batcher is
+  removed rather than ignored.
+- **Declared what was tested:** `db` 0.0.48, `server` 0.0.71, `fs-agent`
+  0.0.85, `bs` 0.0.27 — the set the lab confirmed this release on.
+
+### Tests
+
+- `two-different-initial-loads` — two nodes seeded from different backups
+  converge; three nodes likewise.
+- `heals-after-forced-divergence` (mongo) — an edit whose head is lost still
+  wins through the anti-entropy.
+- The two unit tests that asserted "an all-equal answer ends the round" now
+  assert the opposite; they described the defect.
+
+### Still open
+
+- Which version wins between two unedited loads is arbitrary (the greater
+  hash). Nothing tells an operator that a document was decided that way; the
+  losing version is not kept.
+
 ## [0.0.54]
 
 **Declare what the client actually forces.** 0.0.53 declared `fs-agent` 0.0.80

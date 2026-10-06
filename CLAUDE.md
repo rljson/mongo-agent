@@ -20,6 +20,18 @@ only thing broadcast. Full picture:
   standalone `MongoCakeAgent`/`MongoCakeSync`, not cakes.
 - Tree + blob Mongo sync is gone. Do not reintroduce a tree walk for flat
   document data.
+- **Anti-entropy rules (ONE-443):**
+  - A document both sides hold at different content is **decided** by
+    `peerVersionWins` (newer edit `timeId` → edited over loaded → greater
+    hash). It must stay symmetric: both nodes reach the same answer from the
+    same two versions, or they overwrite each other in turn.
+  - An `AER`/`AEE` answer that **agrees** must never end a round or complete
+    a bucket — every query reaches every peer, and the agreeing answer is
+    usually first.
+  - Protocol nonces must be unique **across nodes** (random start), not only
+    per node: identical frames from two nodes are dropped as repeats.
+  - Always test the anti-entropy with **three** nodes as well as two. Both of
+    the last two defects were invisible with two.
 
 ---
 
@@ -37,7 +49,7 @@ only thing broadcast. Full picture:
 - **Never commit directly to `main`.** Always work on a feature branch.
 - **Never modify the `scripts` section in `package.json`** without explicit user permission.
 - **ESLint pinned at `^9.39.1`** (see `package.json`). Do not bump a major version blindly — verify `pnpm test` stays green first, and update this doc when you do.
-- **Coverage gate**: statements 99, branches 97, functions 99, lines 99 (see `vitest.config.mts`). Never lower it to make a change fit.
+- **Coverage gate**: statements 100, branches 100, functions 100, lines 100 (see `vitest.config.mts`). Never lower it to make a change fit.
 
 ---
 
@@ -153,7 +165,7 @@ Pre-existing failures (in files NOT touched in this ticket) do not block a commi
 
 ## Coverage Requirements
 
-- **Coverage gate**: statements 99, branches 97, functions 99, lines 99 (see `vitest.config.mts`). Never lower it to make a change fit.
+- **Coverage gate**: statements 100, branches 100, functions 100, lines 100 (see `vitest.config.mts`). Never lower it to make a change fit.
 - Coverage validates automatically in `pnpm test`. Build fails below the gate.
 - **Never** use `/* v8 ignore */` to avoid writing tests for reachable code.
 

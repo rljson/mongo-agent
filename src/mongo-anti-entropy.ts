@@ -70,7 +70,15 @@
 //   back; instead we re-broadcast its tombstone so the delete wins on the peer.
 //   This is the exact failure the demo hit ("deleted customer came back"), so it
 //   is guarded explicitly.
+// - DIFFERENT CONTENT IS DECIDED, NOT SKIPPED (ONE-443): a sliceId both sides
+//   hold at different hashes used to be left alone as "a concurrent-edit
+//   conflict handled elsewhere". For a document that lives only in a baseline
+//   there is no elsewhere — two nodes loaded from different backups sat on two
+//   contents for good. Each side now applies `peerVersionWins` to the two
+//   versions and the loser pulls the winner over the ordinary path.
 // .............................................................................
+
+import { compareTimeId } from './mongo-edit-adapter.ts';
 
 /** Message prefixes. A CARAT collection name never starts with `~`. */
 const AEQ = '~AEQ~'; // request peer bucket roots
@@ -92,6 +100,49 @@ const SEP = '|';
 export const AE_BUCKET_COUNT = 4096;
 
 /**
+ * One manifest entry as advertised: `[sliceId, docHash]`, plus the `timeId`
+ * of the newest edit applied to the document when this node knows one. An
+ * empty `docHash` is a tombstone. The `timeId` is optional on the wire so a
+ * peer on an older build (two-element entries) still parses.
+ */
+export type AeEntry = [string, string] | [string, string, string];
+
+/** One side of a content conflict: what it holds, and when it was edited. */
+export interface AeVersion {
+  /** The document's content hash. */
+  hash: string;
+  /** The `timeId` of its newest edit, when there has been one. */
+  timeId?: string | undefined;
+}
+
+/**
+ * Whether the PEER's version of a document wins over ours — **ONE-443**.
+ *
+ * Both nodes run this on the same two versions and must reach the same
+ * answer, or they overwrite each other in turn. So every rule is symmetric:
+ *
+ * 1. Both were edited: the newer edit wins — the edit chain's own
+ *    last-writer-wins, by the `timeId` every node reads the same way.
+ * 2. Only one was edited: the edited one wins. An edit is newer than any
+ *    load; a node that merely holds a backup has nothing to set against it.
+ * 3. Neither was edited (two different initial loads): the greater content
+ *    hash wins. Arbitrary — but identical on every node, which is all
+ *    convergence needs when there is nothing better to go on.
+ * @param ours - Our version.
+ * @param theirs - The peer's version.
+ * @returns True when we should take the peer's.
+ */
+export const peerVersionWins = (ours: AeVersion, theirs: AeVersion): boolean => {
+  if (ours.hash === theirs.hash) return false;
+  if (ours.timeId && theirs.timeId && ours.timeId !== theirs.timeId) {
+    return compareTimeId(theirs.timeId, ours.timeId) > 0;
+  }
+  if (ours.timeId && !theirs.timeId) return false;
+  if (theirs.timeId && !ours.timeId) return true;
+  return theirs.hash > ours.hash;
+};
+
+/**
  * The host surface {@link MongoAntiEntropy} drives. Implemented by
  * {@link MongoEditSync}; injected so the protocol is unit-testable against a
  * plain stub with no Mongo, cake, or sockets.
@@ -110,9 +161,15 @@ export interface AntiEntropyHost {
   bucketEntries(
     collection: string,
     buckets: number[],
-  ): Map<number, Array<[string, string]>>;
+  ): Map<number, AeEntry[]>;
   /** Our manifest's docHash for a sliceId, or `undefined` if we lack it. */
   manifestHash(collection: string, sliceId: string): string | undefined;
+  /**
+   * The `timeId` of the newest edit we applied to a sliceId, if any. Absent
+   * for a document that was only ever loaded (baseline) — see
+   * {@link peerVersionWins}.
+   */
+  timeIdOf?(collection: string, sliceId: string): string | undefined;
   /** Whether we hold a persistent tombstone for a sliceId (we deleted it). */
   hasTombstone(collection: string, sliceId: string): boolean;
   /** Re-broadcast tombstones for sliceIds we deleted (make delete win). */
@@ -132,13 +189,24 @@ export interface AntiEntropyHost {
   /**
    * Pull these component hashes over the flow-controlled read path and upsert
    * the decoded docs into Mongo (manifest-level, change-stream echo suppressed).
+   * @param collection - The collection to apply into.
+   * @param hashes - The component row hashes to pull.
+   * @param contested - sliceId → the winning version's `timeId` (or
+   *   `undefined`) for every doc taken because it won a content conflict. The
+   *   host re-checks each against its own state at apply time (a local edit
+   *   made since the decision wins) and records the winner's `timeId`, so the
+   *   edit chain's ordering holds afterwards. Entries it consumed are deleted.
    * @returns How many of the requested hashes actually resolved and were
    *   applied — the caller retries the remainder (see `_onHashes`) because a
    *   single relayed read can come back short with nothing thrown (a transient
    *   peer-read hiccup, not a real absence), and there is otherwise no signal
    *   to tell the two apart.
    */
-  pullAndApply(collection: string, hashes: string[]): Promise<number>;
+  pullAndApply(
+    collection: string,
+    hashes: string[],
+    contested?: Map<string, string | undefined>,
+  ): Promise<number>;
   /** Whether a collection is one we sync (drop protocol refs for others). */
   syncs(collection: string): boolean;
   /**
@@ -185,6 +253,17 @@ export class MongoAntiEntropy {
   /** Collections currently mid-round (suppresses re-trigger churn). */
   private readonly _busy = new Set<string>();
   /**
+   * collection → (sliceId → the winning version's `timeId`) for every doc we
+   * asked for because the peer's version won a content conflict. Handed to the
+   * host's pull so it can re-check the decision at apply time and adopt the
+   * winner's `timeId`; the host deletes what it consumed. Bounded, oldest
+   * first, so a round whose pull never arrives cannot grow it without limit —
+   * a forgotten entry only costs a re-decision next round.
+   */
+  private readonly _contested = new Map<string, Map<string, string | undefined>>();
+  /** Upper bound of {@link _contested} per collection. */
+  static readonly CONTESTED_MAX = 50_000;
+  /**
    * Per-collection rotation offset into the sorted `differing` bucket list.
    * Without it, `_onRoots` always serves buckets `[0, cap)` — the LOWEST
    * indices, every round. A handful of buckets that stay divergent (a stale
@@ -204,8 +283,16 @@ export class MongoAntiEntropy {
    * so a round whose first message was lost could never make progress. Stamping
    * every message with an increasing nonce makes it unique and immune to the
    * dedup. The receiver strips the nonce before parsing (see {@link _body}).
+   *
+   * **Unique across nodes, not only within one** (ONE-443). Every node used to
+   * start at 0, so node A's first query `~AEQ~0|customers` and node B's were
+   * byte-identical — and a third node, or the hub's own multicast dedup,
+   * dropped the second as a repeat. With two nodes that never shows; with
+   * three the answers to a query went missing and a round closed on the one
+   * that happened to agree. A random start (digits only, as `_body` requires)
+   * keeps two nodes' nonces apart.
    */
-  private _seq = 0;
+  private _seq = Math.floor(Math.random() * 1e12);
 
   constructor(private readonly _host: AntiEntropyHost) {}
 
@@ -320,11 +407,12 @@ export class MongoAntiEntropy {
     // ever completed. Pack many buckets into each message, keep every message
     // under the socket frame limit, and pace them across ticks so none is lost.
     const LIMIT = Number(process.env['SL_EDIT_AE_MSG_BYTES']) || 200_000;
-    let batch: Array<[number, Array<[string, string]>]> = [];
+    let batch: Array<[number, AeEntry[]]> = [];
     let size = 0;
     let msgs = 0;
+    // Only ever called with something in `batch`: a full batch flushes before
+    // the next bucket is added, and the final flush follows at least one.
     const flush = (): void => {
-      if (batch.length === 0) return;
       this._send(AEE, `${collection}${SEP}${JSON.stringify(batch)}`);
       batch = [];
       size = 0;
@@ -332,7 +420,8 @@ export class MongoAntiEntropy {
     };
     for (const b of buckets) {
       const entries = byBucket.get(b) ?? [];
-      const est = entries.length * 80 + 16;
+      // ~80 bytes an entry, plus the timeId an edited doc carries (ONE-443).
+      const est = entries.length * 104 + 16;
       if (size > 0 && size + est > LIMIT) {
         flush();
         await new Promise((r) => setImmediate(r));
@@ -394,7 +483,11 @@ export class MongoAntiEntropy {
     if (!this._host.syncs(collection)) return;
     const hashes = JSON.parse(json) as string[];
     if (hashes.length === 0) return;
-    const applied = await this._host.pullAndApply(collection, hashes);
+    const applied = await this._host.pullAndApply(
+      collection,
+      hashes,
+      this._contested.get(collection),
+    );
     this._host.log(
       `ae ${collection} <- AEH pull ${hashes.length} applied=${applied}`,
     );
@@ -416,10 +509,14 @@ export class MongoAntiEntropy {
       const peer = roots.slice(b * 64, b * 64 + 64);
       if (peer.length === 64 && peer !== mine[b]) differing.push(b);
     }
-    if (differing.length === 0) {
-      this._finish(collection);
-      return;
-    }
+    // An answer that AGREES does not end the round (ONE-443). The query goes
+    // to every peer, and the round was started because SOME peer's root
+    // differed — the first answer back is often another peer that agrees,
+    // and closing on it discarded the one that did not: three nodes where
+    // two agreed never converged on the third, because the relay delivers in
+    // the same order every time. The round ends when differing entries have
+    // been handled, or on the host's round timeout (`abort`).
+    if (differing.length === 0) return;
     // Cap the buckets requested per round. A near-total divergence (a fresh
     // catalog/baseline import) makes almost every one of the 4096 buckets
     // differ. Requesting them ALL in one AEG means `_complete` only fires once
@@ -461,31 +558,74 @@ export class MongoAntiEntropy {
     const [collection, json] = this._split2(body);
     const session = this._sessions.get(collection);
     if (!session || !this._host.syncs(collection)) return;
-    const batch = JSON.parse(json) as Array<
-      [number, Array<[string, string]>]
-    >;
+    const batch = JSON.parse(json) as Array<[number, AeEntry[]]>;
     const want: string[] = [];
     const redelete: string[] = [];
     const dropLocal: string[] = [];
+    let contested = 0;
+    const ours = this._host.bucketEntries(
+      collection,
+      batch.map(([bucket]) => bucket),
+    );
     for (const [bucket, entries] of batch) {
-      for (const [sliceId, hash] of entries) {
+      // Whether THIS answer disagrees with us about the bucket. The entries
+      // request goes to every peer, and a peer that agrees answers too — often
+      // first. Letting its answer complete the bucket discarded the one that
+      // differed, so three nodes where two agreed never converged on the third
+      // (ONE-443). A bucket is done when an answer shows a difference and it
+      // has been acted on; answers that only agree leave it to the others, or
+      // to the host's round timeout.
+      let differs = false;
+      for (const [sliceId, hash, peerTimeId] of entries) {
         const ours = this._host.manifestHash(collection, sliceId);
         // An empty hash marks a TOMBSTONE the peer advertises. If we still hold
         // the doc live, the peer's delete wins and we drop it locally — this is
         // the only path that converges a SUPERSET node down (a doc whose delete
         // head never reached us). If we do not hold it, there is nothing to do.
         if (hash === '') {
-          if (ours !== undefined) dropLocal.push(sliceId);
+          if (ours !== undefined) {
+            dropLocal.push(sliceId);
+            differs = true;
+          }
           continue;
         }
-        // Only ADD what we are missing. A sliceId we already hold (even at a
-        // different hash — that is a concurrent-edit conflict handled
-        // elsewhere) is left alone: backfill never overwrites live content.
-        if (ours !== undefined) continue;
+        if (ours !== undefined && ours !== hash) differs = true;
+        if (ours === undefined) differs = true;
+        if (ours !== undefined) {
+          // Both hold it. Equal content: nothing to do. DIFFERENT content was
+          // skipped here as "a concurrent-edit conflict handled elsewhere" —
+          // which is true only for documents the edit chain carries. A doc
+          // that exists only in a baseline (two nodes loaded from different
+          // backups) had no elsewhere, and every screen reported the sync
+          // healthy (ONE-443). Decide, by the rule both sides apply the same
+          // way; the loser pulls the winner, the winner does nothing.
+          if (ours === hash) continue;
+          const theirs = { hash, timeId: peerTimeId };
+          const mine = {
+            hash: ours,
+            timeId: this._host.timeIdOf?.(collection, sliceId),
+          };
+          if (!peerVersionWins(mine, theirs)) continue;
+          this._contest(collection, sliceId, peerTimeId);
+          want.push(sliceId);
+          contested++;
+          continue;
+        }
         if (this._host.hasTombstone(collection, sliceId)) redelete.push(sliceId);
         else want.push(sliceId);
       }
-      session.pending.delete(bucket);
+      // A peer that LACKS something we hold disagrees too, even though there
+      // is nothing here for us to take. Counting only what we take left the
+      // node that already held everything waiting on the round timeout for
+      // every bucket it was ahead in — 30 s per chunk in production, and the
+      // pause that bounds a stuck divergence was never reached in time.
+      if (!differs) {
+        const listed = new Set(entries.map(([sliceId]) => sliceId));
+        differs = (ours.get(bucket) ?? []).some(
+          ([sliceId, hash]) => hash !== '' && !listed.has(sliceId),
+        );
+      }
+      if (differs) session.pending.delete(bucket);
     }
     // LOSS-TOLERANT: act on THIS batch immediately instead of waiting for every
     // requested bucket's entries to arrive. Over a lossy transport a single
@@ -494,7 +634,7 @@ export class MongoAntiEntropy {
     // progress on its own.
     this._host.log(
       `ae ${collection} <- AEE ${batch.length}b pending=${session.pending.size} ` +
-        `want+=${want.length} drop+=${dropLocal.length}`,
+        `want+=${want.length} drop+=${dropLocal.length} contested=${contested}`,
     );
     if (redelete.length > 0) {
       void this._host.pushTombstones(collection, redelete);
@@ -519,6 +659,30 @@ export class MongoAntiEntropy {
       }
     }
     if (session.pending.size === 0) this._finish(collection);
+  }
+
+  /**
+   * Remembers that a doc is being taken because the peer's version won, and
+   * that version's `timeId`, for the pull that applies it.
+   * @param collection - The collection.
+   * @param sliceId - The doc.
+   * @param timeId - The winning version's `timeId`, if it has one.
+   */
+  private _contest(
+    collection: string,
+    sliceId: string,
+    timeId: string | undefined,
+  ): void {
+    let map = this._contested.get(collection);
+    if (!map) {
+      map = new Map();
+      this._contested.set(collection, map);
+    }
+    map.delete(sliceId);
+    map.set(sliceId, timeId);
+    while (map.size > MongoAntiEntropy.CONTESTED_MAX) {
+      map.delete(map.keys().next().value as string);
+    }
   }
 
   /**

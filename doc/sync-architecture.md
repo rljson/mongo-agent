@@ -71,6 +71,21 @@ updates whenever two nodes write between heartbeats.
   differing buckets (`AEG`/`AEE`), then the documents themselves
   (`AEW`/`AEH`). Rounds are loss-tolerant: each arriving batch makes progress
   on its own, and still-differing buckets simply re-trigger next round.
+  - **A document both sides hold at different content is decided, not
+    skipped** (ONE-443). Entries carry the document's edit `timeId` when there
+    is one, and both sides apply `peerVersionWins` to the same two versions:
+    the newer edit wins; an edited version beats one that was only loaded;
+    two loads decide by the greater content hash. The loser pulls the winner
+    through `AEW`/`AEH`; `_pullAndApply` re-checks the decision against a
+    local edit made meanwhile and adopts the winner's `timeId`.
+  - **An answer that agrees never ends a round.** Every query reaches every
+    peer, and the first answer is often from one that agrees; closing on it
+    dropped the peer that differed (three nodes, two agreeing, never
+    converged). A bucket is done only when an answer showed a difference; a
+    round with nothing to do ends on the host's round timeout.
+  - **Nonces start at a random value per node.** Numbered from 0 on every
+    node, two nodes' queries were byte-identical, and a third node — or the
+    hub's multicast dedup — dropped the second as a repeat.
 - **Tombstone log** (`sl_edit_tombstones`) keeps a delete from being
   resurrected by a backfill. Persistence is best-effort by design — it runs
   inside the delete path and must never abort propagation.

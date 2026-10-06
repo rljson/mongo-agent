@@ -245,6 +245,29 @@ describe('MongoEditSync — anti-entropy host surface', () => {
         ),
       ).toEqual([]);
     });
+
+    // Reached through the anti-entropy only when the node holding the
+    // tombstone happens to ask first. Since every node numbers its protocol
+    // messages from a random start (ONE-443), which side asks first is not
+    // fixed, and the integration tests pass either way — the other side then
+    // applies the tombstone itself. So the wiring is pinned here directly.
+    it('is what the anti-entropy calls to re-drive a delete', async () => {
+      const { sync, priv, conn } = await mkSync();
+      stop = () => sync.stop();
+      const p = priv as unknown as {
+        _tombstones: Map<string, Map<string, unknown>>;
+        _ae: {
+          _host: {
+            pushTombstones: (c: string, ids: string[]) => Promise<void>;
+          };
+        };
+      };
+      p._tombstones.set(COLL, new Map<string, unknown>([['7', 7]]));
+      conn.send.mockClear();
+      await p._ae._host.pushTombstones(COLL, ['7']);
+      const refs = conn.send.mock.calls.map((c) => c[0] as string);
+      expect(refs.some((r) => r.startsWith(`${COLL}:`))).toBe(true);
+    });
   });
 
   describe('_maybeTriggerAe', () => {
@@ -563,5 +586,176 @@ describe('tracing a received head', () => {
         'local=aaaaaaaaaaaa peer=untagged',
       );
     });
+  });
+});
+
+/**
+ * The remaining edges, each driven directly (ONE-443 review: 100 % in all four
+ * metrics). Every one of these is reachable in production — a connector
+ * without the raw path, a failed checkpoint write, a second error on a dead
+ * stream — and none of them depends on a backfill round being paced a
+ * particular way, so none of them is left to the mesh specs to hit by chance.
+ */
+describe('MongoEditSync — edges reached directly', () => {
+  let stop: (() => Promise<void>) | undefined;
+  beforeEach(() => {
+    process.env['SL_EDIT_ROOT_DEBOUNCE_MS'] = '5';
+  });
+  afterEach(async () => {
+    await stop?.();
+    stop = undefined;
+    vi.restoreAllMocks();
+    delete process.env['SL_EDIT_ROOT_DEBOUNCE_MS'];
+  });
+
+  /** A started sync whose privates the tests below reach. */
+  const start = async () => {
+    const made = await mkSync();
+    stop = () => made.sync.stop();
+    return { ...made, p: made.priv as unknown as Record<string, any> };
+  };
+
+  it('sends anti-entropy frames on plain send when the connector has neither raw path', async () => {
+    const { p, conn } = await start();
+    delete (conn as { reannounce?: unknown }).reannounce;
+    conn.send.mockClear();
+    p._ae._host.send('~AEQ~1|customers');
+    expect(conn.send).toHaveBeenCalledWith('~AEQ~1|customers');
+  });
+
+  it('lists bucket entries for a collection that has no tombstone log yet', async () => {
+    const { p } = await start();
+    p._tombstones.delete(COLL);
+    expect(p._bucketEntries(COLL, [0])).toBeInstanceOf(Map);
+  });
+
+  it('re-asserts a tombstone even when the write returns nothing', async () => {
+    const { p } = await start();
+    p._tombstones.set(COLL, new Map<string, unknown>([['7', 7]]));
+    vi.spyOn(p._adapter, 'putDoc').mockResolvedValue(undefined);
+    await expect(p._pushTombstones(COLL, ['7'])).resolves.toBeUndefined();
+  });
+
+  it('chains a productive round even when no cooldown was recorded for it', async () => {
+    const { p } = await start();
+    p._aeRoundProgress.set(COLL, true);
+    p._aeCooldownUntil.delete(COLL);
+    p._lastPeerHead.set(COLL, { head: 'h', root: 'not-ours', ref: 'r' });
+    const trigger = vi.spyOn(p, '_maybeTriggerAe').mockImplementation(() => {});
+    p._onAeRoundComplete(COLL);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(trigger).toHaveBeenCalledWith(COLL);
+  });
+
+  it('says nothing about a not-synced route between its periodic reports', async () => {
+    const { p } = await start();
+    const log = vi.spyOn(p, '_log');
+    p._logNotSyncable('ref', 'elsewhere');
+    p._logNotSyncable('ref', 'elsewhere');
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it('announces a pause once, and stays quiet while the same pair stays stuck', async () => {
+    const { p } = await start();
+    const log = vi.spyOn(p, '_log');
+    for (let i = 0; i < p._aeStuckCap + 3; i++) p._notePauseIfStuck(COLL, 'peer');
+    expect(p._aeStuck.has(COLL)).toBe(true);
+    expect(
+      log.mock.calls.filter((c) => String(c[0]).includes('STUCK')),
+    ).toHaveLength(1);
+  });
+
+  it('loads persisted tombstones into a log that already exists', async () => {
+    const { p } = await start();
+    const existing = new Map<string, unknown>([['1', 1]]);
+    p._tombstones.set(COLL, existing);
+    await p._loadTombstones(COLL);
+    expect(p._tombstones.get(COLL)).toBe(existing);
+  });
+
+  it('reports a failed checkpoint write instead of rejecting', async () => {
+    const { p } = await start();
+    p._checkpoint = {
+      save: async () => {
+        throw new Error('disk full');
+      },
+    };
+    const fail = vi.spyOn(p, '_fail');
+    await expect(p._saveCheckpoint(COLL)).resolves.toBeUndefined();
+    expect(fail).toHaveBeenCalledWith(
+      expect.stringContaining(`checkpoint ${COLL} save failed`),
+    );
+  });
+
+  it('falls back to a snapshot once, however often a resumed stream errors', async () => {
+    const { p, mongo } = await start();
+    const handlers: Record<string, (x: unknown) => void> = {};
+    const stream = {
+      on(event: string, h: (x: unknown) => void) {
+        handlers[event] ??= h;
+        return stream;
+      },
+      close: vi.fn(async () => {}),
+    };
+    const col = mongo.collection('resumed');
+    col.watch = (() => stream) as never;
+    p._checkpoint = {
+      load: async () => ({ manifest: {}, token: { t: 1 }, head: undefined }),
+      save: async () => {},
+    };
+    const fail = vi.spyOn(p, '_fail');
+    await p._adoptCollection('resumed');
+
+    handlers['error'](new Error('token too old'));
+    handlers['error'](new Error('and again'));
+
+    expect(
+      fail.mock.calls.filter((c) => String(c[0]).startsWith('resume resumed failed')),
+    ).toHaveLength(1);
+  });
+
+  it('reports a failed time-id seed instead of stopping the start-up', async () => {
+    const { p } = await start();
+    vi.spyOn(p._adapter, 'latestTimeIds').mockRejectedValue(new Error('io'));
+    const fail = vi.spyOn(p, '_fail');
+    await p._seedTimeIds(COLL);
+    expect(fail).toHaveBeenCalledWith(
+      expect.stringContaining(`seed ${COLL} failed`),
+    );
+  });
+
+  it('never reconnects a node that has not heard the fleet when the cold window is off', async () => {
+    const { p, conn } = await start();
+    const reconnect = vi.fn();
+    (conn as { reconnect?: unknown }).reconnect = reconnect;
+    p._rxWatchdogMs = 1000;
+    p._coldRxWatchdogMs = 0;
+    p._coldStartComplete = true;
+    p._lastInboundAt = 0;
+    p._coldStartAt = 0;
+    p._checkReceiveLiveness();
+    expect(reconnect).not.toHaveBeenCalled();
+  });
+
+  it('ignores the invalidate that closes a dropped collection, and any other non-document event', async () => {
+    const { p, mongo } = await start();
+    const resync = vi.spyOn(p, '_resyncFromMongo');
+    await p._onChange(COLL, { operationType: 'invalidate' });
+    // A change-stream event that carries no document (MongoDB adds kinds over
+    // time, e.g. `createIndexes`) is not an edit and must not become one.
+    await p._onChange(COLL, { operationType: 'createIndexes' });
+    expect(resync).not.toHaveBeenCalled();
+    expect(mongo.cols[COLL].bulkWrite).not.toHaveBeenCalled();
+  });
+
+  it('logs a head that is already ours once, not on every re-drive', async () => {
+    const { p } = await start();
+    const log = vi.spyOn(p, '_log');
+    const root = p._contentRoot(COLL);
+    await p._applyHead(COLL, 'h-same', root, 'raw');
+    await p._applyHead(COLL, 'h-same', root, 'raw');
+    expect(
+      log.mock.calls.filter((c) => String(c[0]).includes('SKIP')),
+    ).toHaveLength(1);
   });
 });
