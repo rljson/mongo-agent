@@ -21,7 +21,25 @@ contents for good, and every screen reported the sync healthy.
   identical and the second was dropped as a repeat; and the first answer that
   agreed ended the round, discarding the peer that did not. Nonces now start
   at a random value per node, and only an answer that shows a difference
-  completes a bucket.
+  completes a bucket — including a peer that **lacks** something we hold.
+
+### Found in review, fixed before release
+
+- **The node that already held everything waited out the round timeout.** The
+  first cut counted only what this side TAKES as a difference. A peer missing
+  documents we hold takes nothing from us, so its answer left the bucket
+  pending until the host's round timeout — 30 s per chunk in production — and
+  the stuck-pause from 0.0.52 was no longer reached in time. The pause/resume
+  test went on passing because `settle` returned in exactly that quiet gap,
+  before the node had paused, so `_clearStuckIfPairChanged` went untested. The
+  test now waits for the pause itself and asserts it was lifted.
+- **Coverage is 100 % in all four metrics**, and the gate in
+  `vitest.config.mts` and `CLAUDE.md` says so (it was 99/97/99/99). The edges
+  that were left to chance are driven directly in
+  `mongo-edit-sync-units.spec.ts`; an unreachable guard in the AEE batcher is
+  removed rather than ignored.
+- **Declared what was tested:** `db` 0.0.48, `server` 0.0.71, `fs-agent`
+  0.0.85, `bs` 0.0.27 — the set the lab confirmed this release on.
 
 ### Tests
 
