@@ -5,26 +5,26 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@rljson/bs': 0.0.26
-  '@rljson/db': 0.0.47
-  '@rljson/fs-agent': 0.0.81
+  '@rljson/bs': 0.0.27
+  '@rljson/db': 0.0.48
+  '@rljson/fs-agent': 0.0.85
   '@rljson/io': 0.0.80
   '@rljson/rljson': 0.0.84
-  '@rljson/server': 0.0.68
+  '@rljson/server': 0.0.71
 
 importers:
 
   .:
     dependencies:
       '@rljson/bs':
-        specifier: 0.0.26
-        version: 0.0.26
+        specifier: 0.0.27
+        version: 0.0.27
       '@rljson/db':
-        specifier: 0.0.47
-        version: 0.0.47
+        specifier: 0.0.48
+        version: 0.0.48
       '@rljson/fs-agent':
-        specifier: 0.0.81
-        version: 0.0.81
+        specifier: 0.0.85
+        version: 0.0.85
       '@rljson/hash':
         specifier: 0.0.19
         version: 0.0.19
@@ -38,8 +38,8 @@ importers:
         specifier: 0.0.84
         version: 0.0.84
       '@rljson/server':
-        specifier: 0.0.68
-        version: 0.0.68
+        specifier: 0.0.71
+        version: 0.0.71
       bson:
         specifier: ^7.2.0
         version: 7.2.0
@@ -559,16 +559,16 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
-  '@rljson/bs@0.0.26':
-    resolution: {integrity: sha512-LN+HGv6vkhAOX5CmykUqrXtdaeUpqJJWSSJEWh00oGxmPmhNAJCHIeAVrmk1LGPszMsRU7fsCT6zxxQOCbJ/FA==}
+  '@rljson/bs@0.0.27':
+    resolution: {integrity: sha512-qM01n2CaKI4i0tGHYV8mPcuovo2yz/OqYhnZvQcxLwFytsvUPf+fIa32GSMDPPTETKQ70GExNUFSneWyMdpNYw==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/db@0.0.47':
-    resolution: {integrity: sha512-zpBhcJNATkoRkFNl/3/VnlExV1XyNPlVtqSXiOMCcEKr3M+Fx33MItEJEacJCMSFTmIOUb3ZYKh3U6VuSUx1xw==}
+  '@rljson/db@0.0.48':
+    resolution: {integrity: sha512-GQdHFDBa7E3qHyyJ0M4wGZlQtK9GvRdZUgYqOf1k2HQC6kYl5pdfFM31TOJoTReQhq5o/UvhW6FKuMI/68JJhQ==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/fs-agent@0.0.81':
-    resolution: {integrity: sha512-Q9qkiJBOq65VFVvZB/rn/arvMum5wYgw6iOqyp+6LoIp7JY02+0YuroG9d4YRaxzR61YPxkLmc7FjyMyux4hBA==}
+  '@rljson/fs-agent@0.0.85':
+    resolution: {integrity: sha512-5fGKB3gtgVdX00cA00oyl5IQM3vtBsR1Ko7DG0nqJdFzrhzG0h2vutS+owfTRxLRIFcr2ZhndhfKFAtqYjiVgQ==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/hash@0.0.19':
@@ -595,8 +595,8 @@ packages:
     resolution: {integrity: sha512-XDxCVlBTFlLw9A31YT966MzW5J3iz/ZTz+lYbjjwfVQYswGE+rXDMKN1deACtJ0ZM5huskuqvU0rH7zCiih50A==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/server@0.0.68':
-    resolution: {integrity: sha512-iY30etI521Ju+Eu1Y2qdSqSXmPFttLcLQQ5ZQkmwSwwgz83GMLJruFk1CYn2umMiwnHpz66JHaiB/gbUm/1YPg==}
+  '@rljson/server@0.0.71':
+    resolution: {integrity: sha512-UD8SxxIar8nvzDhl8nKRjOrlz3+ixTak3TRUaokBVEX80fw+xemeRS92WVf8X3UWpEa1E1umrPwRa9P/Nybe9g==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.12':
@@ -2390,13 +2390,13 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.19.1
 
-  '@rljson/bs@0.0.26':
+  '@rljson/bs@0.0.27':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/json': 0.0.23
       '@rljson/rljson': 0.0.84
 
-  '@rljson/db@0.0.47':
+  '@rljson/db@0.0.48':
     dependencies:
       '@rljson/hash': 0.0.19
       '@rljson/io': 0.0.80
@@ -2406,10 +2406,10 @@ snapshots:
       filtrex: 3.1.0
       object-traversal: 1.0.1
 
-  '@rljson/fs-agent@0.0.81':
+  '@rljson/fs-agent@0.0.85':
     dependencies:
-      '@rljson/bs': 0.0.26
-      '@rljson/db': 0.0.47
+      '@rljson/bs': 0.0.27
+      '@rljson/db': 0.0.48
       '@rljson/hash': 0.0.19
       '@rljson/io': 0.0.80
       '@rljson/json': 0.0.23
@@ -2445,10 +2445,10 @@ snapshots:
       '@rljson/json': 0.0.23
       nanoid: 6.0.1
 
-  '@rljson/server@0.0.68':
+  '@rljson/server@0.0.71':
     dependencies:
-      '@rljson/bs': 0.0.26
-      '@rljson/db': 0.0.47
+      '@rljson/bs': 0.0.27
+      '@rljson/db': 0.0.48
       '@rljson/hash': 0.0.19
       '@rljson/io': 0.0.80
       '@rljson/json': 0.0.23
