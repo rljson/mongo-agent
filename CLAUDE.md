@@ -49,7 +49,7 @@ only thing broadcast. Full picture:
 - **Never commit directly to `main`.** Always work on a feature branch.
 - **Never modify the `scripts` section in `package.json`** without explicit user permission.
 - **ESLint pinned at `^9.39.1`** (see `package.json`). Do not bump a major version blindly — verify `pnpm test` stays green first, and update this doc when you do.
-- **Coverage gate**: statements 99, branches 97, functions 99, lines 99 (see `vitest.config.mts`). Never lower it to make a change fit.
+- **Coverage gate**: statements 100, branches 100, functions 100, lines 100 (see `vitest.config.mts`). Never lower it to make a change fit.
 
 ---
 
@@ -165,7 +165,7 @@ Pre-existing failures (in files NOT touched in this ticket) do not block a commi
 
 ## Coverage Requirements
 
-- **Coverage gate**: statements 99, branches 97, functions 99, lines 99 (see `vitest.config.mts`). Never lower it to make a change fit.
+- **Coverage gate**: statements 100, branches 100, functions 100, lines 100 (see `vitest.config.mts`). Never lower it to make a change fit.
 - Coverage validates automatically in `pnpm test`. Build fails below the gate.
 - **Never** use `/* v8 ignore */` to avoid writing tests for reachable code.
 
