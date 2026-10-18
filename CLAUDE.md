@@ -1,6 +1,6 @@
 # CLAUDE.md — @rljson/mongo-agent
 
-MongoDB sync agent for the RLJSON ecosystem — the components/edits engine that keeps a MongoDB in sync across nodes. Depends on `@rljson/db`, `@rljson/io`, `@rljson/server`, `@rljson/bs` and `@rljson/fs-agent`.
+MongoDB sync agent for the RLJSON ecosystem — the components/edits engine that keeps a MongoDB in sync across nodes. Depends on `@rljson/db`, `@rljson/io`, `@rljson/server` and `@rljson/bs`.
 
 ---
 
