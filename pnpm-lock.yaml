@@ -9,7 +9,7 @@ overrides:
   '@rljson/db': 0.1.1
   '@rljson/io': 0.0.85
   '@rljson/rljson': 0.0.86
-  '@rljson/server': 0.0.76
+  '@rljson/server': 0.0.77
 
 importers:
 
@@ -34,8 +34,8 @@ importers:
         specifier: 0.0.86
         version: 0.0.86
       '@rljson/server':
-        specifier: 0.0.76
-        version: 0.0.76
+        specifier: 0.0.77
+        version: 0.0.77
       bson:
         specifier: ^7.2.0
         version: 7.2.0
@@ -587,8 +587,8 @@ packages:
     resolution: {integrity: sha512-8hoaeG4p8P9+Oq4eCSsg2OHvXgAh8Bzo1l3zUPfjA8Zjb0fKOViF54DoLnYhESH/gngpkrUyqZDQlXZwk6sooQ==}
     engines: {node: '>=22.14.0'}
 
-  '@rljson/server@0.0.76':
-    resolution: {integrity: sha512-Ai5JwNNUOPwDGpKvQS+1aToOTlkvxYQEOContnltRADdpxwFqojSEqtEEWHcbh5CY2nJuhlpEw0lRtvXRB39Wg==}
+  '@rljson/server@0.0.77':
+    resolution: {integrity: sha512-FDG9rJkJJZDaH8g3uwyKVznusGkEYwBhm2r2YCwHhom7LSMwWK3m0RsDLD1R/1Szdn4VLXonbr8BLx57Cmso7A==}
     engines: {node: '>=22.14.0'}
 
   '@rljson/validate@0.0.12':
@@ -2335,7 +2335,7 @@ snapshots:
       '@rljson/json': 0.0.23
       nanoid: 6.0.2
 
-  '@rljson/server@0.0.76':
+  '@rljson/server@0.0.77':
     dependencies:
       '@rljson/bs': 0.0.29
       '@rljson/db': 0.1.1

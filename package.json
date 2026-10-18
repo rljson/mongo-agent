@@ -55,7 +55,7 @@
     "@rljson/io": "0.0.85",
     "@rljson/json": "0.0.23",
     "@rljson/rljson": "0.0.86",
-    "@rljson/server": "0.0.76",
+    "@rljson/server": "0.0.77",
     "bson": "^7.2.0",
     "mongodb": "^7.1.0"
   },
@@ -68,7 +68,7 @@
       "@rljson/db": "0.1.1",
       "@rljson/io": "0.0.85",
       "@rljson/rljson": "0.0.86",
-      "@rljson/server": "0.0.76"
+      "@rljson/server": "0.0.77"
     }
   },
   "packageManager": "pnpm@10.11.0"

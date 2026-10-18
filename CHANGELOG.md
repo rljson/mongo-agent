@@ -3,7 +3,7 @@
 ## [0.0.56]
 
 **Lifted to the stamping stack.** `@rljson/rljson` 0.0.86, `@rljson/io`
-0.0.85, `@rljson/db` 0.1.1, `@rljson/server` 0.0.76 and `@rljson/bs` 0.0.29 —
+0.0.85, `@rljson/db` 0.1.1, `@rljson/server` 0.0.77 and `@rljson/bs` 0.0.29 —
 the set `@rljson/fs-agent` 0.2.0 and the One Client run, so one install holds
 one version of each. Nothing in this package uses the hub's stamp yet.
 
