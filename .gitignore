@@ -77,3 +77,6 @@ Thumbs.db
 # Other
 *.lock  # (Optional: for ignoring package-lock.json or yarn.lock if you don't want to version them)
 *.tgz
+
+# gg: the local ticket marker written by `gg one do create ticket`
+ticket.json
