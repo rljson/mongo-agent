@@ -16,7 +16,10 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: 'node',
       setupFiles: ['./test/setup/test-setup.ts'],
-      include: ['**/test/**/*.spec.ts'],
+      // `*.test.ts` for the version test `gg one do publish` writes: left
+      // out, it never runs, its source file stays uncovered and the 100 %
+      // gate fails in the release pull request.
+      include: ['**/test/**/*.spec.ts', '**/test/**/*.test.ts'],
 
       reporters: ['default'],
       coverage: {

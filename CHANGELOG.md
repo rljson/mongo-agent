@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.57]
 
 ### The mass-delete guard's "deliberate reset" flag no longer outlives its flush
 
