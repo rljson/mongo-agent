@@ -687,8 +687,11 @@ export class MongoEditSync {
     string,
     { head: string; root: string | undefined; ref: string }
   >();
-  /** Collections whose next delete burst is deliberate, not an accident. */
-  private readonly _expectedMassDelete = new Set<string>();
+  /** Collection → the deadline (epoch ms) its announced mass-delete expires at. */
+  private readonly _expectedMassDelete = new Map<string, number>();
+  /* v8 ignore next -- @preserve expect-mass-delete TTL, env-overridable */
+  private readonly _expectMassDeleteTtlMs =
+    Number(process.env['SL_EDIT_EXPECT_MASS_DELETE_TTL_MS']) || 5_000;
 
   /**
    * Announce that the next delete burst on `collection` is intentional, so the
@@ -701,12 +704,19 @@ export class MongoEditSync {
    * kept its documents, and the mesh sat on divergent roots for the rest of
    * the run while four other recipes reported missing documents.
    *
-   * Consumed by the next burst on that collection, so it cannot leave the
-   * guard disarmed.
+   * Consumed by the very next flush on that collection regardless of whether
+   * that flush's own burst reached the guard's limit — not only when it
+   * does. A reset on a near-empty collection flushes a burst BELOW the
+   * limit, and consuming the flag only on an over-limit flush (the original
+   * design) left it armed forever, waiting for one; the very next real
+   * burst on that collection — accidental or not — then sailed through
+   * unguarded. It also expires on its own after
+   * {@link _expectMassDeleteTtlMs}, so a call that is never followed by any
+   * flush at all cannot arm a burst that happens much later.
    * @param collection - The collection about to be wiped deliberately.
    */
   expectMassDelete(collection: string): void {
-    this._expectedMassDelete.add(collection);
+    this._expectedMassDelete.set(collection, Date.now() + this._expectMassDeleteTtlMs);
   }
 
   /**
@@ -2624,7 +2634,12 @@ export class MongoEditSync {
       baseline >= 10
         ? Math.min(this._deleteAbsMax, Math.ceil(baseline * this._deleteFraction))
         : this._deleteAbsMax;
-    if (pending.size >= limit && !this._expectedMassDelete.delete(collection)) {
+    // Consumed here unconditionally — see expectMassDelete's doc comment on
+    // why this must not be gated on the burst actually reaching `limit`.
+    const expectedUntil = this._expectedMassDelete.get(collection);
+    this._expectedMassDelete.delete(collection);
+    const announced = expectedUntil !== undefined && expectedUntil > Date.now();
+    if (pending.size >= limit && !announced) {
       this._log(
         `delete BURST ${collection} size=${pending.size} >= limit=${limit} BLOCKED (mass-delete guard)`,
       );
