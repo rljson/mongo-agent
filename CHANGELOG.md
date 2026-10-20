@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### The mass-delete guard's "deliberate reset" flag no longer outlives its flush
+
+**What was wrong, and how it looked.** `expectMassDelete(collection)` arms
+the guard to let the very next delete burst through unblocked — meant for a
+deliberate reset, not an accidental wipe. The flag was only consumed when
+that next flush actually reached the guard's limit. A reset on a near-empty
+collection (the E2E lab's own probe-collection reset, for one) flushes a
+burst BELOW the limit, so the flag was never consumed and stayed armed
+indefinitely — the next real burst on that collection, announced or not,
+then propagated unblocked. Reported live: `mongo-mass-delete-guard` turned
+red with an 8-document burst propagating unhindered. Not new with 0.0.56;
+only a reset calling `expectMassDelete` right before a below-limit flush
+triggers it.
+
+**What now works.** The flag is consumed on the very next flush regardless
+of whether that flush's own burst reaches the limit, and it also expires on
+its own after `SL_EDIT_EXPECT_MASS_DELETE_TTL_MS` (default 5000ms) in case
+no flush ever follows the announcement at all.
+
 ### Releases go through gg
 
 **What changed for contributors.** The CI no longer publishes:
