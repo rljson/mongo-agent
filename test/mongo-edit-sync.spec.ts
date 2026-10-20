@@ -218,6 +218,7 @@ describe('MongoEditSync', () => {
     delete process.env['SL_EDIT_DELETE_DEBOUNCE_MS'];
     delete process.env['SL_EDIT_DELETE_ABS_MAX'];
     delete process.env['SL_EDIT_DELETE_FRACTION'];
+    delete process.env['SL_EDIT_EXPECT_MASS_DELETE_TTL_MS'];
     delete process.env['SL_EDIT_PULL_RETRIES'];
     delete process.env['SL_EDIT_PULL_BACKOFF_MS'];
     delete process.env['SL_EDIT_ROOT_DEBOUNCE_MS'];
@@ -2038,6 +2039,95 @@ describe('MongoEditSync', () => {
     sync.expectMassDelete('customers');
     await burst();
     expect(heads().length).toBeGreaterThan(0);
+
+    await sync.stop();
+  });
+
+  it('does not let an announced flag outlive the flush it was meant for', async () => {
+    // Reported live: an E2E reset on a near-empty collection called
+    // expectMassDelete and then only deleted a handful of docs — a burst
+    // BELOW the guard's limit. The original code consumed the flag only on
+    // an over-limit flush, so that below-limit flush left it armed, and the
+    // very next burst on that collection — unannounced — sailed through.
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';
+    // 20 docs so the fraction guard (floor: baseline >= 10) still applies to
+    // the second burst once the first has shrunk the collection.
+    const docs = Array.from({ length: 20 }, (_, i) => ({ _id: new Int32(i) }));
+    const cols = { customers: new FakeCollection(docs) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const heads = () =>
+      conn.send.mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .filter((r: string) => !r.startsWith('~R~'));
+    const deleteIds = async (ids: number[]) => {
+      for (const i of ids) {
+        cols.customers.stream.emit({
+          operationType: 'delete',
+          documentKey: { _id: new Int32(i) },
+        });
+      }
+      await tick(40);
+    };
+
+    // Announced, but this flush (1 delete, baseline 20 -> limit 6) stays
+    // below the limit regardless — propagates either way, and must consume
+    // the flag doing so.
+    conn.send.mockClear();
+    sync.expectMassDelete('customers');
+    await deleteIds([0]);
+    expect(heads().length).toBeGreaterThan(0);
+
+    // Unannounced follow-up burst (baseline now 19 -> limit 6, 6 deletes) —
+    // must be blocked.
+    conn.send.mockClear();
+    await deleteIds([1, 2, 3, 4, 5, 6]);
+    expect(heads()).toEqual([]);
+
+    await sync.stop();
+  });
+
+  it('expires an announced mass-delete that no flush ever consumes', async () => {
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';
+    process.env['SL_EDIT_EXPECT_MASS_DELETE_TTL_MS'] = '20';
+    const docs = Array.from({ length: 10 }, (_, i) => ({ _id: new Int32(i) }));
+    const cols = { customers: new FakeCollection(docs) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    sync.expectMassDelete('customers');
+    await tick(100); // well past the 20ms TTL, with no flush in between
+
+    conn.send.mockClear();
+    for (const i of [0, 1, 2]) {
+      cols.customers.stream.emit({
+        operationType: 'delete',
+        documentKey: { _id: new Int32(i) },
+      });
+    }
+    await tick(40);
+    expect(
+      conn.send.mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .filter((r: string) => !r.startsWith('~R~')),
+    ).toEqual([]);
 
     await sync.stop();
   });
