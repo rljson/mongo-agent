@@ -470,6 +470,39 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('does not keep swallowing writes that later reproduce an old echo hash', async () => {
+    const cols = { customers: new FakeCollection([]) };
+    const mongo = new FakeMongoDb(cols);
+    const conn = mkConnector();
+    const sync = new MongoEditSync(mongo as never, await mkRljsonDb(), conn, ['customers'], 'p');
+    await sync.start();
+    conn.send.mockClear();
+
+    const doc = { _id: new Int32(7), name: 'Carol' };
+    cols.customers.stream.emit({ operationType: 'insert', fullDocument: doc });
+    await tick();
+    const ref = headFor(conn.send, 'customers');
+
+    // Apply the head (marks _appliedHash for _id=7 = hash('Carol')).
+    conn.fire(asPeerHead(ref));
+    await (sync as unknown as { _applyChain: Map<string, Promise<void>> })._applyChain.get('customers');
+    conn.send.mockClear();
+
+    // The echo of that apply is correctly suppressed, as above.
+    cols.customers.stream.emit({ operationType: 'replace', fullDocument: doc });
+    await tick();
+    expect(conn.send).not.toHaveBeenCalled();
+
+    // A later, independent write reproduces the SAME content ('Carol' again —
+    // e.g. a value toggled back). The stale echo-suppression entry must not
+    // still be sitting there to misclassify this as the same old echo.
+    conn.send.mockClear();
+    cols.customers.stream.emit({ operationType: 'update', fullDocument: doc });
+    await tick();
+    expect(conn.send).toHaveBeenCalled();
+    await sync.stop();
+  });
+
   it('ignores unhandled ops and events without a fullDocument', async () => {
     const cols = { customers: new FakeCollection([]) };
     const conn = mkConnector();

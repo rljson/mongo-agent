@@ -2458,8 +2458,19 @@ export class MongoEditSync {
     this._setManifest(collection, doc._id, hash);
     this._scheduleRoot(collection);
     this._checkpointAfter(collection, change);
-    // Echo of a peer-applied write -> do not re-broadcast the edit head.
-    if (this._appliedHash.get(this._key(collection, doc._id)) === hash) {
+    // Echo of a peer-applied write -> do not re-broadcast the edit head. Prune
+    // the echo-suppression entry now that this change-stream event has either
+    // consumed it (matched) or proven it stale (Mongo has moved past it) — the
+    // same fix `_onDelete` already applies to its own echo entries, for the
+    // same reason: left in place, a later write (local or peer-applied) that
+    // reproduces this old hash would be misread as the SAME echo and silently
+    // never broadcast, even though it is new content. Repeating content is not
+    // exotic — a value set back to a prior state, or any fixed-id/fixed-payload
+    // test recipe run twice.
+    const key = this._key(collection, doc._id);
+    const isEcho = this._appliedHash.get(key) === hash;
+    this._appliedHash.delete(key);
+    if (isEcho) {
       this._log(`change ${collection}/${String(doc._id)} ${op} = echo, skip`);
       return;
     }

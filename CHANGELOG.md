@@ -1,5 +1,31 @@
 # Changelog
 
+## [Unreleased]
+
+### A write that reproduces an old echo hash is no longer swallowed forever
+
+**What was wrong, and how it looked.** Applying a peer's edit records the
+written content's hash in `_appliedHash` so the change-stream event that
+write itself triggers is recognized as an echo and not re-broadcast — a
+one-shot marker for exactly one event. `_onDelete` already prunes its own
+entry once consumed (fixed earlier, see the "repeating content is not
+exotic" comment at its call site), but `_onChange` (insert/update) never
+did: the entry stayed armed indefinitely. Any LATER write — local or
+peer-applied — whose content happened to hash to that same old value was
+then misread as the same echo and silently never broadcast, even though it
+was new, unrelated content. Reported live: inserts and updates that never
+reached other nodes at all, not merely late — test recipes with fixed
+ids/fixed payloads (or any value set back to a prior state) reproduce a
+hash seen before. The manifest/root still updated locally (so anti-entropy
+saw a bucket mismatch), but the underlying edit was never written to the
+chain, so no peer could ever pull the content the advertised hash promised:
+a permanent, unresolvable divergence.
+
+**What now works.** `_onChange` prunes its `_appliedHash` entry on every
+change-stream event for that `_id`, matched or not — mirroring `_onDelete`
+exactly: a hash that no longer matches current Mongo content cannot be
+anything but stale.
+
 ## [0.0.57]
 
 ### The mass-delete guard's "deliberate reset" flag no longer outlives its flush
