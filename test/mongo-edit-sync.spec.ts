@@ -1516,6 +1516,41 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('never adopts its own tombstone log as a synced collection', async () => {
+    // Only a host's name filter kept `sl_edit_tombstones` out before — the
+    // library itself had no opinion. A broad include like `sl_*`, or simply
+    // a host without that exact exclusion, would start treating tombstone
+    // bookkeeping as application data and bring back the AE-tombstone loop
+    // it exists to prevent. Covers all three adoption paths: explicit
+    // start-up `collections`, host `discover()`, and peer-announced.
+    process.env['SL_EDIT_DISCOVER_MS'] = '5';
+    const cols = {
+      customers: new FakeCollection([]),
+      sl_edit_tombstones: new FakeCollection([]),
+    };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers', 'sl_edit_tombstones'],
+      'p',
+      async () => ['customers', 'sl_edit_tombstones'],
+    );
+    await sync.start();
+    await tick(40);
+    expect(sync.health()).toMatchObject({ watching: 1 });
+
+    // Directly, too — the choke point every adoption path funnels through.
+    await (sync as unknown as {
+      _adoptCollection: (c: string) => Promise<void>;
+    })._adoptCollection('sl_edit_tombstones');
+    expect(sync.health()).toMatchObject({ watching: 1 });
+
+    await sync.stop();
+    delete process.env['SL_EDIT_DISCOVER_MS'];
+  });
+
   it('survives a discovery supplier that rejects', async () => {
     process.env['SL_EDIT_DISCOVER_MS'] = '5';
     const cols = { customers: new FakeCollection([]) };

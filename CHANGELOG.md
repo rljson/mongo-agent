@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### The tombstone log can no longer be adopted as an ordinary synced collection
+
+**What was wrong, and how it looked.** `sl_edit_tombstones` is this engine's
+own bookkeeping, written to directly by `_recordTombstone`/
+`_loadTombstones`. Nothing in the library itself ever excluded it from being
+adopted as a regular synced collection — the ONLY thing keeping it out was
+a host's own name filter (`collections`, `discover()` and `_shouldSync` are
+all host-supplied). A broad include like `sl_*`, or any host without that
+exact exclusion, would start treating tombstone bookkeeping as application
+data: every tombstone write becomes a change-stream event, gets its own
+tombstone recorded in turn, and the AE-tombstone loop this log exists to
+prevent is back. Found while wiring `mongo.ignore` into the One Client UI.
+
+**What now works.** `_adoptCollection` — the single choke point every
+adoption path (start-up `collections`, host `discover()`, peer-announced)
+funnels through — refuses `sl_edit_tombstones` unconditionally, so no host
+configuration can accidentally sync it.
+
 ### A blocked delete burst now holds every burst after it until the collection recovers
 
 **What was wrong, and how it looked.** The mass-delete guard judged each

@@ -1925,6 +1925,21 @@ export class MongoEditSync {
    */
   private async _adoptCollection(collection: string): Promise<void> {
     if (this._collections.has(collection)) return;
+    // The tombstone log is this engine's own bookkeeping, written to by
+    // `_recordTombstone`/`_loadTombstones` directly — never meant to be a
+    // synced collection in its own right. Only a host's name filter kept it
+    // out before (the constructor's `collections`, `discover` and
+    // `_shouldSync` are all host-supplied), so a broad include like `sl_*`,
+    // or a host without that exact exclusion, would start treating tombstone
+    // bookkeeping as application data: every tombstone write becomes a
+    // change-stream event, gets its own tombstone recorded in turn, and the
+    // AE-tombstone loop this log exists to prevent is back. Every adoption
+    // path (start-up collections, host discovery, peer-announced) funnels
+    // through here, so excluding it once here protects all of them.
+    if (collection === TOMBSTONE_LOG) {
+      this._log(`refuse to adopt ${collection} — reserved for tombstone bookkeeping`);
+      return;
+    }
     await this._adapter.init([collection]);
     this._collections.add(collection);
     // Open the change stream BEFORE the snapshot/restore so no write is lost in
