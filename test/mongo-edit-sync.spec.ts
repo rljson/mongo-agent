@@ -2129,6 +2129,73 @@ describe('MongoEditSync', () => {
     await sync.stop();
   });
 
+  it('holds every burst after a blocked one until the collection recovers', async () => {
+    // A deletion staggered across several small, separately-debounced bursts
+    // must not evade the guard just because each burst alone is judged only
+    // against the size the ones before it already left behind. Reproduces
+    // the gap fs-agent's own delete-lock closed: "remnants slip through in
+    // small pieces under the threshold."
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';
+    const docs = Array.from({ length: 20 }, (_, i) => ({ _id: new Int32(i) }));
+    const cols = { customers: new FakeCollection(docs) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+
+    const heads = () =>
+      conn.send.mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .filter((r: string) => !r.startsWith('~R~'));
+    const deleteIds = async (ids: number[]) => {
+      for (const i of ids) {
+        cols.customers.stream.emit({
+          operationType: 'delete',
+          documentKey: { _id: new Int32(i) },
+        });
+      }
+      await tick(40);
+    };
+
+    // Round 1: 6 deletes, baseline 20 -> limit 6. Blocked, and arms the lock
+    // at baseline=20.
+    conn.send.mockClear();
+    await deleteIds([0, 1, 2, 3, 4, 5]);
+    expect(heads()).toEqual([]);
+
+    // Round 2: just 1 delete. Judged fresh (baseline now 14 -> limit 5) this
+    // single delete would sail through on its own — that is exactly the gap.
+    // The lock must hold it anyway, since the collection has not recovered.
+    conn.send.mockClear();
+    await deleteIds([6]);
+    expect(heads()).toEqual([]);
+
+    // Recovery: the 7 ids lost so far come back (anti-entropy backfilling
+    // them from a peer that still has them), bringing the collection back to
+    // its pre-lock size of 20.
+    for (const i of [0, 1, 2, 3, 4, 5, 6]) {
+      cols.customers.stream.emit({
+        operationType: 'insert',
+        fullDocument: { _id: new Int32(i), name: `restored-${i}` },
+      });
+    }
+    await tick();
+
+    // Round 3: now judged fresh again (baseline 20 -> limit 6), 1 delete
+    // passes normally.
+    conn.send.mockClear();
+    await deleteIds([7]);
+    expect(heads().length).toBeGreaterThan(0);
+
+    await sync.stop();
+  });
+
   it('expires an announced mass-delete that no flush ever consumes', async () => {
     process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
     process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';

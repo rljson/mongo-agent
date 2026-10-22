@@ -825,6 +825,17 @@ export class MongoEditSync {
   private readonly _baselineCount = new Map<string, number>();
   /** collection → ids pending a debounced delete-burst decision. */
   private readonly _pendingDeletes = new Map<string, Set<unknown>>();
+  /**
+   * collection → the manifest size a blocked burst must recover back to
+   * before any further delete is let through. Set when a burst is BLOCKED,
+   * cleared once reached (or on an announced reset). Without this, a
+   * deletion staggered across several separately-debounced bursts evades the
+   * guard entirely: each burst alone is judged only against the
+   * ALREADY-SHRUNKEN size left by the ones before it, so a long enough drip
+   * can still wipe the whole collection even though no single burst ever
+   * crossed the limit.
+   */
+  private readonly _deleteLockBaseline = new Map<string, number>();
   /** collection → pending delete-flush timer. */
   private readonly _deleteTimers = new Map<
     string,
@@ -2650,10 +2661,33 @@ export class MongoEditSync {
     const expectedUntil = this._expectedMassDelete.get(collection);
     this._expectedMassDelete.delete(collection);
     const announced = expectedUntil !== undefined && expectedUntil > Date.now();
+
+    // A burst the guard already blocked stays held — not just that one burst,
+    // every burst after it — until the collection recovers back to (at
+    // least) the size it held right before the block, or an announced reset
+    // explicitly lifts it. See `_deleteLockBaseline`'s doc comment for why.
+    const lockedAt = this._deleteLockBaseline.get(collection);
+    if (lockedAt !== undefined) {
+      // `baseline` already includes this round's own pending ids — the size
+      // as it stood immediately BEFORE this round's deletes, which is the
+      // right yardstick for "has it recovered": checking the post-delete
+      // manifest size here would always undercount by this round's own
+      // batch, and a fully recovered collection could never clear the lock.
+      if (announced || baseline >= lockedAt) {
+        this._deleteLockBaseline.delete(collection);
+      } else {
+        this._log(
+          `delete BURST ${collection} size=${pending.size} HELD (mass-delete lock, recover to ${lockedAt})`,
+        );
+        return;
+      }
+    }
+
     if (pending.size >= limit && !announced) {
       this._log(
         `delete BURST ${collection} size=${pending.size} >= limit=${limit} BLOCKED (mass-delete guard)`,
       );
+      this._deleteLockBaseline.set(collection, baseline);
       return;
     }
 

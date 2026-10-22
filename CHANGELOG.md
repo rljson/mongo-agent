@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### A blocked delete burst now holds every burst after it until the collection recovers
+
+**What was wrong, and how it looked.** The mass-delete guard judged each
+debounced burst in isolation against the collection's CURRENT size — which
+already reflects whatever earlier bursts already removed. A single large
+accidental wipe is still caught (the debounce coalesces it into one burst),
+but a deletion staggered across several separately-debounced bursts was
+not: each burst alone looked like ordinary churn against the
+already-shrunken size, even though the cumulative total could wipe
+most or all of the collection, with every burst individually approved.
+Mirrors the gap fs-agent's own delete-lock closed: "remnants slip through
+in small pieces under the threshold."
+
+**What now works.** A burst the guard blocks arms a lock on that
+collection, remembered as the size it held right before the block. Every
+later burst is held (not just evaluated and possibly waved through) until
+the collection's size recovers back to at least that remembered baseline —
+typically via anti-entropy backfilling the missing docs back from a peer
+that still has them — or an announced reset explicitly lifts it.
+Collection-level, not per-document like fs-agent's file-level lock: a
+simplification worth a second look, flagged for review.
+
 ### A write that reproduces an old echo hash is no longer swallowed forever
 
 **What was wrong, and how it looked.** Applying a peer's edit records the
