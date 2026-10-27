@@ -16,6 +16,8 @@ import { docHash } from './mongo-component-codec.ts';
 import type { CollectPutsResult } from './mongo-edit-adapter.ts';
 import { compareTimeId, MongoEditAdapter } from './mongo-edit-adapter.ts';
 import type { EditCheckpoint } from './mongo-edit-checkpoint.ts';
+import type { MongoEditSignal } from './mongo-edit-signals.ts';
+import { MongoEditSignals } from './mongo-edit-signals.ts';
 import { bucketOf as sharedBucketOf } from './mongo-manifest-hash.ts';
 
 /**
@@ -820,16 +822,42 @@ export class MongoEditSync {
     Number(process.env['SL_EDIT_DELETE_ABS_MAX']) || 300_000;
   private readonly _deleteFraction =
     Number(process.env['SL_EDIT_DELETE_FRACTION']) || 0.3;
+  /**
+   * How long an ALLOWED delete counts toward the cumulative-burst window.
+   *
+   * A sticky, collection-wide lock (an earlier shape of this guard) closed
+   * the drip gap below but then held every later, unrelated delete too — if
+   * the collection's size never recovered to its pre-block level, that hold
+   * never lifted. A trailing window ages out on its own, so a delete made
+   * long after the triggering burst is judged on its own, not punished for
+   * sharing a collection with one.
+   */
+  private readonly _deleteWindowMs =
+    Number(process.env['SL_EDIT_DELETE_WINDOW_MS']) || 60_000;
   /* v8 ignore stop */
   /** collection → doc count at snapshot time (mass-delete-guard baseline). */
   private readonly _baselineCount = new Map<string, number>();
   /** collection → ids pending a debounced delete-burst decision. */
   private readonly _pendingDeletes = new Map<string, Set<unknown>>();
+  /**
+   * collection → (stringified id → when its delete was last ALLOWED through).
+   *
+   * The guard's memory across bursts: a delete staggered into many small,
+   * individually-under-the-limit bursts (the drip gap) still accumulates one
+   * growing count per collection here, so the limit catches the Nth burst
+   * even though no single one reached it alone. An entry ages out of the
+   * window on its own ({@link _deleteWindowMs}) — nothing has to notice it
+   * expired, which is what keeps this from becoming the same permanent lock
+   * it replaces.
+   */
+  private readonly _recentDeletes = new Map<string, Map<string, number>>();
   /** collection → pending delete-flush timer. */
   private readonly _deleteTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
+  /** Every signal the guard layer has raised ({@link signals}), subscribable. */
+  private readonly _signals = new MongoEditSignals();
   /* v8 ignore start -- @preserve pull-retry + checkpoint knobs, env-overridable */
   private readonly _pullRetries =
     Number(process.env['SL_EDIT_PULL_RETRIES']) || 5;
@@ -963,6 +991,10 @@ export class MongoEditSync {
    *   it (the default) for the stateless full-snapshot-on-every-start behavior.
    * @param _shouldSync - Predicate deciding whether a collection this node
    * does NOT have locally should be adopted when a peer announces it.
+   * @param onSignal - Notified of every {@link MongoEditSignal} the guard
+   *   layer raises (currently just a refused mass-delete burst) — the host's
+   *   only way to learn one happened, short of grepping the trace log. See
+   *   {@link signals} for the same, kept, for a host that starts later.
    */
   constructor(
     private readonly _mongoDb: MongoDb,
@@ -973,9 +1005,11 @@ export class MongoEditSync {
     private readonly _discover?: () => Promise<string[]>,
     private readonly _checkpoint?: EditCheckpoint,
     private readonly _shouldSync?: (collection: string) => boolean,
+    onSignal?: (signal: MongoEditSignal) => void,
   ) {
     this._adapter = new MongoEditAdapter(db, prefix);
     this._collections = new Set(collections);
+    if (onSignal) this._signals.subscribe(onSignal);
     const host: AntiEntropyHost = {
       // Anti-entropy frames MUST go out raw — every bucket listing, doc-hash
       // batch and query is distinct, and losing one does not delay the protocol,
@@ -1075,6 +1109,22 @@ export class MongoEditSync {
       this._appliedTimeId.set(collection, timeIds);
     }
     return timeIds;
+  }
+
+  /**
+   * The mass-delete guard's recent-ALLOWED-delete window for a collection,
+   * created on first use. Callers prune expired entries themselves — this
+   * only hands back the live map.
+   * @param collection - The collection.
+   * @returns The mutable `stringified id → allowed-at` map.
+   */
+  private _recentDeletesOf(collection: string): Map<string, number> {
+    let recent = this._recentDeletes.get(collection);
+    if (!recent) {
+      recent = new Map();
+      this._recentDeletes.set(collection, recent);
+    }
+    return recent;
   }
 
   /**
@@ -2164,6 +2214,33 @@ export class MongoEditSync {
     return announced;
   }
 
+  /**
+   * Every signal the guard layer has raised, oldest first — currently just a
+   * mass-delete burst the guard refused to propagate. See the constructor's
+   * `onSignal` for a live subscription instead of polling this.
+   * @returns The signals kept (bounded; see {@link MongoEditSignals}).
+   */
+  signals(): readonly MongoEditSignal[] {
+    return this._signals.all;
+  }
+
+  /**
+   * Only the signals a person still has to act on (`action: 'required'`).
+   * @returns The unresolved signals.
+   */
+  signalsNeedingAction(): readonly MongoEditSignal[] {
+    return this._signals.needingAction;
+  }
+
+  /**
+   * How many signals of each kind this sync has ever raised, dropped ones
+   * included — so "and 1 240 more" stays answerable past the log's cap.
+   * @returns The counts, keyed by kind.
+   */
+  signalTotals(): Readonly<Record<string, number>> {
+    return this._signals.totals();
+  }
+
   health(): MongoEditSyncHealth {
     const collections = [...this._rootAcc.keys()].sort();
 
@@ -2639,10 +2716,42 @@ export class MongoEditSync {
     const expectedUntil = this._expectedMassDelete.get(collection);
     this._expectedMassDelete.delete(collection);
     const announced = expectedUntil !== undefined && expectedUntil > Date.now();
-    if (pending.size >= limit && !announced) {
+
+    // Cumulative, not just this burst: a deletion staggered into many small,
+    // separately-debounced bursts (each under ITS OWN round's limit) used to
+    // evade this guard entirely, because each round was judged alone. A
+    // trailing window of every ALLOWED id's own flush time catches the Nth
+    // burst even though none of them alone crossed the limit — and, unlike an
+    // earlier shape of this guard that locked the whole collection until its
+    // size recovered, it ages out on its own: an unrelated delete made once
+    // the window has passed is judged on its own, not held forever for
+    // sharing a collection with a burst it had nothing to do with.
+    const recent = this._recentDeletesOf(collection);
+    const windowStart = Date.now() - this._deleteWindowMs;
+    for (const [idStr, allowedAt] of recent) {
+      if (allowedAt < windowStart) recent.delete(idStr);
+    }
+    const cumulative = recent.size + pending.size;
+
+    if (cumulative >= limit && !announced) {
       this._log(
-        `delete BURST ${collection} size=${pending.size} >= limit=${limit} BLOCKED (mass-delete guard)`,
+        `delete BURST ${collection} size=${pending.size} (${cumulative} within ` +
+          `${this._deleteWindowMs}ms) > limit=${limit} REFUSED (mass-delete guard)`,
       );
+      // Only THIS round's ids are reported and left undone — a held id is not
+      // retried by this guard; it is simply never tombstoned, so anti-entropy
+      // sees it as still present on a peer and converges it back. A later,
+      // unrelated delete of a different id is judged fresh, against the then-
+      // current window, on its own next flush.
+      this._signals.add({
+        kind: 'deletion/refused',
+        collection,
+        ids: [...pending].map((id) => String(id)),
+        action: 'review',
+        detail:
+          `${pending.size} delete(s) refused in ${collection}: ${cumulative} ` +
+          `deleted within the last ${this._deleteWindowMs}ms, over the ${limit} limit`,
+      });
       return;
     }
 
@@ -2653,6 +2762,7 @@ export class MongoEditSync {
       // resurrecting it. Only reached once this id's delete is confirmed
       // NOT blocked — see `_onDelete`.
       this._recordTombstone(collection, id);
+      recent.set(String(id), Date.now());
       const put = await this._adapter.putDoc(collection, this._tombstone(id));
       head = put?.head ?? null;
       this._setAppliedTimeId(collection, id, put?.timeId);
