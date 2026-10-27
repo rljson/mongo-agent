@@ -28,3 +28,10 @@ export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';
 export type { CollectPutsResult } from './mongo-edit-adapter.ts';
 export { EditCheckpoint } from './mongo-edit-checkpoint.ts';
 export type { EditCheckpointState } from './mongo-edit-checkpoint.ts';
+export { MongoEditSignals } from './mongo-edit-signals.ts';
+export type {
+  MongoEditSignal,
+  MongoEditSignalAction,
+  MongoEditSignalInput,
+  MongoEditSignalKind,
+} from './mongo-edit-signals.ts';

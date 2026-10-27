@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### The mass-delete guard holds only the ids it actually refuses, not the whole collection
+
+**What was wrong, and how it looked.** The guard decided per debounced burst
+only: `pending.size >= limit`. A deletion staggered into several bursts, each
+comfortably under that round's own limit, evaded it completely — reported by
+Maximilian as fs-agent's own pre-0.2 "remnants slip through in small pieces
+under the threshold" gap, now confirmed in mongo-agent too. A collection-wide
+sticky lock (a prior, unmerged attempt at closing it, on a separate branch)
+closed that gap but traded it for a worse one: once tripped, it held
+**every** later delete in the
+collection, including ones with nothing to do with the original burst, until
+the collection's size recovered back to its pre-block level — impossible for
+a collection that only ever shrinks, since nothing un-deletes a document. A
+single, ordinary delete made during that window was silently never
+propagated, and anti-entropy quietly re-converged the doc back in from a
+peer, forever, with nothing to show for it.
+
+**What now works.** The guard remembers, per collection, the ids whose
+delete it has actually ALLOWED in a trailing window
+(`SL_EDIT_DELETE_WINDOW_MS`, default 60000ms) — not the collection's size.
+Cumulative count across bursts in that window is what is checked against the
+limit, so the drip-attack gap stays closed, and an entry ages out on its own:
+an unrelated delete made once the window has passed is judged on its own
+footing, not punished for sharing a collection with an earlier refusal. A
+refused burst also now raises a `deletion/refused` signal (new
+`MongoEditSignal`/`MongoEditSignals`, mirroring `@rljson/fs-agent`'s own
+signal of the same name) — live via an optional `onSignal` constructor
+callback, and after the fact via `signals()`/`signalsNeedingAction()`/
+`signalTotals()` — so a host finally has something other than the trace log
+to answer "why didn't my delete propagate".
+
 ## [0.0.57]
 
 ### The mass-delete guard's "deliberate reset" flag no longer outlives its flush
