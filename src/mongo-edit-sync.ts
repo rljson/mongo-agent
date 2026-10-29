@@ -5,7 +5,8 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import type { Db } from '@rljson/db';
+import type { Db, RefArrivalInfo } from '@rljson/db';
+import type { RefStamp } from '@rljson/rljson';
 import { createHash } from 'node:crypto';
 import type { Db as MongoDb, Document } from 'mongodb';
 import { ObjectId } from 'mongodb';
@@ -312,8 +313,24 @@ const CHECKPOINT_LARGE_ENTRIES = 100_000;
 export interface EditSyncConnector {
   /** Broadcasts a ref to peers. Dedups: an already-sent ref is a no-op. */
   send(ref: string): void;
-  /** Registers a callback for refs arriving from peers. */
-  listen(cb: (ref: string) => void | Promise<void>): void;
+  /**
+   * Registers a callback for refs arriving from peers.
+   *
+   * `info.stamp`, when present, is where a stamping hub placed this ref in
+   * the order it relays them — see {@link MongoEditSync.stampOf}. Absent
+   * when the hub does not stamp this route, which every host does today;
+   * nothing here requires it.
+   */
+  listen(cb: (ref: string, info?: RefArrivalInfo) => void | Promise<void>): void;
+  /**
+   * Registers a callback for the stamps a stamping hub gives the refs THIS
+   * connector sends — the only way a sender learns its own stamps, since a
+   * hub forwards an announcement to every client but its sender. Optional so
+   * a stub connector (and a host whose hub does not stamp) can omit it.
+   * @param cb - Called with the sent ref and the stamp the hub gave it.
+   * @returns Unsubscribes.
+   */
+  onStamp?(cb: (ref: string, stamp: RefStamp) => void): () => void;
   /**
    * Re-broadcasts a ref bypassing the send-dedup, so a peer that joined after
    * the ref was first sent still receives it. The relay only replays a single
@@ -848,7 +865,16 @@ export class MongoEditSync {
     Number(process.env['SL_EDIT_LWW_MAX']) || 200_000;
   private readonly _seedMaxRows =
     Number(process.env['SL_EDIT_SEED_MAX_ROWS']) || 200_000;
+  private readonly _maxStamps =
+    Number(process.env['SL_EDIT_STAMP_MAX']) || 50_000;
   /* v8 ignore stop */
+  /**
+   * Hub-assigned `RefStamp` by (bare) `EditHistory` ref — see {@link stampOf}.
+   * Only a hub that stamps this route ever populates this; it stays empty for
+   * every host today, which is exactly the point: nothing here depends on it
+   * being present.
+   */
+  private readonly _stamps = new Map<string, RefStamp>();
   /** collection → latest change-stream resume token (for the checkpoint). */
   private readonly _lastToken = new Map<string, unknown>();
   /** collection → pending debounced checkpoint-save timer. */
@@ -1116,6 +1142,52 @@ export class MongoEditSync {
   ): boolean {
     const current = this._appliedTimeId.get(collection)?.get(sliceId);
     return compareTimeId(timeId, current) >= 0;
+  }
+
+  /**
+   * Extracts the bare `EditHistory` ref out of a wire ref
+   * (`<collection>:<head>` or `<collection>:<head>|<root>`) — the same shape
+   * {@link _headRef} builds and the only kind ever passed to `connector.send`,
+   * so the only kind a stamping hub's {@link EditSyncConnector.onStamp} ever
+   * echoes back.
+   * @param ref - The wire ref.
+   * @returns The bare head ref, or `undefined` for a ref not in that shape.
+   */
+  private _ehRefOf(ref: string): string | undefined {
+    const idx = ref.indexOf(':');
+    if (idx < 0) return undefined;
+    const rest = ref.slice(idx + 1);
+    const sep = rest.lastIndexOf(ROOT_SEP);
+    return sep < 0 ? rest : rest.slice(0, sep);
+  }
+
+  /**
+   * Remembers a hub-assigned stamp for an `EditHistory` ref, evicting the
+   * oldest entry once the map is full.
+   * @param ehRef - The bare ref the stamp was given to.
+   * @param stamp - The stamp.
+   */
+  private _recordStamp(ehRef: string, stamp: RefStamp): void {
+    this._stamps.delete(ehRef);
+    this._stamps.set(ehRef, stamp);
+    while (this._stamps.size > this._maxStamps) {
+      const oldest = this._stamps.keys().next().value as string;
+      this._stamps.delete(oldest);
+    }
+  }
+
+  /**
+   * The hub-assigned stamp this node has learned for an `EditHistory` ref, if
+   * any — from a hub echoing back the stamp it gave a ref THIS node sent
+   * ({@link EditSyncConnector.onStamp}), or from a peer's announcement
+   * arriving with one already attached ({@link EditSyncConnector.listen}'s
+   * `info.stamp`). Absent for a ref no stamping hub has ever touched, which is
+   * every ref on a host that does not stamp this route.
+   * @param ehRef - The bare `EditHistory` ref.
+   * @returns The stamp, or `undefined`.
+   */
+  stampOf(ehRef: string): RefStamp | undefined {
+    return this._stamps.get(ehRef);
   }
 
   /**
@@ -2315,7 +2387,16 @@ export class MongoEditSync {
   }
 
   async start(): Promise<void> {
-    this._connector.listen((ref) => this._onRef(ref));
+    this._connector.listen((ref, info) => this._onRef(ref, info));
+    // Only this connector ever learns the stamps given to refs IT sent — a hub
+    // forwards an announcement to every client but its sender. Keyed by bare
+    // ehRef (not the wire ref), the same key an incoming `info.stamp` is
+    // recorded under, so a later lookup does not care which side taught us.
+    const unStamp = this._connector.onStamp?.((ref, stamp) => {
+      const head = this._ehRefOf(ref);
+      if (head) this._recordStamp(head, stamp);
+    });
+    if (unStamp) this._stop.push(unStamp);
 
     for (const collection of [...this._collections]) {
       // `_adoptCollection` re-adds it; start from a snapshot of the initial set
@@ -2661,7 +2742,7 @@ export class MongoEditSync {
     if (head) this._connector.send(this._headRef(collection, head));
   }
 
-  private _onRef(ref: string): void {
+  private _onRef(ref: string, info?: RefArrivalInfo): void {
     // Any inbound ref — root heartbeat, head, or anti-entropy frame — proves the
     // socket is still delivering. Stamp it so the receive-liveness watchdog can
     // tell a half-open socket (silent) from a healthy one.
@@ -2783,6 +2864,10 @@ export class MongoEditSync {
     const sep = rest.lastIndexOf(ROOT_SEP);
     const head = sep < 0 ? rest : rest.slice(0, sep);
     const targetRoot = sep < 0 ? undefined : rest.slice(sep + 1);
+    // Recorded regardless of whether this collection is known or adopted
+    // yet — a stamp learned now is still correct once collectPuts later
+    // reconstructs this ref's chain position.
+    if (info?.stamp) this._recordStamp(head, info.stamp);
     const receipt = headReceiptLine(
       this._lastLoggedRecvHead.get(collection),
       collection,

@@ -5,8 +5,9 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
-import { Db } from '@rljson/db';
+import { Db, type RefArrivalInfo } from '@rljson/db';
 import { IoMem } from '@rljson/io';
+import type { RefStamp } from '@rljson/rljson';
 import { Int32 } from 'bson';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -158,13 +159,16 @@ const mkRljsonDb = async (): Promise<Db> => {
 
 /** A recording connector; `reannounce` present unless a test drops it. */
 const mkConnector = (): EditSyncConnector & {
-  fire: (ref: string) => void;
+  fire: (ref: string, info?: RefArrivalInfo) => void;
+  fireStamp: (ref: string, stamp: RefStamp) => void;
   send: ReturnType<typeof vi.fn>;
   reannounce: ReturnType<typeof vi.fn>;
   invalidateReceived: ReturnType<typeof vi.fn>;
   reconnect: ReturnType<typeof vi.fn>;
+  onStamp: ReturnType<typeof vi.fn>;
 } => {
-  let cb: ((r: string) => void | Promise<void>) | undefined;
+  let cb: ((r: string, info?: RefArrivalInfo) => void | Promise<void>) | undefined;
+  let stampCb: ((ref: string, stamp: RefStamp) => void) | undefined;
   return {
     send: vi.fn(),
     reannounce: vi.fn(),
@@ -173,7 +177,14 @@ const mkConnector = (): EditSyncConnector & {
     listen: (fn) => {
       cb = fn;
     },
-    fire: (ref) => void cb?.(ref),
+    onStamp: vi.fn((fn: (ref: string, stamp: RefStamp) => void) => {
+      stampCb = fn;
+      return () => {
+        stampCb = undefined;
+      };
+    }),
+    fire: (ref, info) => void cb?.(ref, info),
+    fireStamp: (ref, stamp) => void stampCb?.(ref, stamp),
   };
 };
 
@@ -226,6 +237,7 @@ describe('MongoEditSync', () => {
     delete process.env['SL_EDIT_CHECKPOINT_MAX_ENTRIES'];
     delete process.env['SL_EDIT_APPLIED_MAX'];
     delete process.env['SL_EDIT_LWW_MAX'];
+    delete process.env['SL_EDIT_STAMP_MAX'];
   });
 
   /** The content-root ref (`~R~<coll>:<root>`) last broadcast for a collection. */
@@ -2769,6 +2781,82 @@ describe('MongoEditSync', () => {
 
         expect(oneEmpty.health().stateRef).not.toBe(empty.health().stateRef);
       });
+    });
+  });
+
+  describe('stampOf', () => {
+    const stamp = (n: number): RefStamp => ({
+      domain: 'd',
+      epoch: 1,
+      hub: 'h1',
+      n,
+    });
+
+    it('learns a stamp the hub echoes back for a ref THIS node sent', async () => {
+      const cols = { customers: new FakeCollection([]) };
+      const conn = mkConnector();
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        conn,
+        ['customers'],
+        'p',
+      );
+      await sync.start();
+      expect(conn.onStamp).toHaveBeenCalledTimes(1);
+
+      conn.fireStamp('customers:EH1|rootHash', stamp(1));
+      expect(sync.stampOf('EH1')).toEqual(stamp(1));
+      // No root tag — the whole remainder is the bare ref.
+      conn.fireStamp('customers:EH3', stamp(3));
+      expect(sync.stampOf('EH3')).toEqual(stamp(3));
+      // A ref with no colon at all is dropped, not thrown.
+      conn.fireStamp('not-a-wire-ref', stamp(2));
+      expect(sync.stampOf('not-a-wire-ref')).toBeUndefined();
+
+      await sync.stop();
+    });
+
+    it("learns a stamp a peer's announcement already carried", async () => {
+      const cols = { customers: new FakeCollection([]) };
+      const conn = mkConnector();
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        conn,
+        ['customers'],
+        'p',
+      );
+      await sync.start();
+
+      conn.fire('customers:EH2|rootHash', {
+        isNewestFromSender: true,
+        stamp: stamp(7),
+      });
+      expect(sync.stampOf('EH2')).toEqual(stamp(7));
+
+      await sync.stop();
+    });
+
+    it('evicts the oldest stamp once past SL_EDIT_STAMP_MAX', async () => {
+      process.env['SL_EDIT_STAMP_MAX'] = '1';
+      const cols = { customers: new FakeCollection([]) };
+      const conn = mkConnector();
+      const sync = new MongoEditSync(
+        new FakeMongoDb(cols) as never,
+        await mkRljsonDb(),
+        conn,
+        ['customers'],
+        'p',
+      );
+      await sync.start();
+
+      conn.fireStamp('customers:EH1|r', stamp(1));
+      conn.fireStamp('customers:EH2|r', stamp(2));
+      expect(sync.stampOf('EH1')).toBeUndefined();
+      expect(sync.stampOf('EH2')).toEqual(stamp(2));
+
+      await sync.stop();
     });
   });
 
