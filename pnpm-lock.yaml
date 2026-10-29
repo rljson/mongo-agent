@@ -5,37 +5,43 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@rljson/bs': 0.0.29
-  '@rljson/db': 0.1.1
-  '@rljson/io': 0.0.85
-  '@rljson/rljson': 0.0.86
-  '@rljson/server': 0.0.77
+  '@rljson/bs': link:./.gg/ts_links/@rljson/bs
+  '@rljson/hash': link:./.gg/ts_links/@rljson/hash
+  '@rljson/rljson': link:./.gg/ts_links/@rljson/rljson
+  '@rljson/db': link:./.gg/ts_links/@rljson/db
+  '@rljson/io': link:./.gg/ts_links/@rljson/io
+  '@rljson/is-ready': link:./.gg/ts_links/@rljson/is-ready
+  '@rljson/dna-rljson': link:../dna_rljson
+  '@rljson/validate': link:./.gg/ts_links/@rljson/validate
+  '@rljson/converter': link:./.gg/ts_links/@rljson/converter
+  '@rljson/server': link:./.gg/ts_links/@rljson/server
+  '@rljson/network': link:./.gg/ts_links/@rljson/network
 
 importers:
 
   .:
     dependencies:
       '@rljson/bs':
-        specifier: 0.0.29
-        version: 0.0.29
+        specifier: link:.gg/ts_links/@rljson/bs
+        version: link:.gg/ts_links/@rljson/bs
       '@rljson/db':
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: link:.gg/ts_links/@rljson/db
+        version: link:.gg/ts_links/@rljson/db
       '@rljson/hash':
-        specifier: 0.0.19
-        version: 0.0.19
+        specifier: link:.gg/ts_links/@rljson/hash
+        version: link:.gg/ts_links/@rljson/hash
       '@rljson/io':
-        specifier: 0.0.85
-        version: 0.0.85
+        specifier: link:.gg/ts_links/@rljson/io
+        version: link:.gg/ts_links/@rljson/io
       '@rljson/json':
         specifier: 0.0.23
         version: 0.0.23
       '@rljson/rljson':
-        specifier: 0.0.86
-        version: 0.0.86
+        specifier: link:.gg/ts_links/@rljson/rljson
+        version: link:.gg/ts_links/@rljson/rljson
       '@rljson/server':
-        specifier: 0.0.77
-        version: 0.0.77
+        specifier: link:.gg/ts_links/@rljson/server
+        version: link:.gg/ts_links/@rljson/server
       bson:
         specifier: ^7.2.0
         version: 7.2.0
@@ -43,6 +49,12 @@ importers:
         specifier: ^7.1.0
         version: 7.1.0
     devDependencies:
+      '@rljson/dna-rljson':
+        specifier: link:../dna_rljson
+        version: link:../dna_rljson
+      '@tssuite/helix-js':
+        specifier: ^0.5.1
+        version: 0.5.1
       '@types/node':
         specifier: ^24.10.0
         version: 24.10.0
@@ -555,44 +567,8 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
-  '@rljson/bs@0.0.29':
-    resolution: {integrity: sha512-DXVqDc9oeyxVF75XXVuRxHi9KLFIQbw/zVQNHRYSPAvu2gWVFfzodU9CQxbgYdmMJBR9efWMoNCfvE7lB2DMew==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/db@0.1.1':
-    resolution: {integrity: sha512-a/poY4yZlmPMaf8I73CvMfB0b9YM7qyIKf89khX4gOnHaUY9ueUMfYB+oFAW8qjOhBbv8Z6dddMM1xAUd+dKUQ==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/hash@0.0.19':
-    resolution: {integrity: sha512-1bBHWbzzaOE3ba2niyvmu4d9VYv5atLzzHDI2ka3AlHLyBDD8Q9qI/HCjimULJlprIGVeN4+jN8sth4CdnGxOQ==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/io@0.0.85':
-    resolution: {integrity: sha512-gTUK3DeAd87ahApKMYDR99mTih+6pL1B/m7NheVealkTXdyvARj89JsvM0O1YBVfg2AQPCjdefMH3yK99nVUgg==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/is-ready@0.0.19':
-    resolution: {integrity: sha512-xOrzP3qX/zjHCcIjVNbSjBwWKAcMWhgIeJX9Tml0lDOrIgSIC7rgc4VZs/1DsDU+Q5Dt24lvtb2NKMZLXXaicQ==}
-    engines: {node: '>=22.14.0'}
-
   '@rljson/json@0.0.23':
     resolution: {integrity: sha512-ViYo8zx0z/SomjpS2f+xK+tS7HTwZI1HzRarHpXO3spVjpaF+GKCa7HgDXoV/Wc+zsliDzo8wz7S5NFb0yZaow==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/network@0.0.24':
-    resolution: {integrity: sha512-fNHKwSjCRxrtiFnOApxjx3jE6OBCcNzxc4qAVVRMAe+jja+R7ifh5L+AO8CChmj+LZMbfOtNeTpCegee7tF51A==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/rljson@0.0.86':
-    resolution: {integrity: sha512-8hoaeG4p8P9+Oq4eCSsg2OHvXgAh8Bzo1l3zUPfjA8Zjb0fKOViF54DoLnYhESH/gngpkrUyqZDQlXZwk6sooQ==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/server@0.0.77':
-    resolution: {integrity: sha512-FDG9rJkJJZDaH8g3uwyKVznusGkEYwBhm2r2YCwHhom7LSMwWK3m0RsDLD1R/1Szdn4VLXonbr8BLx57Cmso7A==}
-    engines: {node: '>=22.14.0'}
-
-  '@rljson/validate@0.0.12':
-    resolution: {integrity: sha512-bQMU8ao53EDl/T3thNDcbnEkLM8JRn15ncVtF8DW1TZjS/kb2xbrjDfZxVjXCouB8RsZPZh9FueVqU/s9mRXvg==}
     engines: {node: '>=22.14.0'}
 
   '@rollup/pluginutils@5.3.0':
@@ -750,6 +726,10 @@ packages:
 
   '@standard-schema/spec@1.0.0':
     resolution: {integrity: sha512-m2bOd0f2RT9k8QJx1JN85cZYyH1RqFBdlwtkSlf4tBDYLCiiZnv1fIIwacK6cqwXavOydf0NPToMQgpKq+dVlA==}
+
+  '@tssuite/helix-js@0.5.1':
+    resolution: {integrity: sha512-8i4zsO3uu3i9O8Ns5hFLVAtd3K4QiBP5v7QP7+s0an9idfC8KDt7AvuZkSZ2nh6iD5NKWN2f3ydRpblLFpv8pA==}
+    engines: {node: '>=22'}
 
   '@types/argparse@1.0.38':
     resolution: {integrity: sha512-ebDJ9b0e702Yr7pWgB0jzm+CX4Srzz8RcXtLJDJB+BSccqMa36uyH/zUsSYao5+BD1ytv3k3rPYCq4mAE1hsXA==}
@@ -1199,9 +1179,6 @@ packages:
     resolution: {integrity: sha512-YsGpe3WHLK8ZYi4tWDg2Jy3ebRz2rXowDxnld4bkQB00cc/1Zw9AWnC0i9ztDJitivtQvaI9KaLyKrc+hBW0yg==}
     engines: {node: '>=8'}
 
-  filtrex@3.1.0:
-    resolution: {integrity: sha512-mHzZ2wUISETF1OaEcNRiGz1ljuIV8c/C9td9qyAZ+wTwigkAk5RO9YrCxQKk5H9v7joDRFIBik9U5RTK9eXZ/A==}
-
   find-up@5.0.0:
     resolution: {integrity: sha512-78/PXT1wlLLDgTzDs7sjq9hzz0vXD+zn+7wypEe4fXQxCmdmqfGsEPQxmiCSQI3ajFV91bVSsvNtrJRiW6nGng==}
     engines: {node: '>=10'}
@@ -1518,11 +1495,6 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
-  nanoid@6.0.2:
-    resolution: {integrity: sha512-hIvVOb9Qr1p/9CNNLOe0OlWvgx/ziTsVwKN/GDSsuArN2K0wDiafP3s0SWmsm7o2BdnyS8Z9Z64NFBUbn6ziBg==}
-    engines: {node: ^22 || ^24 || >=26}
-    hasBin: true
-
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
 
@@ -1532,10 +1504,6 @@ packages:
 
   object-deep-merge@2.0.0:
     resolution: {integrity: sha512-3DC3UMpeffLTHiuXSy/UG4NOIYTLlY9u3V82+djSCLYClWobZiS4ivYzpIUWrRY/nfsJ8cWsKyG3QfyLePmhvg==}
-
-  object-traversal@1.0.1:
-    resolution: {integrity: sha512-aLXtM9kbcG/ePyZfB45B0FrIdu1yy3udQjIVmp2IVl2np52dBK5ZZBhdyUKFT6neCutwDhCW/kQ+e/0K5n/Jhw==}
-    engines: {node: '>=10'}
 
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
@@ -2295,61 +2263,7 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.19.1
 
-  '@rljson/bs@0.0.29':
-    dependencies:
-      '@rljson/hash': 0.0.19
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.86
-
-  '@rljson/db@0.1.1':
-    dependencies:
-      '@rljson/hash': 0.0.19
-      '@rljson/io': 0.0.85
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.86
-      '@rljson/validate': 0.0.12
-      filtrex: 3.1.0
-      object-traversal: 1.0.1
-
-  '@rljson/hash@0.0.19':
-    dependencies:
-      '@rljson/json': 0.0.23
-
-  '@rljson/io@0.0.85':
-    dependencies:
-      '@rljson/hash': 0.0.19
-      '@rljson/is-ready': 0.0.19
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.86
-      '@rljson/validate': 0.0.12
-
-  '@rljson/is-ready@0.0.19': {}
-
   '@rljson/json@0.0.23': {}
-
-  '@rljson/network@0.0.24': {}
-
-  '@rljson/rljson@0.0.86':
-    dependencies:
-      '@rljson/hash': 0.0.19
-      '@rljson/json': 0.0.23
-      nanoid: 6.0.2
-
-  '@rljson/server@0.0.77':
-    dependencies:
-      '@rljson/bs': 0.0.29
-      '@rljson/db': 0.1.1
-      '@rljson/hash': 0.0.19
-      '@rljson/io': 0.0.85
-      '@rljson/json': 0.0.23
-      '@rljson/network': 0.0.24
-      '@rljson/rljson': 0.0.86
-
-  '@rljson/validate@0.0.12':
-    dependencies:
-      '@rljson/hash': 0.0.19
-      '@rljson/json': 0.0.23
-      '@rljson/rljson': 0.0.86
 
   '@rollup/pluginutils@5.3.0(rollup@4.52.5)':
     dependencies:
@@ -2467,6 +2381,8 @@ snapshots:
   '@sindresorhus/base62@1.0.0': {}
 
   '@standard-schema/spec@1.0.0': {}
+
+  '@tssuite/helix-js@0.5.1': {}
 
   '@types/argparse@1.0.38': {}
 
@@ -3030,8 +2946,6 @@ snapshots:
     dependencies:
       to-regex-range: 5.0.1
 
-  filtrex@3.1.0: {}
-
   find-up@5.0.0:
     dependencies:
       locate-path: 6.0.0
@@ -3314,8 +3228,6 @@ snapshots:
 
   nanoid@3.3.11: {}
 
-  nanoid@6.0.2: {}
-
   natural-compare@1.4.0: {}
 
   normalize-package-data@6.0.2:
@@ -3325,8 +3237,6 @@ snapshots:
       validate-npm-package-license: 3.0.4
 
   object-deep-merge@2.0.0: {}
-
-  object-traversal@1.0.1: {}
 
   optionator@0.9.4:
     dependencies:
