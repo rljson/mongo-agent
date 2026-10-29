@@ -314,3 +314,10 @@ clone.
 After publishing an upstream package, each downstream package pins the new
 version EXPLICITLY, runs its own tests against it, and publishes from its own
 `main` before the next level starts.
+
+<!-- helix:claude_md:start -->
+
+@.claude/CLAUDE_dna_gg.md
+@.claude/CLAUDE_dna_rljson.md
+
+<!-- helix:claude_md:end -->
