@@ -1,5 +1,40 @@
 # Changelog
 
+## [Unreleased]
+
+### Document ordering is now decided by the edit chain and the hub's stamp, with the clock as a fallback — not the sole judge
+
+**What was wrong, and how it looked.** Two concurrent edits to the same
+document, from different machines, were ordered by comparing each machine's
+own wall clock (`compareTimeId`, `<millis>:<nanoid>`). Machines disagree, by
+design — and in a lab repro, a reset and the insert that followed it landed
+about 70ms apart, close enough that the faster clock simply won regardless of
+which one actually happened later. This is not specific to mongo-agent's own
+code: it is the same class of ordering bug `@rljson/fs-agent` removed in its
+own 0.2 architecture rewrite.
+
+**What now works.** `_isNewer` now decides in this order: (1) `relate()`,
+walking `EditHistory.previous`, proves whether the incoming edit causally
+descends from the one already applied (or vice versa) — no clock involved,
+and this is the common case; (2) for a genuine fork (concurrent edits from
+different lineages), the hub's own `RefStamp` on both sides, via
+`compareRefStamp` — also clock-free; (3) `compareTimeId`, same as before, only
+for what neither of the above can decide yet (no chain ref recorded for this
+document, a hole in the chain, or a fork whose stamp is not yet known on one
+or both sides). A peer running an older build, or a host whose hub does not
+stamp mongo routes, still converges exactly as it did before — nothing here
+requires a stamp to be present.
+
+Also: `MongoEditAdapter.relate()` (the chain-order primitive itself) and
+reading hub stamps end to end (`EditSyncConnector.onStamp`,
+`MongoEditSync.stampOf()`) are both new, independently usable surfaces.
+
+**Known, stated limitation.** A restart does not yet re-seed the per-document
+applied chain ref from the local store (only the applied `timeId` does) — a
+restarted node falls back to `compareTimeId` for a document until a fresh
+edit re-establishes its chain ref. Not a regression from before this change;
+tracked as natural follow-up work.
+
 ## [0.0.57]
 
 ### The mass-delete guard's "deliberate reset" flag no longer outlives its flush

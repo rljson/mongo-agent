@@ -39,7 +39,7 @@ One engine, exported from `src/index.ts`:
 | | |
 | --- | --- |
 | `MongoEditSync` | The sync. A per-lineage incremental walk over applied refs, a content-root heartbeat, live collection discovery, and a mass-delete circuit breaker |
-| `MongoEditAdapter` | Documents to and from the edit chain, ordered by per-document `timeId` — which is what makes concurrent multi-writer load converge |
+| `MongoEditAdapter` | Documents to and from the edit chain; `relate()` orders two edits by walking `EditHistory.previous` — a proven causal descent, not a clock |
 | `EditCheckpoint` | The small mutable per-collection pointer a restart needs: the content-root manifest, the change-stream resume token, and the cake head |
 
 The documents travel **inline inside the edits**. There is no tree here and no

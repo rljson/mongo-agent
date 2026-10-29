@@ -484,3 +484,147 @@ describe('MongoEditAdapter.resume', () => {
     expect(await a.resume('customers', '')).toBe(false);
   });
 });
+
+// .............................................................................
+
+describe('MongoEditAdapter.relate', () => {
+  const prefix = 'testDb';
+
+  // Two independent lineages forked from the SAME head: two adapters over one
+  // store, both resumed onto it, then each appending on its own — exactly
+  // what two nodes editing the same document while partitioned produce. Three
+  // edits BEFORE the fork (h0 -> h1 -> h2) so the common ancestry the fork
+  // shares is itself more than one entry deep — the shape that exercises the
+  // dominated-ancestor walk's own "already seen" branch (reached once via h2
+  // and again, deeper, via h1) and not just a single-level common ancestor.
+  const mkFork = async (): Promise<{
+    h0: string;
+    h1: string;
+    h2: string;
+    ha: string;
+    hb: string;
+    adapter: MongoEditAdapter;
+  }> => {
+    const p = await mkDb();
+    const root = new MongoEditAdapter(p.db, prefix);
+    await root.init(['customers']);
+    const h0 = (await root.putDoc('customers', { _id: new Int32(1), name: 'A' }))
+      ?.head as string;
+    const h1 = (await root.putDoc('customers', { _id: new Int32(1), name: 'A1' }))
+      ?.head as string;
+    const h2 = (await root.putDoc('customers', { _id: new Int32(1), name: 'A2' }))
+      ?.head as string;
+
+    const a = new MongoEditAdapter(p.db, prefix);
+    await a.init(['customers']);
+    await a.resume('customers', h2);
+    const ha = (await a.putDoc('customers', { _id: new Int32(1), name: 'Aa' }))
+      ?.head as string;
+
+    const b = new MongoEditAdapter(p.db, prefix);
+    await b.init(['customers']);
+    await b.resume('customers', h2);
+    const hb = (await b.putDoc('customers', { _id: new Int32(1), name: 'Bb' }))
+      ?.head as string;
+
+    return { h0, h1, h2, ha, hb, adapter: root };
+  };
+
+  it('answers same for one ref related to itself, without a walk', async () => {
+    const { h1, adapter } = await mkFork();
+    expect(await adapter.relate('customers', h1, h1)).toEqual({ verdict: 'same' });
+  });
+
+  it('answers behind/ahead for a descent found on either side', async () => {
+    const { h1, ha, adapter } = await mkFork();
+    expect(await adapter.relate('customers', h1, ha)).toEqual({ verdict: 'behind' });
+    expect(await adapter.relate('customers', ha, h1)).toEqual({ verdict: 'ahead' });
+  });
+
+  it('answers fork, with the nearest common ancestor as base, for two genuinely concurrent refs', async () => {
+    const { h2, ha, hb, adapter } = await mkFork();
+    expect(await adapter.relate('customers', ha, hb)).toEqual({
+      verdict: 'fork',
+      base: h2,
+    });
+    // Symmetric: it does not matter which side is "ours".
+    expect(await adapter.relate('customers', hb, ha)).toEqual({
+      verdict: 'fork',
+      base: h2,
+    });
+  });
+
+  it('answers incomplete when a row cannot be resolved and no descent was found either way', async () => {
+    const { hb, adapter } = await mkFork();
+    expect(await adapter.relate('customers', 'NOT_IN_THIS_STORE', hb)).toEqual({
+      verdict: 'incomplete',
+    });
+  });
+
+  it('answers incomplete for an unknown collection', async () => {
+    const { h1, ha, adapter } = await mkFork();
+    expect(await adapter.relate('never-initialized', h1, ha)).toEqual({
+      verdict: 'incomplete',
+    });
+  });
+
+  it('answers fork (never destructive) once the walk budget runs out before a real descent is found', async () => {
+    // A budget of 1 per side cannot reach `h1` from `ha` (one hop away) within
+    // the walk — exhausting the budget with nothing unreadable looks exactly
+    // like two refs that share no history within it, which is the documented,
+    // less-precise-but-safe answer.
+    const { h1, ha, adapter } = await mkFork();
+    expect(await adapter.relate('customers', h1, ha, 1)).toEqual({
+      verdict: 'fork',
+      base: undefined,
+    });
+  });
+
+  it('dedupes a ref reached twice within one walk, through a true multi-parent merge entry', async () => {
+    // `previous` is `string[]` precisely to allow a merge entry with more
+    // than one parent — `putDoc` never writes one today, but the walk has to
+    // handle it without re-fetching (or re-counting against the budget) a ref
+    // its OWN earlier level already resolved. Crafted directly via
+    // `Db.addEditHistory`, the one way to produce this shape right now.
+    const p = await mkDb();
+    const root = new MongoEditAdapter(p.db, prefix);
+    await root.init(['customers']);
+    const h0 = (await root.putDoc('customers', { _id: new Int32(1), name: 'A' }))
+      ?.head as string;
+    const h1 = (await root.putDoc('customers', { _id: new Int32(1), name: 'A1' }))
+      ?.head as string;
+
+    const cakeKey = root.cakeKey('customers');
+    const [h1Row] = await p.db.getEditHistories(cakeKey, h1);
+    const inserted = await p.db.addEditHistory(cakeKey, {
+      timeId: '9999999999999:zzzz',
+      multiEditRef: h1Row.multiEditRef,
+      dataRef: h1Row.dataRef,
+      // Both h1 AND its own grandparent h0 as direct parents: walking up
+      // from h1 reaches h0 too, so the second branch re-meets a ref the
+      // first branch already resolved.
+      previous: [h1, h0],
+      _hash: '',
+    } as never);
+    const mergeRef = (inserted[0] as Record<string, string>)[
+      `${cakeKey}EditHistoryRef`
+    ];
+
+    expect(await root.relate('customers', mergeRef, h0)).toEqual({
+      verdict: 'ahead',
+    });
+  });
+
+  it('falls back to an empty parent list for a common ancestor the budget cut off before resolving', async () => {
+    // Budget 3 per side resolves {ha: [h2], h2: [h1], h1: [h0]} without ever
+    // fetching h0 itself — h0 is named as a PARENT but never becomes its own
+    // key. The dominated-ancestor walk then asks for h0's own parents while
+    // computing the fork base, and must treat "never resolved" the same as
+    // "resolved with none" rather than throwing.
+    const { h2, ha, hb, adapter } = await mkFork();
+    expect(await adapter.relate('customers', ha, hb, 3)).toEqual({
+      verdict: 'fork',
+      base: h2,
+    });
+  });
+});

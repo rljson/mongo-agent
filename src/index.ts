@@ -12,9 +12,9 @@
 // still being read by anyone trying to understand how mongo syncs.
 //
 // What remains is what runs: a per-lineage incremental walk over the set of
-// applied refs, per-document `timeId` ordering (which is what makes concurrent
-// multi-writer load converge), a content-root heartbeat, and a mass-delete
-// circuit breaker.
+// applied refs, ordered by the edit chain and the hub's stamp first — with
+// per-document `timeId` only the fallback for what neither can decide — a
+// content-root heartbeat, and a mass-delete circuit breaker.
 export { MongoEditSync } from './mongo-edit-sync.ts';
 export type {
   EditSyncConnector,
@@ -25,6 +25,6 @@ export type {
   MongoManifestEntry,
 } from './mongo-edit-sync.ts';
 export { MongoEditAdapter, compareTimeId } from './mongo-edit-adapter.ts';
-export type { CollectPutsResult } from './mongo-edit-adapter.ts';
+export type { ChainRelation, CollectedPut, CollectPutsResult } from './mongo-edit-adapter.ts';
 export { EditCheckpoint } from './mongo-edit-checkpoint.ts';
 export type { EditCheckpointState } from './mongo-edit-checkpoint.ts';
