@@ -102,7 +102,19 @@ export interface CollectedPut {
    * ({@link compareTimeId}).
    */
   timeId?: string;
+  /**
+   * The `EditHistory` ref this put came from. Carries the chain position, not
+   * just the wall-clock `timeId` minted alongside it — what {@link relate}
+   * compares. `undefined` where the caller did not need it ({@link
+   * MongoEditAdapter.latestTimeIds} does not thread it through).
+   */
+  ehRef?: string;
 }
+
+/** What {@link MongoEditAdapter.relate} answers. See its doc comment. */
+export type ChainRelation =
+  | { verdict: 'same' | 'behind' | 'ahead' | 'incomplete' }
+  | { verdict: 'fork'; base: string | undefined };
 
 /**
  * Result of {@link MongoEditAdapter.collectPuts}. `complete` is `false` when the
@@ -585,11 +597,13 @@ export class MongoEditAdapter {
    * Turns a `putComponent` edit row into a {@link CollectedPut}.
    * @param edit - The edit row.
    * @param timeId - The `timeId` of the EditHistory row that carries it.
+   * @param ehRef - The `EditHistory` ref that carries it, when known.
    * @returns The put, or `undefined` when the row is not a `putComponent`.
    */
   private _putOf(
     edit: Record<string, unknown> | undefined,
     timeId: string | undefined,
+    ehRef?: string,
   ): CollectedPut | undefined {
     const action = edit?.['action'] as
       | {
@@ -607,6 +621,7 @@ export class MongoEditAdapter {
       sliceId: action.data.sliceId,
       doc: componentToDoc(action.data.component as never),
       timeId,
+      ehRef,
     };
   }
 
@@ -753,7 +768,7 @@ export class MongoEditAdapter {
     for (const node of reconstructed) {
       if (node.index < lastHole) continue;
       resolved.add(node.ehRef);
-      const put = this._putOf(node.edit, node.timeId);
+      const put = this._putOf(node.edit, node.timeId, node.ehRef);
       if (put) puts.push(put);
     }
 
@@ -774,6 +789,102 @@ export class MongoEditAdapter {
     }
 
     return { puts, complete, sealed };
+  }
+
+  /**
+   * How two `EditHistory` refs of a collection's cake relate to each other via
+   * the `previous` chain — this is the ORDER, not the `timeId` minted
+   * alongside each entry. `timeId` is a clock reading and two machines'
+   * clocks disagree; a descent proven by walking `previous` does not, because
+   * every node reads the identical chain row for the identical ref.
+   *
+   * `same` — the one ref. `behind` — `theirs` descends from `ours` (we are
+   * the older of the two). `ahead` — `ours` descends from `theirs`. A descent
+   * found is proof, whatever else in either ancestry cannot be read. `fork` —
+   * neither descends from the other: genuinely CONCURRENT edits, from
+   * different lineages, that only a stamp (never a clock) can order; `base`
+   * is a common ancestor no other common ancestor descends from, the
+   * smallest ref of them when there are several, so every node relating the
+   * same two refs picks the same base. `incomplete` — no descent was found
+   * and a row could not be read, so a fork cannot be told from a lag: the
+   * caller must not treat this as a fork.
+   *
+   * Mirrors `@rljson/fs-agent`'s `FsEditChain.relate`, adapted to mongo's
+   * per-collection cake (a flat `EditHistory` table, not a per-folder chain)
+   * and its existing batched row reads.
+   * @param collection - The collection whose cake both refs belong to.
+   * @param ours - The ref this node currently has applied.
+   * @param theirs - The ref that arrived.
+   * @param maxWalk - Give up past this many entries per side.
+   * @returns The relation, and the merge base of a fork.
+   */
+  async relate(
+    collection: string,
+    ours: string,
+    theirs: string,
+    maxWalk = this._maxWalk,
+  ): Promise<ChainRelation> {
+    if (ours === theirs) return { verdict: 'same' };
+    const meta = this._cakes.get(collection);
+    // Unknown collection: nothing to walk, and a caller treating this as a
+    // fork would be wrong in the opposite direction from a lag — incomplete
+    // says plainly that no descent could be established either way.
+    if (!meta) return { verdict: 'incomplete' };
+    const { eh: ehTable } = MongoEditAdapter._tables(meta);
+
+    const parentsOf = async (
+      head: string,
+    ): Promise<{ parents: Map<string, string[]>; holed: boolean }> => {
+      const parents = new Map<string, string[]>();
+      let holed = false;
+      let frontier = [head];
+      while (frontier.length > 0 && parents.size < maxWalk) {
+        const wanted = [...new Set(frontier)].filter(
+          (ref) => !parents.has(ref),
+        );
+        if (wanted.length === 0) break;
+        const fetched = await this._rows(ehTable, wanted);
+        const next: string[] = [];
+        for (const ref of wanted) {
+          const row = fetched.get(ref);
+          if (!row) {
+            holed = true;
+            continue;
+          }
+          const previous = (row['previous'] ?? []) as string[];
+          parents.set(ref, previous);
+          next.push(...previous);
+        }
+        frontier = next;
+      }
+      return { parents, holed };
+    };
+
+    const fromTheirs = await parentsOf(theirs);
+    if (fromTheirs.parents.has(ours)) return { verdict: 'behind' };
+    const fromOurs = await parentsOf(ours);
+    if (fromOurs.parents.has(theirs)) return { verdict: 'ahead' };
+    if (fromTheirs.holed || fromOurs.holed) return { verdict: 'incomplete' };
+
+    const common = [...fromOurs.parents.keys()].filter((ref) =>
+      fromTheirs.parents.has(ref),
+    );
+    // Every ancestor of a common ancestor is common too, so a ref met on the
+    // way down from one has been dealt with on the way down from any other —
+    // what is left after removing those is the set of ancestors nothing else
+    // common descends from.
+    const dominated = new Set<string>();
+    for (const ref of common) {
+      const stack = [...(fromOurs.parents.get(ref) as string[])];
+      while (stack.length > 0) {
+        const below = stack.pop() as string;
+        if (dominated.has(below)) continue;
+        dominated.add(below);
+        stack.push(...(fromOurs.parents.get(below) ?? []));
+      }
+    }
+    const best = common.filter((ref) => !dominated.has(ref)).sort();
+    return { verdict: 'fork', base: best[0] };
   }
 
   // ...........................................................................
@@ -849,7 +960,11 @@ export class MongoEditAdapter {
       const edRef = meRef
         ? (multiEdits.get(meRef)?.['edit'] as string | undefined)
         : undefined;
-      const put = this._putOf(edRef ? edits.get(edRef) : undefined, timeId);
+      const put = this._putOf(
+        edRef ? edits.get(edRef) : undefined,
+        timeId,
+        eh['_hash'] as string | undefined,
+      );
       if (!put) continue;
       const previous = newest.get(put.sliceId);
       if (previous && compareTimeId(timeId, previous.timeId) <= 0) continue;
