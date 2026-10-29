@@ -6,7 +6,7 @@
 // found in the LICENSE file in the root of this package.
 
 import type { Db, RefArrivalInfo } from '@rljson/db';
-import type { RefStamp } from '@rljson/rljson';
+import { compareRefStamp, type RefStamp } from '@rljson/rljson';
 import { createHash } from 'node:crypto';
 import type { Db as MongoDb, Document } from 'mongodb';
 import { ObjectId } from 'mongodb';
@@ -14,7 +14,7 @@ import { ObjectId } from 'mongodb';
 import { AE_BUCKET_COUNT, MongoAntiEntropy } from './mongo-anti-entropy.ts';
 import type { AeEntry, AntiEntropyHost } from './mongo-anti-entropy.ts';
 import { docHash } from './mongo-component-codec.ts';
-import type { CollectPutsResult } from './mongo-edit-adapter.ts';
+import type { CollectedPut, CollectPutsResult } from './mongo-edit-adapter.ts';
 import { compareTimeId, MongoEditAdapter } from './mongo-edit-adapter.ts';
 import type { EditCheckpoint } from './mongo-edit-checkpoint.ts';
 import { bucketOf as sharedBucketOf } from './mongo-manifest-hash.ts';
@@ -497,6 +497,15 @@ export class MongoEditSync {
    * snapshot adds none), so this grows with churn, not with collection size.
    */
   private readonly _appliedTimeId = new Map<string, Map<string, string>>();
+  /**
+   * `collection → sliceId → EditHistory ref` of the edit a document's current
+   * content came from — what {@link _isNewer} actually orders by now, via
+   * {@link MongoEditAdapter.relate}'s proven causal descent. `_appliedTimeId`
+   * is kept alongside as the fallback for the cases `relate` cannot decide
+   * (no ref recorded yet, a hole in the chain, or a fork with an unknown
+   * stamp on either side) rather than the sole judge it used to be.
+   */
+  private readonly _appliedEhRef = new Map<string, Map<string, string>>();
   /** `${collection}:${_id}` → component hash last written (peer-applied). */
   private readonly _appliedHash = new Map<string, string>();
   /** collection → serialized apply chain (in-flight guard). */
@@ -1127,21 +1136,111 @@ export class MongoEditSync {
   }
 
   /**
+   * The applied-`EditHistory`-ref map of a collection, created on first use.
+   * @param collection - The collection.
+   * @returns The mutable `sliceId → ehRef` map.
+   */
+  private _ehRefsOf(collection: string): Map<string, string> {
+    let ehRefs = this._appliedEhRef.get(collection);
+    if (!ehRefs) {
+      ehRefs = new Map();
+      this._appliedEhRef.set(collection, ehRefs);
+    }
+    return ehRefs;
+  }
+
+  /**
+   * Records the `EditHistory` ref of the newest edit applied to a document,
+   * evicting the oldest entry once the map is full. Sibling of
+   * {@link _setAppliedTimeId}, kept on the same bound.
+   * @param collection - The collection the document belongs to.
+   * @param id - The document `_id`.
+   * @param ehRef - The edit's `EditHistory` ref; ignored when absent (e.g. a
+   *   document adopted from a manifest-diff backfill, which never entered the
+   *   edit chain and so has none).
+   */
+  private _setAppliedEhRef(
+    collection: string,
+    id: unknown,
+    ehRef: string | undefined,
+  ): void {
+    if (!ehRef) return;
+    const ehRefs = this._ehRefsOf(collection);
+    const key = String(id);
+    ehRefs.delete(key);
+    ehRefs.set(key, ehRef);
+    while (ehRefs.size > this._maxLwwEntries) {
+      const oldest = ehRefs.keys().next().value as string;
+      ehRefs.delete(oldest);
+    }
+  }
+
+  /**
    * Whether an incoming edit is newer than the one a document already carries.
-   * An unknown `timeId` on either side is not comparable and counts as newer,
-   * so a peer running an older build still converges the way it used to.
+   *
+   * Ordered by the edit CHAIN first, never a clock, for the case the chain
+   * can actually decide: `relate()` walks `EditHistory.previous` to tell a
+   * proven causal descent (`ahead`/`behind`) from a genuine fork — a
+   * descent is the common case (the next edit to a document a node already
+   * has), and deciding it this way is exactly what replaces comparing two
+   * machines' clocks with a fact every node reads the same off the shared
+   * history.
+   *
+   * A genuine fork (concurrent edits from different lineages) prefers the
+   * hub-assigned stamp on both sides, via `compareRefStamp` — also clock-free.
+   *
+   * `compareTimeId` is now only the FALLBACK, for what chain and stamp
+   * together still cannot decide: no ref recorded yet for this document (the
+   * first edit seen for it, or one adopted from a manifest-diff backfill,
+   * which never entered the chain), a hole in the chain (`incomplete`), or a
+   * fork whose stamp is not yet known on one or both sides. A peer running an
+   * older build, or a host whose hub does not stamp this route, still
+   * converges exactly as before — nothing here requires a stamp to be
+   * present.
    * @param collection - The collection the document belongs to.
    * @param sliceId - The document's slice id.
-   * @param timeId - The incoming edit's `timeId`.
+   * @param put - The incoming edit — only `timeId` (used by every fallback)
+   *   and `ehRef` (the `EditHistory` ref, when known) are read.
    * @returns `true` when the edit may be applied.
    */
-  private _isNewer(
+  private async _isNewer(
     collection: string,
     sliceId: string,
-    timeId: string | undefined,
-  ): boolean {
-    const current = this._appliedTimeId.get(collection)?.get(sliceId);
-    return compareTimeId(timeId, current) >= 0;
+    put: Pick<CollectedPut, 'timeId' | 'ehRef'>,
+  ): Promise<boolean> {
+    const currentTimeId = this._appliedTimeId.get(collection)?.get(sliceId);
+    const currentRef = this._appliedEhRef.get(collection)?.get(sliceId);
+    if (!currentRef || !put.ehRef) {
+      return compareTimeId(put.timeId, currentTimeId) >= 0;
+    }
+    const rel = await this._adapter.relate(collection, currentRef, put.ehRef);
+    switch (rel.verdict) {
+      case 'same':
+        // The identical edit, re-arriving (an echo, a re-announced head). Old
+        // behaviour applied it again rather than skip it — `>= 0`, not `> 0`
+        // — because the re-apply is what sets `_appliedHash` to suppress the
+        // change-stream event IT causes; skipping it here left that echo
+        // unsuppressed and re-broadcast.
+        return true;
+      case 'ahead':
+        // The one we already have descends from the incoming edit — proven
+        // older, so not newer.
+        return false;
+      case 'behind':
+        // The incoming edit descends from the one we have — proven, not
+        // guessed, so this is NOT just "probably newer".
+        return true;
+      case 'incomplete':
+        return compareTimeId(put.timeId, currentTimeId) >= 0;
+      case 'fork': {
+        const oldStamp = this.stampOf(currentRef);
+        const newStamp = this.stampOf(put.ehRef);
+        if (oldStamp && newStamp) {
+          return compareRefStamp(newStamp, oldStamp) > 0;
+        }
+        return compareTimeId(put.timeId, currentTimeId) >= 0;
+      }
+    }
   }
 
   /**
@@ -1484,6 +1583,7 @@ export class MongoEditSync {
       const put = await this._adapter.putDoc(collection, this._tombstone(id));
       head = put?.head ?? null;
       this._setAppliedTimeId(collection, id, put?.timeId);
+      this._setAppliedEhRef(collection, id, put?.head);
     }
     if (head) this._connector.send(this._headRef(collection, head));
   }
@@ -2549,10 +2649,11 @@ export class MongoEditSync {
       const put = await this._adapter.putDoc(collection, doc);
       head = put?.head ?? null;
       // Our own write is the newest edit this document has, so record its
-      // timeId: without it an older put from a peer would be applied over the
-      // value we just wrote, and this node would disagree with the rest of the
-      // fleet about which edit won.
+      // timeId and its chain ref: without them an older put from a peer
+      // would be applied over the value we just wrote, and this node would
+      // disagree with the rest of the fleet about which edit won.
       this._setAppliedTimeId(collection, doc._id, put?.timeId);
+      this._setAppliedEhRef(collection, doc._id, put?.head);
     } catch (e) {
       // The doc never made it into the edit chain, so the manifest must not
       // claim it either — otherwise our broadcast content root would advertise
@@ -2737,6 +2838,7 @@ export class MongoEditSync {
       const put = await this._adapter.putDoc(collection, this._tombstone(id));
       head = put?.head ?? null;
       this._setAppliedTimeId(collection, id, put?.timeId);
+      this._setAppliedEhRef(collection, id, put?.head);
     }
     this._log(`delete flush ${collection} ${pending.size} tombstone(s) -> head=${head}`);
     if (head) this._connector.send(this._headRef(collection, head));
@@ -3052,11 +3154,14 @@ export class MongoEditSync {
     );
     for (const put of puts) {
       const doc = put.doc as Record<string, unknown> & { _id: unknown };
-      // Last writer wins, by the edit's own timeId. Every node reads the same
-      // timeId for the same edit, so every node resolves the same way — that is
-      // what makes convergence a guarantee rather than a matter of who spoke
-      // last. It is also what makes a replay harmless.
-      if (!this._isNewer(collection, put.sliceId, put.timeId)) {
+      // Ordered by the edit chain first (a proven causal descent via
+      // `previous`), the hub stamp for a genuine fork, and `timeId` only as
+      // the fallback for what neither can decide — see `_isNewer`. Every
+      // node resolves a chain descent or a known stamp the same way, which
+      // is what makes convergence a guarantee rather than a matter of who
+      // spoke last; the `timeId` fallback keeps a replay harmless exactly as
+      // before for the cases still falling back to it.
+      if (!(await this._isNewer(collection, put.sliceId, put))) {
         this._log(
           `applyHead ${collection} skip stale _id=${String(doc._id)} ` +
             `(${String(put.timeId)} not newer)`,
@@ -3064,6 +3169,7 @@ export class MongoEditSync {
         continue;
       }
       this._setAppliedTimeId(collection, doc._id, put.timeId);
+      this._setAppliedEhRef(collection, doc._id, put.ehRef);
       // Remember the applied content hash so the change-stream event this write
       // is about to emit is recognized as an echo and not re-broadcast. For a
       // tombstone the entry is one-shot: `_onDelete` prunes it once it has

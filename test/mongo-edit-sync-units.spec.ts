@@ -758,4 +758,89 @@ describe('MongoEditSync — edges reached directly', () => {
       log.mock.calls.filter((c) => String(c[0]).includes('SKIP')),
     ).toHaveLength(1);
   });
+
+  describe('_isNewer', () => {
+    const mkStamp = (n: number): { domain: string; epoch: number; hub: string; n: number } => ({
+      domain: 'd',
+      epoch: 1,
+      hub: 'h',
+      n,
+    });
+
+    it('is not newer once relate() proves the applied ref is AHEAD of the incoming one', async () => {
+      const { p } = await start();
+      p._appliedEhRef.set(COLL, new Map([['1', 'oldRef']]));
+      vi.spyOn(p._adapter, 'relate').mockResolvedValue({ verdict: 'ahead' });
+      expect(
+        await p._isNewer(COLL, '1', { timeId: '999:zzzz', ehRef: 'newRef' }),
+      ).toBe(false);
+    });
+
+    it('falls back to timeId when the chain walk is incomplete', async () => {
+      const { p } = await start();
+      p._appliedEhRef.set(COLL, new Map([['1', 'oldRef']]));
+      p._appliedTimeId.set(COLL, new Map([['1', '100:aaaa']]));
+      vi.spyOn(p._adapter, 'relate').mockResolvedValue({ verdict: 'incomplete' });
+      expect(
+        await p._isNewer(COLL, '1', { timeId: '200:bbbb', ehRef: 'newRef' }),
+      ).toBe(true);
+    });
+
+    it('falls back to timeId for a fork with no stamp known on either side', async () => {
+      const { p } = await start();
+      p._appliedEhRef.set(COLL, new Map([['1', 'oldRef']]));
+      p._appliedTimeId.set(COLL, new Map([['1', '200:aaaa']]));
+      vi.spyOn(p._adapter, 'relate').mockResolvedValue({
+        verdict: 'fork',
+        base: undefined,
+      });
+      // The incoming timeId is OLDER — the fallback must say so, not just
+      // default to true.
+      expect(
+        await p._isNewer(COLL, '1', { timeId: '100:bbbb', ehRef: 'newRef' }),
+      ).toBe(false);
+    });
+
+    it('falls back to timeId for a fork where only ONE side has a known stamp', async () => {
+      const { p } = await start();
+      p._appliedEhRef.set(COLL, new Map([['1', 'oldRef']]));
+      p._appliedTimeId.set(COLL, new Map([['1', '100:aaaa']]));
+      p._recordStamp('oldRef', mkStamp(5));
+      // 'newRef' has none.
+      vi.spyOn(p._adapter, 'relate').mockResolvedValue({
+        verdict: 'fork',
+        base: undefined,
+      });
+      expect(
+        await p._isNewer(COLL, '1', { timeId: '200:bbbb', ehRef: 'newRef' }),
+      ).toBe(true);
+    });
+
+    it('prefers the hub stamp over timeId for a fork where BOTH sides have one', async () => {
+      const { p } = await start();
+      p._appliedEhRef.set(COLL, new Map([['1', 'oldRef']]));
+      // The clock disagrees with the stamp: by timeId the incoming edit looks
+      // OLDER, but its stamp is the later one — the stamp must win.
+      p._appliedTimeId.set(COLL, new Map([['1', '999:aaaa']]));
+      p._recordStamp('oldRef', mkStamp(1));
+      p._recordStamp('newRef', mkStamp(2));
+      vi.spyOn(p._adapter, 'relate').mockResolvedValue({
+        verdict: 'fork',
+        base: undefined,
+      });
+      expect(
+        await p._isNewer(COLL, '1', { timeId: '100:bbbb', ehRef: 'newRef' }),
+      ).toBe(true);
+    });
+
+    it('evicts the oldest applied ehRef once past the LWW cap, same as the timeId map', async () => {
+      const { p } = await start();
+      p._maxLwwEntries = 1;
+      p._setAppliedEhRef(COLL, 'a', 'refA');
+      p._setAppliedEhRef(COLL, 'b', 'refB');
+      const ehRefs = p._appliedEhRef.get(COLL) as Map<string, string>;
+      expect(ehRefs.has('a')).toBe(false);
+      expect(ehRefs.get('b')).toBe('refB');
+    });
+  });
 });
