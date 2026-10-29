@@ -33,6 +33,11 @@ export type MongoEditSignalAction =
   /** NOT resolved. It stays this way until a person acts. */
   | 'required';
 
+/** Who or what chose the outcome. Mirrors fs-agent's `FsSignalDecidedBy`. */
+export type MongoEditSignalDecidedBy =
+  /** A guard refused, so nothing was chosen. */
+  'guard';
+
 /** One thing the mass-delete guard decided, in a form a program can act on. */
 export interface MongoEditSignal {
   /**
@@ -58,6 +63,8 @@ export interface MongoEditSignal {
   idCount: number;
   /** Whether a person has to do something. */
   action: MongoEditSignalAction;
+  /** How the outcome was chosen, where something chose it. */
+  decidedBy?: MongoEditSignalDecidedBy;
   /** One sentence for a person. Never a stack trace. */
   detail?: string;
 }

@@ -32,6 +32,7 @@ export { MongoEditSignals } from './mongo-edit-signals.ts';
 export type {
   MongoEditSignal,
   MongoEditSignalAction,
+  MongoEditSignalDecidedBy,
   MongoEditSignalInput,
   MongoEditSignalKind,
 } from './mongo-edit-signals.ts';

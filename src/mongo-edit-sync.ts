@@ -2704,7 +2704,18 @@ export class MongoEditSync {
     // correct for a collection that has grown or shrunk since start-up: a
     // snapshot-time baseline made the fraction guard silently inapplicable to
     // any collection that started small and later grew large.
-    const baseline = this._manifestOf(collection).size + pending.size;
+    const recent = this._recentDeletesOf(collection);
+    const windowStart = Date.now() - this._deleteWindowMs;
+    for (const [idStr, allowedAt] of recent) {
+      if (allowedAt < windowStart) recent.delete(idStr);
+    }
+    // The size before the window's first allowed delete: the cumulative count
+    // below is held against the collection as it stood then, not as it has
+    // shrunk since — otherwise the guard gets stricter than its own fraction
+    // as a burst proceeds (deleting 10 of 50, then 4 of the remaining 40, is
+    // 14 of 50 = 28%, under a 30% limit — but reads as 14 of 40 if the
+    // baseline were taken after the first step).
+    const baseline = this._manifestOf(collection).size + pending.size + recent.size;
     // Fraction guard only for collections that are non-trivial; otherwise just
     // the absolute cap (don't block small deletes).
     const limit =
@@ -2726,11 +2737,6 @@ export class MongoEditSync {
     // size recovered, it ages out on its own: an unrelated delete made once
     // the window has passed is judged on its own, not held forever for
     // sharing a collection with a burst it had nothing to do with.
-    const recent = this._recentDeletesOf(collection);
-    const windowStart = Date.now() - this._deleteWindowMs;
-    for (const [idStr, allowedAt] of recent) {
-      if (allowedAt < windowStart) recent.delete(idStr);
-    }
     const cumulative = recent.size + pending.size;
 
     if (cumulative >= limit && !announced) {
@@ -2747,7 +2753,11 @@ export class MongoEditSync {
         kind: 'deletion/refused',
         collection,
         ids: [...pending].map((id) => String(id)),
-        action: 'review',
+        // Nothing propagates and the documents come back locally — a person
+        // has to judge whether the refusal was right, same as fs-agent's own
+        // 'deletion/refused' (action: 'required', decidedBy: 'guard').
+        action: 'required',
+        decidedBy: 'guard',
         detail:
           `${pending.size} delete(s) refused in ${collection}: ${cumulative} ` +
           `deleted within the last ${this._deleteWindowMs}ms, over the ${limit} limit`,
@@ -2762,7 +2772,10 @@ export class MongoEditSync {
       // resurrecting it. Only reached once this id's delete is confirmed
       // NOT blocked — see `_onDelete`.
       this._recordTombstone(collection, id);
-      recent.set(String(id), Date.now());
+      // A deliberate (announced) wipe is not part of any drip: counting it
+      // here would refuse every ordinary delete in this collection for the
+      // rest of the window.
+      if (!announced) recent.set(String(id), Date.now());
       const put = await this._adapter.putDoc(collection, this._tombstone(id));
       head = put?.head ?? null;
       this._setAppliedTimeId(collection, id, put?.timeId);

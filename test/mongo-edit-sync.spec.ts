@@ -2193,19 +2193,105 @@ describe('MongoEditSync', () => {
       ids: readonly string[];
       idCount: number;
       action: string;
+      decidedBy: string;
     };
     expect(live.kind).toBe('deletion/refused');
     expect(live.collection).toBe('customers');
     expect(live.idCount).toBe(3);
     expect([...live.ids].sort()).toEqual(expectedIds);
-    expect(live.action).toBe('review');
+    // 'required', not 'review' — nothing propagates and the docs come back
+    // locally; a person has to judge whether the refusal itself was right.
+    expect(live.action).toBe('required');
+    expect(live.decidedBy).toBe('guard');
 
     expect(sync.signals()).toHaveLength(1);
     expect(sync.signals()[0]).toEqual(live);
     expect(sync.signalTotals()).toEqual({ 'deletion/refused': 1 });
-    // 'review', not 'required' — nothing is unrecoverable: anti-entropy
-    // simply converges this node back from a peer that still has the docs.
-    expect(sync.signalsNeedingAction()).toEqual([]);
+    expect(sync.signalsNeedingAction()).toEqual([live]);
+
+    await sync.stop();
+  });
+
+  it('[review] lets a single delete through right after an announced reset', async () => {
+    // The lab runs the guard at 5, and every test-area reset announces its
+    // wipe. The reset's ids must not count against the next ordinary delete.
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    process.env['SL_EDIT_DELETE_ABS_MAX'] = '5';
+    const docs = Array.from({ length: 9 }, (_, i) => ({ _id: new Int32(i) }));
+    const cols = { customers: new FakeCollection(docs) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    const heads = () =>
+      conn.send.mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .filter((r: string) => !r.startsWith('~R~'));
+    const deleteIds = async (ids: number[]) => {
+      conn.send.mockClear();
+      for (const i of ids) {
+        cols.customers.stream.emit({
+          operationType: 'delete',
+          documentKey: { _id: new Int32(i) },
+        });
+      }
+      await tick(40);
+    };
+
+    // The announced reset: 8 of 9 documents, deliberately.
+    sync.expectMassDelete('customers');
+    await deleteIds([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(heads().length).toBeGreaterThan(0);
+
+    // Moments later, one ordinary delete still has to propagate.
+    await deleteIds([8]);
+    expect(heads().length).toBeGreaterThan(0);
+
+    await sync.stop();
+  });
+
+  it('[review] judges the window against the size before it, so 28 % in two steps passes', async () => {
+    // 50 documents, 30 %: deleting 10 and then 4 is 14 of 50 within the
+    // window — under the limit. The size after the first step (40) must not
+    // shrink the limit the cumulative count is held against.
+    process.env['SL_EDIT_DELETE_DEBOUNCE_MS'] = '10';
+    process.env['SL_EDIT_DELETE_FRACTION'] = '0.3';
+    const docs = Array.from({ length: 50 }, (_, i) => ({ _id: new Int32(i) }));
+    const cols = { customers: new FakeCollection(docs) };
+    const conn = mkConnector();
+    const sync = new MongoEditSync(
+      new FakeMongoDb(cols) as never,
+      await mkRljsonDb(),
+      conn,
+      ['customers'],
+      'p',
+    );
+    await sync.start();
+    const heads = () =>
+      conn.send.mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .filter((r: string) => !r.startsWith('~R~'));
+    const deleteIds = async (ids: number[]) => {
+      conn.send.mockClear();
+      for (const i of ids) {
+        cols.customers.stream.emit({
+          operationType: 'delete',
+          documentKey: { _id: new Int32(i) },
+        });
+      }
+      await tick(40);
+    };
+
+    await deleteIds([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(heads().length).toBeGreaterThan(0);
+
+    await deleteIds([10, 11, 12, 13]);
+    expect(heads().length).toBeGreaterThan(0);
 
     await sync.stop();
   });
