@@ -2,4 +2,4 @@
 // Kept in sync by test/mongo_agent_version.spec.ts.
 
 /** The version of the `@rljson/mongo-agent` package. */
-export const mongoAgentVersion = '0.0.58';
+export const mongoAgentVersion = '0.0.59';
