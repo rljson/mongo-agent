@@ -26,6 +26,8 @@ query
 # Any file/script starting with an underscore is treated as a per-laptop
 # scratch/diagnostic dump (insert scripts, peek tools, hash run logs, …).
 _*
+# ...but not the DNA's config and manifest (helix needs both in git)
+!dna/_*.json
 *.run.out
 *.run.err
 baseline-out.log

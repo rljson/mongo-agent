@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "layers": [
+    {
+      "name": "base",
+      "package": "helix",
+      "ecosystem": null,
+      "resolvedVersion": "1.13.0",
+      "via": null,
+      "hash": "0x6883da335b415f9d"
+    },
+    {
+      "name": "self",
+      "package": null,
+      "ecosystem": null,
+      "resolvedVersion": null,
+      "via": null,
+      "hash": null
+    }
+  ],
+  "claude": {
+    "claudeMdInclude": null,
+    "claudeMdFromDna": false
+  },
+  "baseVersion": "1.13.0",
+  "baseHash": "0x6883da335b415f9d",
+  "instances": []
+}
