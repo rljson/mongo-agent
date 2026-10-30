@@ -523,6 +523,75 @@ export class MongoEditChain {
   }
 
   /**
+   * The entries between an ancestor and a descendant, oldest first — what a
+   * `behind` apply (see `mongo-apply-behind.ts`) must replay to turn the
+   * ancestor's state into the descendant's.
+   *
+   * Collects every entry `descendant` descends from, down to (but not
+   * including) `ancestor`, then orders them so each entry follows every ref
+   * in its own `previous` — the order a replay must write them in, so a
+   * later entry's `changed`/`removed` for the same id is what ends up
+   * applied, matching the chain's own history. A merge entry whose other
+   * parent lies outside what was collected can never become ready, so the
+   * order is also a completeness check: {@link relate}'s `behind` only
+   * proves ONE path exists, not that every entry it passes through was
+   * reached inside `maxWalk`.
+   * @param collection - The collection.
+   * @param ancestor - The head already applied; not included in the result.
+   * @param descendant - The head to reach.
+   * @param maxWalk - Give up past this many entries.
+   * @returns The entries in replay order, or `undefined` when `descendant`
+   *   cannot be shown to descend from `ancestor` within `maxWalk`, or an
+   *   entry along the way could not be read.
+   */
+  async path(
+    collection: string,
+    ancestor: string,
+    descendant: string,
+    maxWalk = DEFAULT_MAX_WALK,
+  ): Promise<MongoChainEntry[] | undefined> {
+    if (ancestor === descendant) return [];
+
+    const collected = new Map<string, MongoChainEntry>();
+    let reached = false;
+    let frontier = [descendant];
+    while (frontier.length > 0 && collected.size < maxWalk) {
+      const wanted = [...new Set(frontier)].filter(
+        (ref) => ref !== ancestor && !collected.has(ref),
+      );
+      if (wanted.length === 0) break;
+      const next: string[] = [];
+      for (const ref of wanted) {
+        const entry = await this.entry(collection, ref);
+        if (!entry) return undefined;
+        collected.set(ref, entry);
+        for (const p of entry.previous) {
+          if (p === ancestor) reached = true;
+          else next.push(p);
+        }
+      }
+      frontier = next;
+    }
+    if (!reached) return undefined;
+
+    const placed = new Set<string>([ancestor]);
+    const ordered: MongoChainEntry[] = [];
+    const remaining = new Map(collected);
+    while (remaining.size > 0) {
+      const ready = [...remaining.values()]
+        .filter((e) => e.previous.every((p) => placed.has(p)))
+        .sort((a, b) => a.head.localeCompare(b.head));
+      if (ready.length === 0) return undefined;
+      for (const entry of ready) {
+        ordered.push(entry);
+        placed.add(entry.head);
+        remaining.delete(entry.head);
+      }
+    }
+    return ordered;
+  }
+
+  /**
    * Every entry this node's own head descends from, itself included.
    *
    * Cached on the head it was computed for. Announcements arrive in bursts

@@ -367,6 +367,149 @@ describe('MongoEditChain.relate', () => {
   });
 });
 
+describe('MongoEditChain.path', () => {
+  const prefix = 'testDb';
+  const collection = 'customers';
+
+  it('answers an empty path for a ref related to itself', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    expect(await chain.path(collection, h0, h0)).toEqual([]);
+  });
+
+  it('answers the linear path between an ancestor and a descendant, oldest first', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    const h1 = (
+      await chain.append(collection, { snapshotRef: 's1', previous: [h0] })
+    ).head;
+    const h2 = (
+      await chain.append(collection, { snapshotRef: 's2', previous: [h1] })
+    ).head;
+    const ha = (
+      await chain.append(collection, { snapshotRef: 'sa', previous: [h2] })
+    ).head;
+
+    const path = await chain.path(collection, h0, ha);
+    expect(path?.map((e) => e.head)).toEqual([h1, h2, ha]);
+  });
+
+  it('answers undefined when the descendant does not descend from the ancestor', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    const ha = (
+      await chain.append(collection, { snapshotRef: 'sa', previous: [h0] })
+    ).head;
+    const hb = (
+      await chain.append(collection, { snapshotRef: 'sb', previous: [h0] })
+    ).head;
+    expect(await chain.path(collection, ha, hb)).toBeUndefined();
+  });
+
+  it('answers undefined when an entry along the way cannot be read', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    const holed = (
+      await chain.append(collection, {
+        snapshotRef: 'sg',
+        previous: ['NOT_IN_THIS_STORE'],
+      })
+    ).head;
+    expect(await chain.path(collection, h0, holed)).toBeUndefined();
+  });
+
+  it('answers undefined (never partial) once the walk budget runs out before reaching the ancestor', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    const h1 = (
+      await chain.append(collection, { snapshotRef: 's1', previous: [h0] })
+    ).head;
+    const h2 = (
+      await chain.append(collection, { snapshotRef: 's2', previous: [h1] })
+    ).head;
+    expect(await chain.path(collection, h0, h2, 1)).toBeUndefined();
+  });
+
+  it('replays a genuine two-parent merge, both branches resolved before the merge itself', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    const c1 = (
+      await chain.append(collection, { snapshotRef: 'c1', previous: [h0] })
+    ).head;
+    const c2 = (
+      await chain.append(collection, { snapshotRef: 'c2', previous: [h0] })
+    ).head;
+    const merge = (
+      await chain.append(collection, { snapshotRef: 'merge', previous: [c1, c2] })
+    ).head;
+
+    const path = await chain.path(collection, h0, merge);
+    expect(path).toHaveLength(3);
+    expect(path?.at(-1)?.head).toBe(merge);
+    expect(path?.slice(0, 2).map((e) => e.head).sort()).toEqual([c1, c2].sort());
+  });
+
+  it('settles a frontier emptied by a duplicate re-visit without derailing a merge that also reaches the ancestor directly', async () => {
+    // top names BOTH h2 and h1 as direct parents. Walking up from top visits
+    // h2 and h1 in the same batch; h2's own walk re-queues h1 a second time,
+    // so the next frontier is [h1] again — but h1 is already collected by
+    // then, which empties `wanted` while the frontier itself is non-empty.
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    const h1 = (
+      await chain.append(collection, { snapshotRef: 's1', previous: [h0] })
+    ).head;
+    const h2 = (
+      await chain.append(collection, { snapshotRef: 's2', previous: [h1] })
+    ).head;
+    const top = (
+      await chain.append(collection, { snapshotRef: 'top', previous: [h2, h1] })
+    ).head;
+
+    const path = await chain.path(collection, h0, top);
+    expect(path?.map((e) => e.head)).toEqual([h1, h2, top]);
+  });
+
+  it('answers undefined for a merge whose other branch lies outside the walk budget', async () => {
+    const { db } = await mkDb();
+    const chain = new MongoEditChain(db, prefix);
+    await chain.init(collection);
+    const h0 = (await chain.append(collection, { snapshotRef: 's0', previous: [] }))
+      .head;
+    // An independent lineage — a valid, readable entry, but one `path` never
+    // gets to visit before its walk budget of 1 is spent on the merge itself.
+    const other = (
+      await chain.append(collection, { snapshotRef: 'other', previous: [] })
+    ).head;
+    const merge = (
+      await chain.append(collection, { snapshotRef: 'merge', previous: [h0, other] })
+    ).head;
+
+    expect(await chain.path(collection, h0, merge, 1)).toBeUndefined();
+  });
+});
+
 // .............................................................................
 
 describe('MongoEditChain.ownLineage', () => {
