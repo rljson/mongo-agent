@@ -26,6 +26,8 @@ query
 # Any file/script starting with an underscore is treated as a per-laptop
 # scratch/diagnostic dump (insert scripts, peek tools, hash run logs, …).
 _*
+# ...but not the DNA's config and manifest (helix needs both in git)
+!dna/_*.json
 *.run.out
 *.run.err
 baseline-out.log
@@ -46,7 +48,8 @@ test-agent.js
 test-hub.js
 
 # Claude Code agent settings (per-developer)
-.claude/
+# Personal Claude Code settings only; the DNA places the shared .claude/ files
+.claude/settings.local.json
 
 # UI install logs (per-laptop)
 ui-conflict-resolver/_install.*
