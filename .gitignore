@@ -48,7 +48,8 @@ test-agent.js
 test-hub.js
 
 # Claude Code agent settings (per-developer)
-.claude/
+# Personal Claude Code settings only; the DNA places the shared .claude/ files
+.claude/settings.local.json
 
 # UI install logs (per-laptop)
 ui-conflict-resolver/_install.*
